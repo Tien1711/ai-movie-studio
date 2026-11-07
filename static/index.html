@@ -878,6 +878,7 @@
           <div class="card-header" style="margin-bottom:14px;">
             <div class="card-title">🗂️ Trạng thái từng cảnh (Batch Matrix)</div>
             <div style="display:flex;gap:12px;align-items:center;">
+              <button id="btnToggleTaskMatrix" class="btn btn-ghost btn-sm" onclick="toggleTaskMatrix()" title="Thu gọn/mở rộng bảng trạng thái từng cảnh">🔽 Thu gọn</button>
               <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:0;" title="Tự động phân tích lý do Muse từ chối và viết lại prompt an toàn chuẩn Hollywood">
                 <input type="checkbox" id="chkAutoFixPrompt" checked style="accent-color:var(--accent);">
                 <span>🪄 Tự động sửa Prompt các cảnh lỗi</span>
@@ -888,6 +889,7 @@
             </div>
           </div>
           <div class="task-grid" id="taskMatrix"></div>
+          <div id="taskMatrixCompact" class="task-matrix-compact" style="display:none;"></div>
         </div>
 
         <!-- Log console -->

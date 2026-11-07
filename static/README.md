@@ -160,3 +160,28 @@ can kiem tra thu cong theo checklist tren truoc khi dua len production.
 - Gioi han: chua ap dung keo-tha cho Shot Desk project (chi panel Tao phim);
   chua kiem tra bang trinh duyet that (VM khong co headless browser); reorder
   doi ten file clip tren dia nen job dang co final video se bi danh dau cu.
+## Affiliate continuity — chain sequential + Product DNA lock + 10s chuẩn
+- **Render nối tiếp:** `/api/affiliate/render` luôn đặt `chain_mode="sequential"` cho
+  `MovieRequest` affiliate (xem `app.py: api_render_affiliate`). Cảnh sau dùng last
+  frame cảnh trước làm first frame, giữ tay/sản phẩm/bối cảnh đồng nhất.
+  Trade-off: render tuần tự nên wall-time ≈ tổng thời gian từng cảnh (5 cảnh ≈ 5 lần
+  1 cảnh), chậm hơn song song — đổi lại video bán hàng không bị trôi sản phẩm.
+  Cảnh 1 giữ nguyên `reference_image` sản phẩm user đưa vào; cảnh sau bị ghi đè
+  bằng last frame (chủ đích). Nếu 1 cảnh lỗi, cảnh sau render độc lập
+  (`chain_fallback_mode="independent"` mặc định).
+- **Product DNA lock:** `build_product_dna_lock()` trong `affiliate_engine.py` dựng
+  khối `[PRODUCT CONTINUITY LOCK — ...]` từ tên sản phẩm (EN + giữ tên gốc),
+  tính năng chính, neo liên tục theo kiểu quay (tay/bàn/bối cảnh/KOC) và style_tag
+  ngành hàng; dán nguyên văn vào cuối prompt MỌI cảnh (local + AI: LLM được yêu
+  cầu dán nguyên văn, hậu xử lý append lại nếu thiếu). `validate_affiliate_script()`
+  kiểm tra cảnh nào thiếu lock/tên sản phẩm.
+- **Chuẩn 10s:** mọi cảnh affiliate `duration=10` (đúng clip API 10s trả về) —
+  script local, hậu xử lý AI và render đều ép 10 kể cả khi script cũ gửi duration
+  khác. Clip được dùng trọn vẹn, không cắt đuôi, không loop. Thoại mỗi cảnh nên
+  25–30 từ tiếng Việt để đọc vừa 10s; thoại dài hơn thì CHỈ cảnh báo trong
+  `marketing_notes`, không cắt lặng lẽ — khi đó compose vẫn kéo dài cảnh theo độ
+  dài audio (clip loop cho đủ) như cơ chế cũ.
+- **UI:** ô thời lượng từng cảnh affiliate cố định 10s (không sửa được). Khi job có
+  video cuối, card video affiliate nổi bật ở đầu panel affiliate và Batch Matrix
+  (panel Monitor) tự thu gọn thành dải tiến độ compact (pill ✅/❌/▶️/⌛ từng cảnh),
+  bấm "Mở rộng" để xem lại từng cảnh; job mới bắt đầu thì mở lại đầy đủ.
