@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments & Virtual Environments
+.env
+.env.local
+.venv/
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Workspaces & Render Output Data
+workspace/
+temp_frames/
+_tmp/
+data/
+*.mp4
+*.mp3
+*.wav
+*.m4a
+*.srt
+*.jpg
+*.jpeg
+*.png
+*.webp
+!static/
+!static/**
+
+# Test scratch artifacts
+test_concat.txt
+
+# Editor & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
