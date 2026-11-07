@@ -82,6 +82,106 @@ def to_slug(text: str) -> str:
 
 ALLOWED_FRAME_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".avif"}
 
+# Thư mục workspace của repo (dùng làm gốc cho mọi kiểm tra path an toàn).
+WORKSPACE_ROOT = (Path(__file__).parent / "workspace").resolve()
+# Số bản backup project.json hỏng tối đa được giữ lại.
+_MAX_JSON_BACKUPS = 5
+# Giới hạn đọc file tham chiếu (ảnh first/last frame) vào RAM.
+_MAX_REFERENCE_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
+# Giới hạn tải video clip thành phẩm.
+_MAX_VIDEO_DOWNLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+# Thư mục nhạc nền hợp lệ (bên trong workspace).
+_ALLOWED_MUSIC_ROOT_NAMES = ("_music", "_uploads")
+
+
+def _resolve_muse2api_key(api_key: Optional[str]) -> str:
+    """Resolve API key cho Muse2API: tham số truyền vào > env MUSE2API_KEY.
+
+    Không còn giá trị mặc định hardcode: thiếu key thì raise lỗi cấu hình rõ
+    ràng thay vì gọi API với key giả rồi mới nhận 401.
+    """
+    key = (api_key or "").strip() if isinstance(api_key, str) else ""
+    if not key:
+        key = (os.getenv("MUSE2API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError(
+            "Thiếu cấu hình MUSE2API_KEY: đặt biến môi trường MUSE2API_KEY "
+            "(hoặc truyền api_key tường minh) trước khi render qua Muse2API."
+        )
+    return key
+
+
+def _read_file_b64_capped(path: Path, max_bytes: int = _MAX_REFERENCE_FILE_BYTES) -> str:
+    """Đọc file theo chunk (không nạp cả file lớn vào RAM một lần) và trả base64.
+
+    Raise ValueError nếu file vượt giới hạn — tránh OOM khi manifest trỏ tới
+    file tham chiếu bất thường.
+    """
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"File tham chiếu quá lớn ({size} bytes > {max_bytes} bytes): {path.name}")
+    chunks = []
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return base64.b64encode(b"".join(chunks)).decode("ascii")
+
+
+def _parse_shot_duration(value: Any, default: int = 10) -> int:
+    """Parse duration của shot: không parse được thì dùng default + log warning.
+
+    Tránh crash import ZIP sau khi đã giải nén xong (project mồ côi).
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        try:
+            parsed = int(float(value))  # chấp nhận "10.0"
+        except (TypeError, ValueError):
+            print(f"[ShotDesk] Warning: duration không hợp lệ ({value!r}), dùng mặc định {default}s.")
+            return default
+    if parsed <= 0:
+        print(f"[ShotDesk] Warning: duration không hợp lệ ({value!r}), dùng mặc định {default}s.")
+        return default
+    return parsed
+
+
+def resolve_safe_bg_music_path(value: Any, project_id: Optional[str] = None) -> Optional[Path]:
+    """Validate bg_music_path: chỉ cho phép file nằm trong workspace.
+
+    Cho phép: workspace/_music, workspace/_uploads, hoặc thư mục của chính
+    project đang dựng (workspace/_shot_desk_projects/<project_id>).
+    Cấm: đường dẫn tuyệt đối ngoài workspace và mọi dạng ../ thoát ra ngoài.
+    Trả về Path đã resolve, hoặc None nếu value rỗng.
+    Raise ValueError nếu path không hợp lệ / không tồn tại.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        # Path tương đối được hiểu là tương đối so với workspace.
+        candidate = WORKSPACE_ROOT / candidate
+    resolved = candidate.resolve()
+    allowed_roots = [WORKSPACE_ROOT / name for name in _ALLOWED_MUSIC_ROOT_NAMES]
+    if project_id:
+        allowed_roots.append(SHOT_DESK_DIR / str(project_id))
+    if not any(resolved.is_relative_to(root) for root in allowed_roots):
+        raise ValueError(
+            f"bg_music_path không hợp lệ (chỉ cho phép file trong workspace/_music, "
+            f"workspace/_uploads hoặc thư mục project): {raw}"
+        )
+    if not resolved.exists() or not resolved.is_file():
+        raise ValueError(f"bg_music_path không tồn tại hoặc không phải file: {raw}")
+    if resolved.suffix.lower() not in {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}:
+        raise ValueError(f"bg_music_path không phải file nhạc hỗ trợ (.mp3/.wav/.m4a/.aac/.ogg/.flac): {raw}")
+    return resolved
+
 def resolve_safe_frame_path(proj_dir: Path, frame_rel_path: Optional[str]) -> Optional[Path]:
     """
     Resolve frame path từ manifest project.json an toàn:
@@ -237,8 +337,12 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
         shots_data = []
         aspect_ratio = manifest.get("aspect_ratio", "9:16")
 
-        for s in manifest.get("shots", []):
-            idx = s.get("index", 1)
+        for i, s in enumerate(manifest.get("shots", [])):
+            try:
+                idx = int(s.get("index", i + 1))
+            except (TypeError, ValueError):
+                print(f"[ShotDesk] Warning: shot index không hợp lệ ({s.get('index')!r}), dùng vị trí {i + 1}.")
+                idx = i + 1
             shot_dir = proj_dir / "shots" / f"shot_{idx:03d}"
             shot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -266,7 +370,7 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
             shot_item = {
                 "index": idx,
                 "title": s.get("title") or f"Shot {idx}",
-                "duration": int(s.get("duration", manifest.get("shot_duration", 10))),
+                "duration": _parse_shot_duration(s.get("duration", manifest.get("shot_duration", 10)), default=10),
                 "prompt": s.get("prompt", ""),
                 "compliance_prompt": s.get("compliance_prompt"),
                 "risk_level": s.get("risk_level", "low"),
@@ -311,8 +415,8 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
             "aspect_ratio": aspect_ratio,
             "default_voice": manifest.get("default_voice", "vi-VN-HoaiMyNeural"),
             "default_voice_mode": manifest.get("default_voice_mode", "narration"),
-            "total_duration": manifest.get("total_duration", len(shots_data) * 10),
-            "shot_duration": manifest.get("shot_duration", 10),
+            "total_duration": _parse_shot_duration(manifest.get("total_duration", len(shots_data) * 10), default=len(shots_data) * 10),
+            "shot_duration": _parse_shot_duration(manifest.get("shot_duration", 10), default=10),
             "characters": characters,
             "shots": shots_data,
             "created_at": int(time.time()),
@@ -334,14 +438,45 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
         return project_state
 
 
+def _backup_json_file(p_file: Path) -> Optional[Path]:
+    """Backup file JSON gốc sang <tên>.bak.<timestamp> trước khi cắt/sửa.
+
+    Giữ tối đa _MAX_JSON_BACKUPS bản mới nhất; bản cũ hơn bị xóa.
+    Trả về đường dẫn backup, hoặc None nếu backup thất bại.
+    """
+    try:
+        stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}-{time.time_ns() % 1_000_000:06d}"
+        backup = p_file.with_name(f"{p_file.name}.bak.{stamp}")
+        shutil.copy2(p_file, backup)
+        pattern = f"{p_file.name}.bak.*"
+        backups = sorted(p_file.parent.glob(pattern), key=lambda p: p.stat().st_mtime)
+        for old in backups[: -_MAX_JSON_BACKUPS]:
+            try:
+                old.unlink()
+            except Exception:
+                pass
+        return backup
+    except Exception as e:
+        print(f"[ShotDesk] Warning: không backup được {p_file}: {e}")
+        return None
+
+
 def load_project_json_safe(p_file: Path) -> Optional[Dict[str, Any]]:
-    """Đọc project.json an toàn, tự động khắc phục nếu file bị dính ký tự thừa ở cuối (JSON extra data)."""
+    """Đọc project.json an toàn, tự động khắc phục nếu file bị dính ký tự thừa ở cuối (JSON extra data).
+
+    Trước khi cắt/sửa JSON hỏng: backup file gốc sang <tên>.bak.<timestamp>.
+    Chỉ cắt khi parse thất bại, chỉ ghi đè khi dữ liệu cắt xong parse lại
+    thành công VÀ là dict. Nếu data không phải dict thì trả lỗi (None) thay
+    vì để save_shot_desk_project gọi project.get gây AttributeError.
+    Nếu cắt thất bại thì trả lỗi, file gốc (đã backup) được giữ nguyên.
+    """
     if not p_file.exists():
         return None
     try:
         with open(p_file, "r", encoding="utf-8") as f:
             return json.load(f)
     except json.JSONDecodeError as jde:
+        backup = _backup_json_file(p_file)
         try:
             with open(p_file, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -349,14 +484,23 @@ def load_project_json_safe(p_file: Path) -> Optional[Dict[str, Any]]:
             while last_brace != -1:
                 try:
                     data = json.loads(content[:last_brace + 1])
-                    print(f"[ShotDesk] Đã tự động sửa lỗi JSON extra data cho {p_file.parent.name}")
-                    save_shot_desk_project(data)
+                    if not isinstance(data, dict):
+                        print(f"[ShotDesk] Lỗi định dạng JSON tại {p_file}: dữ liệu sau khi cắt không phải object (kiểu {type(data).__name__}), giữ nguyên file gốc (backup: {backup}).")
+                        return None
+                    print(f"[ShotDesk] Đã tự động sửa lỗi JSON extra data cho {p_file.parent.name} (backup: {backup})")
+                    try:
+                        save_shot_desk_project(data)
+                    except Exception as save_err:
+                        print(f"[ShotDesk] Không ghi đè được project.json đã sửa ({save_err}); giữ nguyên file gốc (backup: {backup}).")
+                        return None
                     return data
+                except json.JSONDecodeError:
+                    last_brace = content[:last_brace].rfind("}")
                 except Exception:
                     last_brace = content[:last_brace].rfind("}")
         except Exception:
             pass
-        print(f"[ShotDesk] Lỗi định dạng JSON tại {p_file}: {jde}")
+        print(f"[ShotDesk] Lỗi định dạng JSON tại {p_file}: {jde} (file gốc giữ nguyên, backup: {backup})")
         return None
     except Exception as e:
         print(f"[ShotDesk] Lỗi đọc {p_file}: {e}")
@@ -364,6 +508,14 @@ def load_project_json_safe(p_file: Path) -> Optional[Dict[str, Any]]:
 
 
 def get_shot_desk_project(project_id: str) -> Optional[Dict[str, Any]]:
+    # TODO (audit §1.7): việc chuyển trạng thái rendering -> ready/review khi
+    # GET /status KHÔNG nằm ở hàm này mà ở endpoint status trong app.py
+    # (ngoài phạm vi refactor lần này): endpoint đó tự đổi trạng thái rồi save
+    # mà không có bằng chứng render xong ngoài "clip file tồn tại". Hàm này
+    # chỉ sửa URL frame (idempotent) và KHÔNG tự đổi trạng thái shot nào.
+    # Khi sửa app.py, chỉ chuyển rendering -> review khi clip hợp lệ VÀ shot
+    # không còn trong ACTIVE_SHOT_TASKS, và chuyển -> ready chỉ khi có bằng
+    # chứng tiến trình đã chết (không chỉ vì poll GET).
     if not project_id or not re.match(r"^[a-zA-Z0-9_\-]+$", project_id):
         return None
     proj_dir = (SHOT_DESK_DIR / project_id).resolve()
@@ -372,52 +524,63 @@ def get_shot_desk_project(project_id: str) -> Optional[Dict[str, Any]]:
     p_file = proj_dir / "project.json"
     if not p_file.exists():
         return None
-    try:
-        proj = load_project_json_safe(p_file)
-        if not proj:
+    # Giữ per-project lock trong toàn bộ read-modify-write (load -> sửa URL
+    # frame -> save khi dirty) để render song song không mất update của nhau.
+    # Lock là RLock nên save_shot_desk_project() bên trong vẫn lấy lại được.
+    lock = get_sync_project_lock(project_id)
+    with lock:
+        try:
+            proj = load_project_json_safe(p_file)
+            if not proj:
+                return None
+            if not isinstance(proj, dict):
+                print(f"[ShotDesk] project.json không phải object dict: {p_file}")
+                return None
+
+            # Tự động đồng bộ và sửa URL frame nếu file thực tế có đuôi mở rộng khác (.jpg, .png, ...)
+            dirty = False
+            for s in proj.get("shots", []):
+                idx = s.get("index", 1)
+                shot_dir = proj_dir / "shots" / f"shot_{idx:03d}"
+                for k_file, k_url in (("first_frame", "first_frame_url"),
+                                      ("middle_frame", "middle_frame_url"),
+                                      ("last_frame", "last_frame_url")):
+                    ref = s.get(k_file)
+                    if ref:
+                        fp = resolve_safe_frame_path(proj_dir, ref)
+                        # Nếu file tham chiếu ban đầu không tồn tại, kiểm tra trong shot_dir
+                        if not fp and shot_dir.exists():
+                            stem = Path(ref).name.split(".")[0]
+                            cands = [f for f in shot_dir.glob(f"{stem}.*") if f.is_file() and f.suffix.lower() in ALLOWED_FRAME_EXTENSIONS]
+                            if cands:
+                                fp = cands[0]
+                                s[k_file] = f"shots/shot_{idx:03d}/{fp.name}"
+                                dirty = True
+                        if fp:
+                            correct_url = f"/api/shot-desk/projects/{project_id}/shots/{idx}/frames/{fp.name}"
+                            if s.get(k_url) != correct_url:
+                                s[k_url] = correct_url
+                                dirty = True
+
+            proj["final_dir"] = str((proj_dir / "final").resolve())
+            if dirty:
+                save_shot_desk_project(proj)
+            return proj
+        except Exception as e:
+            print(f"[ShotDesk] Error reading project {project_id}: {e}")
             return None
-
-        # Tự động đồng bộ và sửa URL frame nếu file thực tế có đuôi mở rộng khác (.jpg, .png, ...)
-        dirty = False
-        for s in proj.get("shots", []):
-            idx = s.get("index", 1)
-            shot_dir = proj_dir / "shots" / f"shot_{idx:03d}"
-            for k_file, k_url in (("first_frame", "first_frame_url"),
-                                  ("middle_frame", "middle_frame_url"),
-                                  ("last_frame", "last_frame_url")):
-                ref = s.get(k_file)
-                if ref:
-                    fp = resolve_safe_frame_path(proj_dir, ref)
-                    # Nếu file tham chiếu ban đầu không tồn tại, kiểm tra trong shot_dir
-                    if not fp and shot_dir.exists():
-                        stem = Path(ref).name.split(".")[0]
-                        cands = [f for f in shot_dir.glob(f"{stem}.*") if f.is_file() and f.suffix.lower() in ALLOWED_FRAME_EXTENSIONS]
-                        if cands:
-                            fp = cands[0]
-                            s[k_file] = f"shots/shot_{idx:03d}/{fp.name}"
-                            dirty = True
-                    if fp:
-                        correct_url = f"/api/shot-desk/projects/{project_id}/shots/{idx}/frames/{fp.name}"
-                        if s.get(k_url) != correct_url:
-                            s[k_url] = correct_url
-                            dirty = True
-
-        proj["final_dir"] = str((proj_dir / "final").resolve())
-        if dirty:
-            save_shot_desk_project(proj)
-        return proj
-    except Exception as e:
-        print(f"[ShotDesk] Error reading project {project_id}: {e}")
-        return None
 
 
 _global_sync_lock = threading.Lock()
-_sync_project_locks: Dict[str, threading.Lock] = {}
+_sync_project_locks: Dict[str, threading.RLock] = {}
 
-def get_sync_project_lock(project_id: str) -> threading.Lock:
+def get_sync_project_lock(project_id: str) -> threading.RLock:
+    # RLock (không phải Lock): get_shot_desk_project() giữ lock trong toàn bộ
+    # read-modify-write và save_shot_desk_project() bên trong cần lấy lại
+    # cùng lock trên cùng thread — dùng Lock thường sẽ deadlock.
     with _global_sync_lock:
         if project_id not in _sync_project_locks:
-            _sync_project_locks[project_id] = threading.Lock()
+            _sync_project_locks[project_id] = threading.RLock()
         return _sync_project_locks[project_id]
 
 
@@ -453,14 +616,18 @@ async def update_shot_state(project_id: str, shot_index: int, updates: Dict[str,
     """Cập nhật nguyên tử trạng thái của 1 shot trong project, an toàn khi render đa luồng song song."""
     lock = get_project_lock(project_id)
     async with lock:
-        latest = get_shot_desk_project(project_id)
-        if not latest:
-            return
-        for s in latest.get("shots", []):
-            if s["index"] == shot_index:
-                s.update(updates)
-                break
-        save_shot_desk_project(latest)
+        # Giữ thêm per-project sync lock (RLock) trong toàn bộ read-modify-write
+        # để các hàm sync (approve/edit) không chen vào giữa lúc get và save.
+        sync_lock = get_sync_project_lock(project_id)
+        with sync_lock:
+            latest = get_shot_desk_project(project_id)
+            if not latest:
+                return
+            for s in latest.get("shots", []):
+                if s["index"] == shot_index:
+                    s.update(updates)
+                    break
+            save_shot_desk_project(latest)
 
 
 
@@ -494,7 +661,7 @@ async def render_single_shot_desk(
     project_id: str,
     shot_index: int,
     base_url: str = "http://localhost:18610",
-    api_key: str = "m2a_studio_secret_2026",
+    api_key: Optional[str] = None,
     use_compliance: bool = False,
     custom_prompt: Optional[str] = None,
     progress_cb: Optional[Any] = None,
@@ -509,7 +676,12 @@ async def render_single_shot_desk(
     4. Compliance Fallback: Tự động dùng compliance_prompt nếu prompt chính bị từ chối
     5. Sinh TTS lời thoại tiếng Việt và ghép clip hoàn chỉnh
     6. Chuyển trạng thái sang 'review' (Màn hình Review Desk của Đạo diễn)
+
+    api_key: None -> resolve từ env MUSE2API_KEY tại thời điểm gọi; thiếu key
+    thì raise RuntimeError cấu hình rõ ràng, không gọi API với key giả.
     """
+    # Resolve key NGAY ĐẦU, trước mọi công việc render/TTS/API.
+    api_key = _resolve_muse2api_key(api_key)
     proj = get_shot_desk_project(project_id)
     if not proj:
         raise ValueError(f"Không tìm thấy dự án Shot Desk '{project_id}'")
@@ -539,9 +711,9 @@ async def render_single_shot_desk(
     middle_frame_path = resolve_safe_frame_path(proj_dir, shot.get("middle_frame"))
     last_frame_path = resolve_safe_frame_path(proj_dir, shot.get("last_frame"))
 
-    # Tỉ lệ và thời lượng
+    # Tỉ lệ và thời lượng (duration lỗi thì dùng 10s + log, không crash)
     aspect_ratio = proj.get("aspect_ratio", "9:16")
-    total_shot_dur = int(shot.get("duration", 10))
+    total_shot_dur = _parse_shot_duration(shot.get("duration", 10), default=10)
 
     audio_out_path = str(proj_dir / "audio" / f"shot_{shot_index:03d}_tts.mp3")
     final_clip_out = str(proj_dir / "clips" / f"shot_{shot_index:03d}_clip.mp4")
@@ -642,9 +814,9 @@ async def render_single_shot_desk(
                 resolved_ref = ref_path.resolve()
                 if resolved_ref.is_relative_to(proj_dir.resolve()) and resolved_ref.suffix.lower() in ALLOWED_FRAME_EXTENSIONS:
                     mime = mimetypes.guess_type(str(resolved_ref))[0] or "image/png"
-                    with open(resolved_ref, "rb") as rf:
-                        b64 = base64.b64encode(rf.read()).decode("ascii")
-                        payload["reference_image"] = f"data:{mime};base64,{b64}"
+                    # Đọc theo chunk + giới hạn size thay vì nạp hết vào RAM.
+                    b64 = _read_file_b64_capped(resolved_ref)
+                    payload["reference_image"] = f"data:{mime};base64,{b64}"
             except Exception as e:
                 print(f"[ShotDesk] Warning reading reference frame: {e}")
 
@@ -654,12 +826,12 @@ async def render_single_shot_desk(
                 resolved_last = end_ref_path.resolve()
                 if resolved_last.is_relative_to(proj_dir.resolve()) and resolved_last.suffix.lower() in ALLOWED_FRAME_EXTENSIONS:
                     mime_last = mimetypes.guess_type(str(resolved_last))[0] or "image/png"
-                    with open(resolved_last, "rb") as rfl:
-                        b64_last = base64.b64encode(rfl.read()).decode("ascii")
-                        uri_last = f"data:{mime_last};base64,{b64_last}"
-                        payload["last_frame"] = uri_last
-                        payload["tail_image"] = uri_last
-                        payload["end_image"] = uri_last
+                    # Đọc theo chunk + giới hạn size thay vì nạp hết vào RAM.
+                    b64_last = _read_file_b64_capped(resolved_last)
+                    uri_last = f"data:{mime_last};base64,{b64_last}"
+                    payload["last_frame"] = uri_last
+                    payload["tail_image"] = uri_last
+                    payload["end_image"] = uri_last
             except Exception as e:
                 print(f"[ShotDesk] Warning reading last frame: {e}")
 
@@ -689,11 +861,28 @@ async def render_single_shot_desk(
             v_url = await poll_video_task(client, tid, base_url, headers, shot_index, progress_cb)
 
             raw_video_path = str(proj_dir / "clips" / f"shot_{shot_index:03d}_raw.mp4")
-            r_vid = await client.get(v_url, timeout=120.0)
-            if r_vid.status_code != 200 or len(r_vid.content) < 100:
-                raise RuntimeError(f"Tải video clip thất bại (HTTP {r_vid.status_code}): {r_vid.text[:200]}")
-            with open(raw_video_path, "wb") as fv:
-                fv.write(r_vid.content)
+            # Tải video theo chunk (stream) + giới hạn size, không nạp hết vào RAM.
+            downloaded = 0
+            async with client.stream("GET", v_url, timeout=120.0) as r_vid:
+                if r_vid.status_code != 200:
+                    raise RuntimeError(f"Tải video clip thất bại (HTTP {r_vid.status_code})")
+                declared = r_vid.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) > _MAX_VIDEO_DOWNLOAD_BYTES:
+                            raise RuntimeError(f"Video clip quá lớn ({declared} bytes > {_MAX_VIDEO_DOWNLOAD_BYTES} bytes), từ chối tải.")
+                    except ValueError:
+                        pass
+                with open(raw_video_path, "wb") as fv:
+                    async for chunk in r_vid.aiter_bytes(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        downloaded += len(chunk)
+                        if downloaded > _MAX_VIDEO_DOWNLOAD_BYTES:
+                            raise RuntimeError(f"Video clip vượt giới hạn {_MAX_VIDEO_DOWNLOAD_BYTES} bytes khi đang tải.")
+                        fv.write(chunk)
+            if downloaded < 100:
+                raise RuntimeError(f"Tải video clip thất bại (chỉ nhận được {downloaded} bytes).")
             _trim_video_to_duration(Path(raw_video_path), float(total_shot_dur))
             video_source_path = raw_video_path
 
@@ -805,113 +994,121 @@ async def render_single_shot_desk(
 
 def approve_shot_desk_shot(project_id: str, shot_index: int) -> Dict[str, Any]:
     """Đạo diễn bấm Approve duyệt shot để đưa vào Timeline dựng phim cuối cùng."""
-    proj = get_shot_desk_project(project_id)
-    if not proj:
-        raise ValueError("Không tìm thấy project")
-    target = None
-    for s in proj.get("shots", []):
-        if s["index"] == shot_index:
-            target = s
-            break
-    if not target:
-        raise ValueError("Không tìm thấy shot")
+    # Giữ per-project lock trong toàn bộ read-modify-write (get -> sửa -> save).
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError("Không tìm thấy project")
+        target = None
+        for s in proj.get("shots", []):
+            if s["index"] == shot_index:
+                target = s
+                break
+        if not target:
+            raise ValueError("Không tìm thấy shot")
 
-    target["status"] = "approved"
-    target["error"] = None
-    save_shot_desk_project(proj)
-    return {"success": True, "shot": target}
+        target["status"] = "approved"
+        target["error"] = None
+        save_shot_desk_project(proj)
+        return {"success": True, "shot": target}
 
 
 def approve_all_shot_desk_shots(project_id: str, only_with_video: bool = True) -> Dict[str, Any]:
     """Phê duyệt hàng loạt các cảnh (mặc định chỉ duyệt các cảnh đã có video clip thành phẩm hoặc ở trạng thái review)."""
-    proj = get_shot_desk_project(project_id)
-    if not proj:
-        raise ValueError("Không tìm thấy project")
+    # Giữ per-project lock trong toàn bộ read-modify-write (get -> sửa -> save).
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError("Không tìm thấy project")
 
-    proj_dir = (SHOT_DESK_DIR / project_id).resolve()
-    clips_dir = proj_dir / "clips"
-    approved_shots = []
+        proj_dir = (SHOT_DESK_DIR / project_id).resolve()
+        clips_dir = proj_dir / "clips"
+        approved_shots = []
 
-    for s in proj.get("shots", []):
-        if s.get("status") in ("approved", "done"):
-            continue
+        for s in proj.get("shots", []):
+            if s.get("status") in ("approved", "done"):
+                continue
 
-        idx = s.get("index")
-        clip_p = clips_dir / f"shot_{idx:03d}_clip.mp4"
-        raw_p = clips_dir / f"shot_{idx:03d}_raw.mp4"
-        has_video = (clip_p.exists() and clip_p.stat().st_size > 500) or (raw_p.exists() and raw_p.stat().st_size > 500) or bool(s.get("video_url"))
+            idx = s.get("index")
+            clip_p = clips_dir / f"shot_{idx:03d}_clip.mp4"
+            raw_p = clips_dir / f"shot_{idx:03d}_raw.mp4"
+            has_video = (clip_p.exists() and clip_p.stat().st_size > 500) or (raw_p.exists() and raw_p.stat().st_size > 500) or bool(s.get("video_url"))
 
-        if only_with_video:
-            if s.get("status") == "review" or has_video:
+            if only_with_video:
+                if s.get("status") == "review" or has_video:
+                    s["status"] = "approved"
+                    s["error"] = None
+                    if not s.get("video_url") and clip_p.exists():
+                        s["video_url"] = f"/api/shot-desk/projects/{project_id}/shots/{idx}/video"
+                    approved_shots.append(idx)
+            else:
                 s["status"] = "approved"
                 s["error"] = None
-                if not s.get("video_url") and clip_p.exists():
-                    s["video_url"] = f"/api/shot-desk/projects/{project_id}/shots/{idx}/video"
                 approved_shots.append(idx)
-        else:
-            s["status"] = "approved"
-            s["error"] = None
-            approved_shots.append(idx)
 
-    if approved_shots:
-        save_shot_desk_project(proj)
+        if approved_shots:
+            save_shot_desk_project(proj)
 
-    return {
-        "success": True,
-        "approved_count": len(approved_shots),
-        "approved_indices": approved_shots,
-        "total_shots": len(proj.get("shots", []))
-    }
+        return {
+            "success": True,
+            "approved_count": len(approved_shots),
+            "approved_indices": approved_shots,
+            "total_shots": len(proj.get("shots", []))
+        }
 
 
 def edit_shot_desk_shot(project_id: str, shot_index: int, updates: Dict[str, Any]) -> Dict[str, Any]:
     """Chỉnh sửa prompt, compliance_prompt, lời thoại, thời lượng, voice_mode, voice, speaker, lip_sync của 1 shot."""
-    proj = get_shot_desk_project(project_id)
-    if not proj:
-        raise ValueError("Không tìm thấy project")
-    target = None
-    for s in proj.get("shots", []):
-        if s["index"] == shot_index:
-            target = s
-            break
-    if not target:
-        raise ValueError("Không tìm thấy shot")
+    # Giữ per-project lock trong toàn bộ read-modify-write (get -> sửa -> save).
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError("Không tìm thấy project")
+        target = None
+        for s in proj.get("shots", []):
+            if s["index"] == shot_index:
+                target = s
+                break
+        if not target:
+            raise ValueError("Không tìm thấy shot")
 
-    for k in ["prompt", "compliance_prompt", "voiceover", "duration", "transition_note", "voice_mode", "speaker", "voice", "lip_sync"]:
-        if k in updates:
-            target[k] = updates[k]
+        for k in ["prompt", "compliance_prompt", "voiceover", "duration", "transition_note", "voice_mode", "speaker", "voice", "lip_sync"]:
+            if k in updates:
+                target[k] = updates[k]
 
-    # Nếu sửa prompt hoặc yêu cầu reset thì đặt lại trạng thái về ready để render lại
-    if updates.get("reset_status", True):
-        target["status"] = "ready"
+        # Nếu sửa prompt hoặc yêu cầu reset thì đặt lại trạng thái về ready để render lại
+        if updates.get("reset_status", True):
+            target["status"] = "ready"
 
-    save_shot_desk_project(proj)
-    return {"success": True, "shot": target}
+        save_shot_desk_project(proj)
+        return {"success": True, "shot": target}
 
 
 def update_shot_desk_project_settings(project_id: str, settings: Dict[str, Any]) -> Dict[str, Any]:
     """Cập nhật cấu hình toàn dự án (giọng đọc mặc định, chế độ thuyết minh / khớp môi thoại)."""
-    proj = get_shot_desk_project(project_id)
-    if not proj:
-        raise ValueError(f"Không tìm thấy dự án '{project_id}'")
+    # Giữ per-project lock trong toàn bộ read-modify-write (get -> sửa -> save).
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError(f"Không tìm thấy dự án '{project_id}'")
 
-    if "default_voice" in settings and settings["default_voice"]:
-        proj["default_voice"] = settings["default_voice"]
-    if "default_voice_mode" in settings and settings["default_voice_mode"]:
-        proj["default_voice_mode"] = settings["default_voice_mode"]
+        if "default_voice" in settings and settings["default_voice"]:
+            proj["default_voice"] = settings["default_voice"]
+        if "default_voice_mode" in settings and settings["default_voice_mode"]:
+            proj["default_voice_mode"] = settings["default_voice_mode"]
 
-    if settings.get("apply_to_all_shots"):
-        new_voice = proj.get("default_voice", "vi-VN-HoaiMyNeural")
-        new_mode = proj.get("default_voice_mode", "narration")
-        is_dialogue = (new_mode == "dialogue")
-        for s in proj.get("shots", []):
-            s["voice"] = new_voice
-            s["voice_mode"] = new_mode
-            s["lip_sync"] = is_dialogue
+        if settings.get("apply_to_all_shots"):
+            new_voice = proj.get("default_voice", "vi-VN-HoaiMyNeural")
+            new_mode = proj.get("default_voice_mode", "narration")
+            is_dialogue = (new_mode == "dialogue")
+            for s in proj.get("shots", []):
+                s["voice"] = new_voice
+                s["voice_mode"] = new_mode
+                s["lip_sync"] = is_dialogue
 
-    proj["updated_at"] = int(time.time())
-    save_shot_desk_project(proj)
-    return {"success": True, "project": proj}
+        proj["updated_at"] = int(time.time())
+        save_shot_desk_project(proj)
+        return {"success": True, "project": proj}
 
 
 # ── 4. Timeline Hậu Kỳ: Ghép Các Shot Đã Duyệt Thành Phim Hoàn Chỉnh ──────────
@@ -939,6 +1136,21 @@ def compose_shot_desk_timeline(
     proj = get_shot_desk_project(project_id)
     if not proj:
         raise ValueError("Không tìm thấy project")
+
+    # Validate bg_music_path NGAY ĐẦU (kể cả giá trị lưu trong project):
+    # chỉ cho phép file trong workspace/_music, workspace/_uploads hoặc thư
+    # mục của chính project này. Giá trị truyền vào sai -> lỗi rõ ràng;
+    # giá trị đã lưu sai -> cảnh báo + bỏ qua (không dùng nhạc lậu ngoài workspace).
+    validated_bgm: Optional[Path] = None
+    if bg_music_path is not None:
+        validated_bgm = resolve_safe_bg_music_path(bg_music_path, project_id)
+    else:
+        stored_bgm = proj.get("timeline_settings", {}).get("bg_music_path")
+        if stored_bgm:
+            try:
+                validated_bgm = resolve_safe_bg_music_path(stored_bgm, project_id)
+            except ValueError as e:
+                print(f"[ShotDesk] Warning: bg_music_path đã lưu không hợp lệ, bỏ qua: {e}")
 
     proj_dir = SHOT_DESK_DIR / project_id
     shots = proj.get("shots", [])
@@ -1097,8 +1309,8 @@ def compose_shot_desk_timeline(
     final_mp4_name = f"{slug}_{ts}.mp4"
     final_mp4_path = final_dir / final_mp4_name
 
-    active_bgm = bg_music_path or proj.get("timeline_settings", {}).get("bg_music_path")
-    active_bgm_str = str(active_bgm) if (active_bgm and os.path.exists(str(active_bgm))) else None
+    active_bgm = validated_bgm
+    active_bgm_str = str(active_bgm) if active_bgm is not None else None
 
     mix_multitrack_timeline(
         video_path=video_to_bgm,
@@ -1126,20 +1338,27 @@ def compose_shot_desk_timeline(
     except Exception:
         pass
 
-    # Cập nhật trạng thái project
-    proj["final_video"] = f"/api/shot-desk/projects/{project_id}/final-video/{final_mp4_name}"
-    proj["srt_file"] = f"/api/shot-desk/projects/{project_id}/subtitles/{srt_filename}"
-    proj["timeline_settings"].update({
-        "music_volume": music_volume,
-        "voice_volume": voice_volume,
-        "bg_music_path": active_bgm,
-        "subtitle_mode": subtitle_mode,
-        "export_quality": quality
-    })
-    for s in valid_shots:
-        s["status"] = "done"
-
-    save_shot_desk_project(proj)
+    # Cập nhật trạng thái project — compose chạy lâu nên project trên đĩa có
+    # thể đã đổi (render/approve song song). Đọc lại dưới per-project lock
+    # rồi mới merge kết quả, tránh ghi đè mất update của luồng khác.
+    # TODO: nếu project bị xóa giữa chừng thì latest=None -> giữ proj cũ.
+    with get_sync_project_lock(project_id):
+        latest = get_shot_desk_project(project_id) or proj
+        latest["final_video"] = f"/api/shot-desk/projects/{project_id}/final-video/{final_mp4_name}"
+        latest["srt_file"] = f"/api/shot-desk/projects/{project_id}/subtitles/{srt_filename}"
+        latest.setdefault("timeline_settings", {}).update({
+            "music_volume": music_volume,
+            "voice_volume": voice_volume,
+            "bg_music_path": str(active_bgm) if active_bgm is not None else None,
+            "subtitle_mode": subtitle_mode,
+            "export_quality": quality
+        })
+        done_indices = {s["index"] for s in valid_shots}
+        for s in latest.get("shots", []):
+            if s.get("index") in done_indices:
+                s["status"] = "done"
+        save_shot_desk_project(latest)
+        proj = latest
 
     if progress_cb:
         progress_cb(100, "🎉 Dựng phim hoàn tất 100%!")

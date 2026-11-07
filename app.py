@@ -11,19 +11,22 @@ FastAPI backend:
 import asyncio
 import base64
 import json
+import logging
 import os
 import mimetypes
 import re
 import shutil
+import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiofiles
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks, UploadFile, File, HTTPException
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -45,9 +48,171 @@ from affiliate_engine import (
 
 load_dotenv()
 
+logger = logging.getLogger("ai_movie_studio")
+
 # ── Cấu hình ──────────────────────────────────────────────────────────────
 MUSE_API_URL = os.getenv("MUSE2API_URL", "http://localhost:18610")
-MUSE_API_KEY = os.getenv("MUSE2API_KEY", "m2a_your_secret_key")
+# SECURITY (audit §2.2): KHÔNG còn default key hardcode. Key chỉ lấy từ env
+# MUSE2API_KEY (fallback MUSE_API_KEY). Nếu thiếu, MUSE_API_KEY=None và:
+#  - endpoint gọi Muse trực tiếp trả 503 rõ ràng (xem require_muse_key()),
+#  - pipeline render (film/retry/single) đánh dấu job error với message rõ ràng
+#    thay vì gọi gateway bằng key giả. KHÔNG dùng key mặc định dưới mọi hình thức.
+MUSE_API_KEY: Optional[str] = os.getenv("MUSE2API_KEY") or os.getenv("MUSE_API_KEY") or None
+if not MUSE_API_KEY:
+    logger.warning(
+        "MUSE2API_KEY/MUSE_API_KEY chưa được đặt — các endpoint gọi Muse sẽ trả "
+        "503 (config error) cho tới khi cấu hình key. KHÔNG dùng key mặc định.")
+
+
+def require_muse_key() -> str:
+    """Trả về Muse API key, hoặc raise 503 nếu chưa cấu hình (không key giả)."""
+    if not MUSE_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Muse API key chưa được cấu hình: đặt MUSE2API_KEY trong môi trường rồi khởi động lại server.",
+        )
+    return MUSE_API_KEY
+
+
+# ── Concurrency guards (audit §1.6) ───────────────────────────────────────
+# Một threading.Lock duy nhất bảo vệ mọi mutation của JOBS (cả async path và
+# sync/thread path đều chạm vào dict này). Chỉ giữ lock trong đoạn ngắn,
+# KHÔNG await khi đang giữ lock.
+JOBS_LOCK = threading.Lock()
+# job_id -> asyncio.Task của pipeline đang chạy (để cancel thật, xem api_cancel_job).
+JOB_TASKS: Dict[str, "asyncio.Task"] = {}
+# Rate-limit: tối đa _RATE_LIMIT_REQUESTS request /api/* mỗi _RATE_LIMIT_WINDOW_S
+# cho mỗi IP (bộ nhớ tiến trình; không thêm dependency slowapi/redis).
+_RATE_LIMIT_REQUESTS = 300
+_RATE_LIMIT_WINDOW_S = 60.0
+_rate_limit_buckets: Dict[str, list] = {}  # ip -> [window_start_monotonic, count]
+_RATE_LIMIT_LOCK = threading.Lock()
+_AUTH_WARNING_LOGGED = False
+
+
+async def _send_json_via_asgi(send, status: int, payload: Dict[str, Any], extra_headers=None):
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = [[b"content-type", b"application/json"]]
+    if extra_headers:
+        headers.extend(extra_headers)
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+class _RateLimitMiddleware:
+    """Giới hạn 300 request/phút/IP cho /api/* (bộ nhớ tiến trình), vượt -> 429.
+    Pure-ASGI passthrough: không đọc/đệm body nên không ảnh hưởng SSE/stream."""
+
+    def __init__(self, app, limit: int = _RATE_LIMIT_REQUESTS, window: float = _RATE_LIMIT_WINDOW_S):
+        self.app = app
+        self.limit = limit
+        self.window = window
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not str(scope.get("path", "")).startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client") or ("unknown", 0)
+        ip = str(client[0]) if client else "unknown"
+        now = time.monotonic()
+        with _RATE_LIMIT_LOCK:
+            bucket = _rate_limit_buckets.get(ip)
+            if bucket is None or now - bucket[0] >= self.window:
+                _rate_limit_buckets[ip] = [now, 1]
+                allowed = True
+            else:
+                bucket[1] += 1
+                allowed = bucket[1] <= self.limit
+        if not allowed:
+            await _send_json_via_asgi(
+                send, 429, {"error": "Too many requests, thử lại sau ít phút."},
+                extra_headers=[[b"retry-after", b"60"]])
+            return
+        await self.app(scope, receive, send)
+
+
+class _ApiKeyAuthMiddleware:
+    """Auth tối thiểu cho /api/* (audit §2.1).
+    - Nếu env STUDIO_API_KEY được đặt: bắt buộc header X-API-Key khớp, sai/thiếu -> 401.
+    - Nếu chưa đặt: cho qua + log warning 1 lần ("auth disabled for local dev").
+      Frontend tĩnh gửi header này qua apiFetch() (static/js/app.js, lấy key
+      từ localStorage 'ams-api-key'); xem GET /api/auth/status để biết
+      server có bắt buộc key không.
+    - Miễn: "/" , "/health", "/api/health và "/api/jobs/{id}/sse" (EventSource của
+      trình duyệt không gửi được custom header; miễn SSE để khỏi vỡ frontend —
+      SSE chỉ lộ tiến độ/log của job_id, chấp nhận rủi ro này; TODO: cho SSE
+      nhận api_key qua query param khi frontend hỗ trợ).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        if not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+        if path in ("/api/health", "/api/auth/status") or (path.startswith("/api/jobs/") and path.endswith("/sse")):
+            await self.app(scope, receive, send)
+            return
+        expected = os.getenv("STUDIO_API_KEY")
+        if not expected:
+            global _AUTH_WARNING_LOGGED
+            if not _AUTH_WARNING_LOGGED:
+                _AUTH_WARNING_LOGGED = True
+                logger.warning(
+                    "STUDIO_API_KEY chưa được đặt — auth cho /api/* đang TẮT "
+                    "(local dev). Đặt STUDIO_API_KEY để bắt buộc header X-API-Key.")
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        if headers.get("x-api-key") != expected:
+            await _send_json_via_asgi(
+                send, 401, {"error": "Thiếu hoặc sai header X-API-Key"})
+            return
+        await self.app(scope, receive, send)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Một httpx.AsyncClient dùng chung (connection pooling, audit §3.3) +
+    load persisted jobs 1 lần lúc startup (audit §1.5)."""
+    app.state.http_client = httpx.AsyncClient()
+    try:
+        load_all_persisted_jobs()
+    except Exception as exc:  # startup không được chết vì job_state hỏng
+        logger.warning("Không load được persisted jobs lúc startup: %s", exc)
+    yield
+    client = getattr(app.state, "http_client", None)
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+def get_http_client() -> httpx.AsyncClient:
+    """Client dùng chung từ lifespan. Fallback: tạo 1 client lười khi chạy ngoài
+    lifespan (vd TestClient không dùng context manager, gọi hàm trực tiếp).
+    KHÔNG dùng `async with get_http_client()` — sẽ đóng client dùng chung."""
+    client = getattr(app.state, "http_client", None)
+    if client is None:
+        client = httpx.AsyncClient()
+        app.state.http_client = client
+    return client
+
+
+@asynccontextmanager
+async def _shared_client_ctx():
+    """Yield client dùng chung mà KHÔNG đóng nó khi rời context (để dùng chung
+    với code cũ dạng `async with ... as client:` mà không sửa indent).
+    Timeout phải truyền theo từng request (vd timeout=45.0), vì client dùng
+    chung không mang timeout riêng của từng call site cũ."""
+    yield get_http_client()
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "12"))
 WORKSPACE = Path("workspace")
 WORKSPACE.mkdir(exist_ok=True)
@@ -110,8 +275,46 @@ def resolve_safe_music_path(filename: str) -> Path:
     return target
 
 # ── FastAPI App ────────────────────────────────────────────────────────────
-app = FastAPI(title="AI Movie Studio", version="1.0.0")
+app = FastAPI(title="AI Movie Studio", version="1.0.0", lifespan=lifespan)
+app.add_middleware(_ApiKeyAuthMiddleware)
+app.add_middleware(_RateLimitMiddleware)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+class StrKeyDict(dict):
+    """Dict mà mọi key đều được chuẩn hoá về str khi truy cập.
+
+    JSON đổi key int -> str khi lưu job_state.json (audit §1.2), nên
+    job["scenes"][1] và job["scenes"]["1"] phải trỏ cùng một entry dù job
+    đang ở bộ nhớ (key int) hay vừa restore từ đĩa (key str). Dùng class này
+    cho job["scenes"] thay vì dict thường để mọi code cũ truy cập trực tiếp
+    bằng int hay str đều đúng, không cần sửa từng call site.
+    """
+
+    @staticmethod
+    def _norm(key):
+        return str(key)
+
+    def __getitem__(self, key):
+        return super().__getitem__(self._norm(key))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(self._norm(key), value)
+
+    def __delitem__(self, key):
+        super().__delitem__(self._norm(key))
+
+    def __contains__(self, key):
+        return super().__contains__(self._norm(key))
+
+    def get(self, key, default=None):
+        return super().get(self._norm(key), default)
+
+    def pop(self, key, *args):
+        return super().pop(self._norm(key), *args)
+
+    def setdefault(self, key, default=None):
+        return super().setdefault(self._norm(key), default)
+
 
 # ── Job State ──────────────────────────────────────────────────────────────
 # job_id → state dict
@@ -123,7 +326,7 @@ def new_job(job_id: str, total_scenes: int, req: Optional[Any] = None) -> Dict:
         "id": job_id,
         "status": "running",          # running | done | error
         "progress": 0,                # 0-100
-        "scenes": {},                 # idx → {status, msg}
+        "scenes": StrKeyDict(),       # idx → {status, msg} (key luôn str, xem StrKeyDict)
         "total": total_scenes,
         "logs": [],
         "final_video": None,
@@ -132,7 +335,8 @@ def new_job(job_id: str, total_scenes: int, req: Optional[Any] = None) -> Dict:
         "req": req,
         "results": [],
     }
-    JOBS[job_id] = state
+    with JOBS_LOCK:
+        JOBS[job_id] = state
     return state
 
 
@@ -145,20 +349,22 @@ def job_log(job: Dict, msg: str):
 # ── Pydantic Models ────────────────────────────────────────────────────────
 class VoiceSegment(BaseModel):
     """Một đoạn thoại của 1 nhân vật trong cảnh."""
-    character: str = ""          # Tên nhân vật (hiển thị)
-    text: str                    # Nội dung lời thoại
-    voice: str                   # Giọng edge-tts cho nhân vật này
+    character: str = Field(default="", max_length=200)  # Tên nhân vật (hiển thị)
+    text: str = Field(max_length=5000)                  # Nội dung lời thoại
+    voice: str = Field(max_length=200)                  # Giọng edge-tts cho nhân vật này
 
 
 class SceneItem(BaseModel):
     index: int
-    prompt: str
-    voiceover: str = ""          # Lời thuyết minh đơn giản (dùng khi không có voice_segments)
-    voice: str = ""              # Giọng riêng cho cảnh này (override global voice)
+    prompt: str = Field(max_length=5000)
+    voiceover: str = Field(default="", max_length=5000)  # Lời thuyết minh đơn giản (dùng khi không có voice_segments)
+    voice: str = Field(default="", max_length=200)       # Giọng riêng cho cảnh này (override global voice)
     voice_mode: Optional[str] = None # "tts" | "ai_voice"
-    voice_segments: List[VoiceSegment] = []   # Nhiều nhân vật với giọng khác nhau
-    duration: int = 5
-    size: str = "16:9"
+    voice_segments: List[VoiceSegment] = Field(default=[], max_length=20)  # Nhiều nhân vật với giọng khác nhau
+    # duration: engine (batch_engine/process_scene) nhận int giây cho /v1/videos;
+    # giới hạn 1-60s để 1 request không kéo tài nguyên quá mức (audit §2.9).
+    duration: int = Field(default=5, ge=1, le=60)
+    size: str = Field(default="16:9", max_length=10)
     reference_image: Optional[str] = None    # Ảnh tham chiếu nhân vật (URL hoặc base64 Data URL)
     chain_from_previous: Optional[bool] = False # First/Last Frame Chaining: kế thừa khung hình cuối của cảnh trước
     sheet_angle: Optional[str] = "front"        # "front" | "side" | "closeup" | "fullbody"
@@ -166,45 +372,147 @@ class SceneItem(BaseModel):
 
 
 class MovieRequest(BaseModel):
-    title: str = "my_movie"
-    voice: str = "vi-VN-HoaiMyNeural"   # Giọng mặc định toàn phim
+    title: str = Field(default="my_movie", max_length=200)
+    voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=200)  # Giọng mặc định toàn phim
     voice_mode: Optional[str] = "tts"    # "tts" | "ai_voice" (đưa thoại vào prompt để AI tự sinh tiếng)
-    font_size: int = 22
-    aspect_ratio: Optional[str] = "16:9" # Tỉ lệ khung hình toàn phim (16:9, 9:16, 1:1, 21:9, 4:3)
-    export_mode: str = "full"            # "full" | "batch_clips"
-    max_concurrent: Optional[int] = 12
+    font_size: int = Field(default=22, ge=8, le=72)
+    aspect_ratio: Optional[str] = Field(default="16:9", max_length=10)  # Tỉ lệ khung hình toàn phim (16:9, 9:16, 1:1, 21:9, 4:3)
+    export_mode: str = Field(default="full", max_length=20)  # "full" | "batch_clips"
+    max_concurrent: Optional[int] = Field(default=12, ge=1, le=12)
     chain_mode: Optional[str] = "none"   # "none" | "sequential"
     chain_fallback_mode: Optional[str] = "independent" # "independent" | "fallback_image" | "stop"
     bg_music_path: Optional[str] = None
-    music_volume: Optional[float] = 0.25
-    voice_volume: Optional[float] = 1.0
-    subtitle_mode: Optional[str] = "burn_in"  # "burn_in" | "srt_only" | "none"
-    quality: Optional[str] = "720p"           # "preview" | "720p" | "1080p"
-    transition: Optional[str] = "none"        # "none" | "fade" | "dissolve"
+    music_volume: Optional[float] = Field(default=0.25, ge=0.0, le=2.0)
+    voice_volume: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
+    subtitle_mode: Optional[str] = Field(default="burn_in", max_length=20)  # "burn_in" | "srt_only" | "none"
+    quality: Optional[str] = Field(default="720p", max_length=20)           # "preview" | "720p" | "1080p"
+    transition: Optional[str] = Field(default="none", max_length=20)        # "none" | "fade" | "dissolve"
     style_locks: Optional[Dict[str, str]] = None
-    characters: Optional[List[Dict[str, Any]]] = None
-    start_scene_idx: Optional[int] = 1
+    characters: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=100)
+    start_scene_idx: Optional[int] = Field(default=1, ge=1)
     allow_partial: Optional[bool] = False
-    scenes: List[SceneItem]
+    scenes: List[SceneItem] = Field(max_length=200)  # audit §2.9: chặn DoS 1 request nghìn cảnh
 
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Ghi JSON atomic: tmp file cùng thư mục + fsync + os.replace (audit §1.3).
+    Crash/mất điện giữa chừng không để lại file rỗng/cắt nửa. Raise khi lỗi."""
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def _normalize_scene_keys(job: Dict) -> None:
+    """Chuẩn hoá key của job['scenes'] về str (JSON đổi int->str khi lưu, audit §1.2)."""
+    scenes = job.get("scenes")
+    if isinstance(scenes, dict):
+        job["scenes"] = StrKeyDict({str(k): v for k, v in scenes.items()})
+
+
+def _scene(job: Dict, idx) -> Dict:
+    """Lấy entry trạng thái của 1 cảnh, chấp nhận cả key int/str (audit §1.2).
+    Key int cũ (nếu có) được migrate sang str. Tạo entry rỗng dưới key str nếu chưa có."""
+    scenes = job.setdefault("scenes", StrKeyDict())
+    if not isinstance(scenes, StrKeyDict):
+        scenes = job["scenes"] = StrKeyDict(scenes)
+    sc = scenes.get(str(idx))
+    if sc is None and isinstance(idx, int):
+        sc = scenes.pop(idx, None)
+    if sc is None:
+        sc = {}
+        scenes[str(idx)] = sc
+    return sc
+
+
+def _set_scene(job: Dict, idx, value: Dict) -> None:
+    """Ghi entry trạng thái cảnh — CHỈ dùng key str (tránh đếm trùng khi tính progress)."""
+    scenes = job.setdefault("scenes", StrKeyDict())
+    if not isinstance(scenes, StrKeyDict):
+        scenes = job["scenes"] = StrKeyDict(scenes)
+    # StrKeyDict đã chuẩn hoá key về str nên không còn key int trùng để xoá
+    # (nhánh del cũ sẽ tự xoá chính entry vừa ghi nếu scenes là StrKeyDict).
+    scenes[str(idx)] = value
+
+
+def _unwrap_final_path(final_path: Any, *, context: str = "compose_full_movie") -> str:
+    """Unwrap kết quả compose_full_movie (dict {'video_path','video_filename'} hoặc str).
+    Raise ValueError rõ ràng nếu không có đường dẫn hợp lệ — thay vì tạo URL
+    video hỏng '/api/jobs/{id}/video/' (audit §1.17)."""
+    if isinstance(final_path, dict):
+        path = final_path.get("video_path") or final_path.get("video_filename") or ""
+    elif isinstance(final_path, str):
+        path = final_path
+    else:
+        path = ""
+    path = str(path).strip()
+    if not path:
+        raise ValueError(
+            f"{context} không trả về đường dẫn video hợp lệ "
+            f"(nhận được {type(final_path).__name__}: {str(final_path)[:200]})")
+    return path
 
 
 def save_job(job: Dict):
+    """Ghi job_state.json atomic (tmp + fsync + os.replace). Lỗi được log đầy đủ
+    và raise để caller biết — KHÔNG nuốt lặng (audit §1.3). Các progress callback
+    và except-handler trong pipeline dùng _save_job_best_effort() để lỗi ghi đĩa
+    không giết pipeline đang render."""
+    job_dir = get_safe_job_dir(job["id"])
+    job_dir.mkdir(parents=True, exist_ok=True)
+    state_file = job_dir / "job_state.json"
+    to_save = dict(job)
+    if hasattr(to_save.get("req"), "model_dump"):
+        to_save["req"] = to_save["req"].model_dump()
     try:
-        job_dir = get_safe_job_dir(job["id"])
-        job_dir.mkdir(parents=True, exist_ok=True)
-        state_file = job_dir / "job_state.json"
-        to_save = dict(job)
-        if hasattr(to_save.get("req"), "model_dump"):
-            to_save["req"] = to_save["req"].model_dump()
-        with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(to_save, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[SaveJobError] {e}")
+        _atomic_write_json(state_file, to_save)
+    except Exception:
+        logger.exception("Không ghi được job_state.json cho job %s", job.get("id"))
+        raise
 
 
-def load_all_persisted_jobs():
-    """Tự động khôi phục tất cả jobs đã lưu trong WORKSPACE vào bộ nhớ."""
+def _save_job_best_effort(job: Dict) -> None:
+    """Save dùng trong progress callback / except-handler của pipeline:
+    log warning khi lỗi, không raise (pipeline đang render không được chết vì đĩa)."""
+    try:
+        save_job(job)
+    except Exception as exc:
+        logger.warning("save_job (best-effort) thất bại cho job %s: %s", job.get("id"), exc)
+
+
+def _save_job_or_http500(job: Dict) -> None:
+    """Save dùng trong endpoint: lỗi ghi đĩa -> HTTP 500 có message rõ ràng."""
+    try:
+        save_job(job)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Không ghi được trạng thái job: {exc}")
+
+
+_JOBS_LOADED_ONCE = False
+
+
+def load_all_persisted_jobs(force: bool = False):
+    """Khôi phục jobs đã lưu vào bộ nhớ — CHỈ 1 lần (startup/lần đầu cần),
+    trừ khi force=True. KHÔNG ghi đè job đang có trong bộ nhớ (đặc biệt job
+    đang running — pipeline mutate JOBS liên tục, audit §1.5). Job nào trên đĩa
+    còn 'running' sau restart được đánh dấu interrupted/error rõ ràng thay vì
+    để SSE poll vô hạn."""
+    global _JOBS_LOADED_ONCE
+    if _JOBS_LOADED_ONCE and not force:
+        return
+    _JOBS_LOADED_ONCE = True
     for item in WORKSPACE.iterdir():
         if item.is_dir() and not item.name.startswith("_") and item.name not in PROTECTED_WORKSPACE_NAMES:
             state_file = item / "job_state.json"
@@ -212,13 +520,28 @@ def load_all_persisted_jobs():
                 try:
                     with open(state_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                        if item.name not in JOBS or data.get("status") == "done":
-                            JOBS[item.name] = data
-                except Exception:
-                    pass
+                    _normalize_scene_keys(data)
+                    with JOBS_LOCK:
+                        if item.name in JOBS:
+                            continue  # bộ nhớ luôn mới hơn đĩa trong cùng 1 tiến trình
+                        if data.get("status") == "running":
+                            # Không còn pipeline nào chạy sau restart.
+                            data["status"] = "error"
+                            data["error"] = "interrupted"
+                            data.setdefault("logs", []).append(
+                                "[Hệ thống] Job bị gián đoạn do server khởi động lại "
+                                "(interrupted). Bấm Resume để chạy tiếp từ cảnh chưa xong.")
+                        JOBS[item.name] = data
+                except Exception as exc:
+                    logger.warning("Không load được job %s: %s", item.name, exc)
 
 
 def get_or_restore_job(job_id: str) -> Optional[Dict]:
+    # Ưu tiên trạng thái trong bộ nhớ: pipeline đang chạy mutate JOBS liên tục,
+    # load lại từ đĩa sẽ clobber tiến độ/log chưa save (audit §1.5).
+    existing = JOBS.get(job_id)
+    if existing is not None:
+        return existing
     try:
         job_dir = get_safe_job_dir(job_id)
     except Exception:
@@ -228,19 +551,71 @@ def get_or_restore_job(job_id: str) -> Optional[Dict]:
         try:
             with open(state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if data.get("req") and isinstance(data["req"], dict):
-                    data["req"] = MovieRequest(**data["req"])
-                JOBS[job_id] = data
-                return data
+            _normalize_scene_keys(data)
+            if data.get("req") and isinstance(data["req"], dict):
+                data["req"] = MovieRequest(**data["req"])
+            if data.get("status") == "running":
+                data["status"] = "error"
+                data["error"] = "interrupted"
+                data.setdefault("logs", []).append(
+                    "[Hệ thống] Job bị gián đoạn do server khởi động lại "
+                    "(interrupted). Bấm Resume để chạy tiếp từ cảnh chưa xong.")
+            with JOBS_LOCK:
+                # Re-check sau khi đọc đĩa: pipeline có thể vừa tạo job này.
+                if job_id not in JOBS:
+                    JOBS[job_id] = data
+                return JOBS[job_id]
         except Exception as e:
-            print(f"[RestoreJobError] {e}")
+            logger.warning("Không restore được job %s: %s", job_id, e)
     return JOBS.get(job_id)
+
+
+def _is_job_running(job: Optional[Dict]) -> bool:
+    """Job đang chạy thật hay không (status running hoặc còn task pipeline sống)."""
+    if not job:
+        return False
+    if job.get("status") == "running":
+        return True
+    task = JOB_TASKS.get(job["id"])
+    return task is not None and not task.done()
+
+
+def _spawn_job_task(job_id: str, coro) -> "asyncio.Task":
+    """Spawn pipeline task và lưu reference để cancel thật (audit §1.6).
+    Thay BackgroundTasks ở các endpoint tạo phim: task vẫn chạy sau khi trả
+    response, nhưng server giữ được handle để cancel + log exception khi task
+    kết thúc bất thường."""
+    task = asyncio.create_task(coro)
+    with JOBS_LOCK:
+        JOB_TASKS[job_id] = task
+
+    def _done(t: "asyncio.Task", _jid=job_id):
+        with JOBS_LOCK:
+            if JOB_TASKS.get(_jid) is t:
+                JOB_TASKS.pop(_jid, None)
+        if t.cancelled():
+            logger.info("Pipeline job %s đã bị cancel.", _jid)
+        elif t.exception() is not None:
+            logger.exception("Pipeline job %s lỗi chưa được xử lý.", _jid)
+
+    task.add_done_callback(_done)
+    return task
 
 
 # ── Background Pipeline ────────────────────────────────────────────────────
 async def film_pipeline(job: Dict, req: MovieRequest):
     try:
         job_id = job["id"]
+        if not MUSE_API_KEY:
+            # Không key -> config error rõ ràng trên job, không gọi gateway bằng key giả.
+            job["status"] = "error"
+            job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render.")
+            _save_job_best_effort(job)
+            return
+        if job.get("cancelled") or job.get("status") == "cancelled":
+            job_log(job, "🛑 Job đã bị hủy trước khi bắt đầu.")
+            _save_job_best_effort(job)
+            return
         output_dir = WORKSPACE / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "audio").mkdir(exist_ok=True)
@@ -260,7 +635,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         for s in req.scenes:
             if not s.size:
                 s.size = global_size
-            job["scenes"][s.index] = {
+            _set_scene(job, s.index, {
                 "status": "queued",
                 "msg": "⌛ Đang chờ...",
                 "prompt": s.prompt,
@@ -268,7 +643,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                 "video_url": None,
                 "last_frame_url": None,
                 "error": None,
-            }
+            })
 
         job["progress"] = 5
 
@@ -278,15 +653,15 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                 st = "done"
             elif "❌" in msg or "Thất bại" in msg:
                 st = "error"
-            sc = job["scenes"].get(idx, {})
+            sc = _scene(job, idx)
             sc["status"] = st
             sc["msg"] = msg
             if extra:
                 sc.update(extra)
-            job["scenes"][idx] = sc
+            _set_scene(job, idx, sc)
             done = sum(1 for v in job["scenes"].values() if v.get("status") == "done")
             job["progress"] = min(74, 5 + int(done / max(total, 1) * 70))
-            save_job(job)
+            _save_job_best_effort(job)
 
         scenes_dicts = [s.model_dump() for s in req.scenes]
 
@@ -308,10 +683,14 @@ async def film_pipeline(job: Dict, req: MovieRequest):
 
         job["results"] = results
 
-        # Kiểm tra nếu job đã bị người dùng hủy
-        if job.get("status") == "cancelled":
+        # Kiểm tra nếu job đã bị người dùng hủy.
+        # TODO(batch_engine, ngoài phạm vi refactor app.py): run_batch/process_scene
+        # chưa kiểm tra job["cancelled"] định kỳ nên batch đang chạy vẫn chạy hết;
+        # api_cancel_job chỉ dừng được pipeline ở điểm await tiếp theo (task.cancel).
+        # Muốn dừng render sâu hơn cần truyền cờ cancelled vào batch_engine.
+        if job.get("cancelled") or job.get("status") == "cancelled":
             job_log(job, "🛑 Job đã bị hủy bởi người dùng.")
-            save_job(job)
+            _save_job_best_effort(job)
             return
 
         # Cập nhật trạng thái từng cảnh sau khi xong
@@ -320,7 +699,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         for r in results:
             idx = r["index"]
             if r["status"] == "done":
-                job["scenes"][idx].update({
+                _scene(job, idx).update({
                     "status": "done",
                     "msg": "✅ Hoàn thành",
                     "video_url": f"/api/jobs/{job_id}/scenes/{idx}/video",
@@ -329,7 +708,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                 })
                 ok_count += 1
             else:
-                job["scenes"][idx].update({
+                _scene(job, idx).update({
                     "status": "error",
                     "msg": f"❌ {r.get('error', '')}",
                     "error": r.get("error", ""),
@@ -339,16 +718,16 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         # Kiểm định tính toàn vẹn của tất cả các cảnh (Scene Audit)
         audit = audit_movie_scenes(scenes_dicts, results)
         job["audit"] = audit
-        save_job(job)
+        _save_job_best_effort(job)
 
         job_log(job, f"📊 Kết quả render: {audit['done_count']}/{audit['total']} cảnh thành công ({audit['failed_count']} lỗi, {audit['pending_count']} chờ)")
         job["progress"] = 75
-        save_job(job)
+        _save_job_best_effort(job)
 
         if ok_count == 0:
             job["status"] = "error"
             job_log(job, "❌ Không có cảnh nào thành công!")
-            save_job(job)
+            _save_job_best_effort(job)
             return
 
         # QUY TẮC CỐT LÕI: KHÔNG TỰ ĐỘNG BÁO THÀNH CÔNG VÀ KHÔNG TỰ XUẤT PHIM THIẾU CẢNH!
@@ -359,14 +738,20 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         if not audit["is_complete"] and not req.allow_partial:
             job["status"] = "audit_pending"
             job_log(job, f"⚠️ Cảnh báo kiểm định: Phát hiện {audit['failed_count']} cảnh lỗi / thiếu. Đã tạm dừng xuất phim để bạn xem xét và quyết định!")
-            save_job(job)
+            _save_job_best_effort(job)
+            return
+
+        # Kiểm tra hủy lần nữa trước khi vào hậu kỳ (cancel có thể đến trong lúc render).
+        if job.get("cancelled") or job.get("status") == "cancelled":
+            job_log(job, "🛑 Job đã bị hủy bởi người dùng.")
+            _save_job_best_effort(job)
             return
 
         # ── Hậu kỳ ──
         try:
             job_log(job, "🎞️ Đang hậu kỳ: ghép video, lồng tiếng, hòa âm nhạc nền, xử lý phụ đề...")
             job["progress"] = 80
-            save_job(job)
+            _save_job_best_effort(job)
 
             if req.export_mode == "batch_clips":
                 # Xuất từng clip riêng biệt (mỗi cảnh là 1 video độc lập)
@@ -376,7 +761,8 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                         continue
                     idx = r["index"]
                     clip_out = str(output_dir / "final" / f"clip_{idx:03d}.mp4")
-                    compose_scene_video(
+                    await asyncio.to_thread(
+                        compose_scene_video,
                         scene_video=r["video_path"],
                         scene_audio=r["audio_path"],
                         output=clip_out,
@@ -391,22 +777,23 @@ async def film_pipeline(job: Dict, req: MovieRequest):
 
             else:
                 # Xuất 1 phim dài hoàn chỉnh
-                final_path = compose_full_movie(
-                    results=results,
-                    output_dir=str(output_dir),
-                    project_title=req.title.replace(" ", "_"),
-                    font_size=req.font_size,
-                    bg_music_path=req.bg_music_path,
-                    music_volume=req.music_volume if req.music_volume is not None else 0.25,
-                    voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
-                    subtitle_mode=req.subtitle_mode or "burn_in",
-                    quality=req.quality or "720p",
-                    transition=req.transition or "none",
-                    aspect_ratio=req.aspect_ratio or "16:9",
-                    allow_partial=bool(req.allow_partial),
+                final_path = _unwrap_final_path(
+                    await asyncio.to_thread(
+                        compose_full_movie,
+                        results=results,
+                        output_dir=str(output_dir),
+                        project_title=req.title.replace(" ", "_"),
+                        font_size=req.font_size,
+                        bg_music_path=req.bg_music_path,
+                        music_volume=req.music_volume if req.music_volume is not None else 0.25,
+                        voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
+                        subtitle_mode=req.subtitle_mode or "burn_in",
+                        quality=req.quality or "720p",
+                        transition=req.transition or "none",
+                        aspect_ratio=req.aspect_ratio or "16:9",
+                        allow_partial=bool(req.allow_partial),
+                    )
                 )
-                if isinstance(final_path, dict):
-                    final_path = final_path.get('video_path') or str(final_path.get('video_filename', ''))
                 rel = Path(final_path).name
                 job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
                 srt_path = output_dir / "final" / f"{req.title.replace(' ', '_')}.srt"
@@ -418,18 +805,18 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     job_log(job, f"⚠️ Đã xuất bản nháp (Draft - thiếu {audit['failed_count']} cảnh)! → {rel}")
                 else:
                     job_log(job, f"🎉 Xuất phim thành công 100%! → {rel}")
-            save_job(job)
+            _save_job_best_effort(job)
 
 
         except Exception as e:
             job["status"] = "error"
             job_log(job, f"❌ Lỗi hậu kỳ: {e}")
-            save_job(job)
+            _save_job_best_effort(job)
 
     except Exception as e:
         job["status"] = "error"
         job_log(job, f"❌ Lỗi xử lý pipeline: {e}")
-        save_job(job)
+        _save_job_best_effort(job)
 
 
 # ── API Routes ─────────────────────────────────────────────────────────────
@@ -447,31 +834,39 @@ def index():
 
 
 @app.post("/api/movies")
-async def create_movie(req: MovieRequest, background_tasks: BackgroundTasks):
+async def create_movie(req: MovieRequest):
     """Tạo job mới. Trả về job_id để theo dõi."""
     if not req.scenes:
         return JSONResponse({"error": "Không có cảnh nào!"}, status_code=400)
 
     job_id = uuid.uuid4().hex[:12]
     job = new_job(job_id, len(req.scenes), req=req)
-    save_job(job)
+    _save_job_or_http500(job)
     job_log(job, f"📋 Dự án: '{req.title}' — {len(req.scenes)} cảnh — giọng: {req.voice}")
-    save_job(job)
-    background_tasks.add_task(film_pipeline, job, req)
+    _save_job_or_http500(job)
+    # Spawn qua _spawn_job_task (giữ reference trong JOB_TASKS để cancel thật);
+    # nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
+    _spawn_job_task(job_id, film_pipeline(job, req))
 
     return {"job_id": job_id, "message": "Đã bắt đầu sản xuất phim hàng loạt"}
 
 
 async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
     """Pipeline render lại CHỈ CÁC CẢNH BỊ LỖI rồi tự động ghép lại phim hoàn chỉnh."""
-    if job.get("is_retrying"):
-        return
+    # Cờ is_retrying đã được endpoint /retry-failed đặt NGAY trong request (dưới
+    # JOBS_LOCK) trước khi spawn task — pipeline không kiểm tra lại ở đây: nếu
+    # return sớm thì finally không chạy và cờ kẹt True vĩnh viễn (audit §1.6).
     job["is_retrying"] = True
 
     try:
         req: MovieRequest = job.get("req")
         if not req:
             job_log(job, "❌ Không tìm thấy thông tin cấu hình kịch bản gốc.")
+            return
+        if not MUSE_API_KEY:
+            job["status"] = "error"
+            job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render lại.")
+            _save_job_best_effort(job)
             return
 
         failed_indices = list(job.get("failed_scenes", []))
@@ -485,14 +880,14 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
 
         # Đặt trạng thái các cảnh lỗi thành đang chạy lại
         for idx in failed_indices:
-            job["scenes"][idx] = {"status": "running", "msg": "🔄 Đang chuẩn bị thử lại..."}
+            _set_scene(job, idx, {"status": "running", "msg": "🔄 Đang chuẩn bị thử lại..."})
 
         failed_scenes = [s for s in req.scenes if s.index in failed_indices]
 
         if auto_fix:
             from batch_engine import heal_prompt_with_ai
             for s in failed_scenes:
-                err_msg = job["scenes"].get(s.index, {}).get("msg", "")
+                err_msg = _scene(job, s.index).get("msg", "")
                 job_log(job, f"🪄 [Cảnh {s.index}] Đang tự động tối ưu Prompt theo phản hồi Muse AI...")
                 healed = await heal_prompt_with_ai(s.prompt, err_msg, MUSE_API_URL, MUSE_API_KEY)
                 if healed and healed != s.prompt:
@@ -502,7 +897,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
         scenes_dicts = [s.model_dump() for s in failed_scenes]
 
         def retry_progress_cb(idx: int, msg: str):
-            job["scenes"][idx] = {"status": "running", "msg": msg}
+            _set_scene(job, idx, {"status": "running", "msg": msg})
 
         raw_concurrent = req.max_concurrent if (req and req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
         concurrent = min(raw_concurrent, 12)
@@ -523,11 +918,11 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             idx = nr["index"]
             current_results[idx] = nr
             if nr["status"] == "done":
-                job["scenes"][idx] = {"status": "done", "msg": "✅ Hoàn thành (Sau khi thử lại)"}
+                _set_scene(job, idx, {"status": "done", "msg": "✅ Hoàn thành (Sau khi thử lại)"})
                 if idx in job["failed_scenes"]:
                     job["failed_scenes"].remove(idx)
             else:
-                job["scenes"][idx] = {"status": "error", "msg": f"❌ {nr.get('error', '')}"}
+                _set_scene(job, idx, {"status": "error", "msg": f"❌ {nr.get('error', '')}"})
 
         all_results = sorted(list(current_results.values()), key=lambda x: x["index"])
         job["results"] = all_results
@@ -536,33 +931,34 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
         all_scene_dicts = [s.model_dump() for s in req.scenes]
         audit = audit_movie_scenes(all_scene_dicts, all_results)
         job["audit"] = audit
-        save_job(job)
+        _save_job_best_effort(job)
 
         if not audit["is_complete"]:
             job["status"] = "audit_pending"
             job_log(job, f"⚠️ Sau khi thử lại: Vẫn còn {audit['failed_count']} cảnh lỗi ({audit['done_count']}/{audit['total']} hoàn tất). Trạng thái: Chờ kiểm định.")
-            save_job(job)
+            _save_job_best_effort(job)
             return
 
         # Hậu kỳ ghép lại phim hoàn chỉnh
         try:
             job_log(job, "🎞️ Đang tự động ghép lại phim với các cảnh vừa tạo lại...")
-            final_path = compose_full_movie(
-                results=all_results,
-                output_dir=str(output_dir),
-                project_title=req.title.replace(" ", "_"),
-                font_size=req.font_size,
-                bg_music_path=req.bg_music_path,
-                music_volume=req.music_volume if req.music_volume is not None else 0.25,
-                voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
-                subtitle_mode=req.subtitle_mode or "burn_in",
-                quality=req.quality or "720p",
-                transition=req.transition or "none",
-                aspect_ratio=req.aspect_ratio or "16:9",
-                allow_partial=False,
+            final_path = _unwrap_final_path(
+                await asyncio.to_thread(
+                    compose_full_movie,
+                    results=all_results,
+                    output_dir=str(output_dir),
+                    project_title=req.title.replace(" ", "_"),
+                    font_size=req.font_size,
+                    bg_music_path=req.bg_music_path,
+                    music_volume=req.music_volume if req.music_volume is not None else 0.25,
+                    voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
+                    subtitle_mode=req.subtitle_mode or "burn_in",
+                    quality=req.quality or "720p",
+                    transition=req.transition or "none",
+                    aspect_ratio=req.aspect_ratio or "16:9",
+                    allow_partial=False,
+                )
             )
-            if isinstance(final_path, dict):
-                final_path = final_path.get('video_path') or str(final_path.get('video_filename', ''))
             rel = Path(final_path).name
             job["final_video"] = f"/api/jobs/{job['id']}/video/{rel}"
             srt_path = output_dir / "final" / f"{req.title.replace(' ', '_')}.srt"
@@ -571,37 +967,42 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             job["progress"] = 100
             job["status"] = "done"
             job_log(job, f"🎉 Đã tái xuất phim hoàn chỉnh 100%! → {rel}")
-            save_job(job)
+            _save_job_best_effort(job)
         except Exception as e:
             job["status"] = "error"
             job_log(job, f"❌ Lỗi hậu kỳ sau khi render lại: {e}")
-            save_job(job)
+            _save_job_best_effort(job)
     finally:
         job["is_retrying"] = False
 
 
 
 @app.post("/api/jobs/{job_id}/retry-failed")
-async def retry_failed_scenes(job_id: str, background_tasks: BackgroundTasks, auto_fix: bool = True):
+async def retry_failed_scenes(job_id: str, auto_fix: bool = True):
     """API kích hoạt render lại các cảnh bị lỗi, mặc định tự động sửa prompt nếu bị vi phạm."""
     job = get_or_restore_job(job_id)
     if not job:
         return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
-    if job.get("is_retrying"):
-        return JSONResponse({"error": "Tiến trình render lại đang chạy trong nền, vui lòng đợi hoàn tất trước khi bấm tiếp!"}, status_code=400)
     if not job.get("failed_scenes"):
         return JSONResponse({"message": "Không có cảnh nào bị lỗi", "failed_count": 0})
-
-    background_tasks.add_task(retry_failed_pipeline, job, auto_fix)
+    with JOBS_LOCK:
+        if job.get("is_retrying"):
+            return JSONResponse({"error": "Tiến trình render lại đang chạy trong nền, vui lòng đợi hoàn tất trước khi bấm tiếp!"}, status_code=400)
+        # Đặt cờ NGAY trong request, dưới lock, TRƯỚC khi trả response (audit §1.6):
+        # 2 request liên tiếp không thể cùng qua gate này nữa.
+        job["is_retrying"] = True
+    failed = list(job["failed_scenes"])
+    _spawn_job_task(job_id, retry_failed_pipeline(job, auto_fix))
+    _save_job_best_effort(job)
     return {
-        "message": f"Đang bắt đầu render lại {len(job['failed_scenes'])} cảnh lỗi (Auto-Fix: {auto_fix})",
-        "failed_scenes": job["failed_scenes"]
+        "message": f"Đang bắt đầu render lại {len(failed)} cảnh lỗi (Auto-Fix: {auto_fix})",
+        "failed_scenes": failed
     }
 
 
 class UpdateScenePromptRequest(BaseModel):
     scene_index: int
-    new_prompt: str
+    new_prompt: str = Field(max_length=5000)
 
 
 @app.post("/api/jobs/{job_id}/scenes/update-prompt")
@@ -614,14 +1015,19 @@ def update_scene_prompt(job_id: str, payload: UpdateScenePromptRequest):
     for s in req.scenes:
         if s.index == payload.scene_index:
             s.prompt = payload.new_prompt
+            sc = _scene(job, payload.scene_index)
+            if sc:
+                sc["prompt"] = payload.new_prompt
             job_log(job, f"✏️ [Cảnh {payload.scene_index}] Người dùng đã cập nhật Prompt mới: {payload.new_prompt[:50]}...")
+            # audit §1.4: trước đây chỉ gán trong bộ nhớ, load lại từ đĩa là mất.
+            _save_job_or_http500(job)
             return {"success": True, "scene_index": payload.scene_index, "prompt": payload.new_prompt}
     return JSONResponse({"error": f"Không tìm thấy cảnh {payload.scene_index}"}, status_code=404)
 
 
 class FixPromptRequest(BaseModel):
-    prompt: str
-    error: str = ""
+    prompt: str = Field(max_length=5000)
+    error: str = Field(default="", max_length=5000)
     job_id: Optional[str] = None
     scene_index: Optional[int] = None
 
@@ -643,9 +1049,9 @@ async def api_fix_prompt(req: FixPromptRequest):
                 if s.index == req.scene_index:
                     s.prompt = fixed
                     break
-            if req.scene_index in job.get("scenes", {}):
-                job["scenes"][req.scene_index]["prompt"] = fixed
-            save_job(job)
+            if str(req.scene_index) in job.get("scenes", {}):
+                _scene(job, req.scene_index)["prompt"] = fixed
+            _save_job_best_effort(job)
     return {
         "original_prompt": req.prompt,
         "fixed_prompt": fixed,
@@ -654,8 +1060,8 @@ async def api_fix_prompt(req: FixPromptRequest):
 
 
 class RetrySingleSceneRequest(BaseModel):
-    prompt: Optional[str] = None
-    voiceover: Optional[str] = None
+    prompt: Optional[str] = Field(default=None, max_length=5000)
+    voiceover: Optional[str] = Field(default=None, max_length=5000)
 
 
 async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
@@ -666,6 +1072,15 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
     req: MovieRequest = job["req"]
 
     job_log(job, f"🔄 [Cảnh {idx}] Bắt đầu render lại cảnh độc lập...")
+    if not MUSE_API_KEY:
+        _scene(job, idx).update({
+            "status": "error",
+            "msg": "❌ Muse API key chưa được cấu hình (MUSE2API_KEY).",
+            "error": "Muse API key chưa được cấu hình (MUSE2API_KEY).",
+        })
+        job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render lại cảnh.")
+        _save_job_best_effort(job)
+        return
 
     def single_cb(i: int, msg: str, extra: Optional[Dict] = None):
         st = "running"
@@ -673,15 +1088,13 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
             st = "done"
         elif "❌" in msg or "Thất bại" in msg:
             st = "error"
-        scenes_dict = job.setdefault("scenes", {})
-        sc = scenes_dict.get(idx) or scenes_dict.get(str(idx)) or {}
+        sc = _scene(job, idx)
         sc["status"] = st
         sc["msg"] = msg
         if extra:
             sc.update(extra)
-        scenes_dict[idx] = sc
-        scenes_dict[str(idx)] = sc
-        save_job(job)
+        _set_scene(job, idx, sc)
+        _save_job_best_effort(job)
 
     try:
         from batch_engine import process_scene
@@ -705,11 +1118,13 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
         job["results"] = all_results
 
         if res.get("status") == "done":
-            job["scenes"][idx]["status"] = "done"
-            job["scenes"][idx]["msg"] = "✅ Hoàn thành (Đã tạo lại)"
-            job["scenes"][idx]["video_url"] = f"/api/jobs/{job_id}/scenes/{idx}/video"
-            job["scenes"][idx]["last_frame_url"] = res.get("last_frame_url")
-            job["scenes"][idx]["error"] = None
+            _scene(job, idx).update({
+                "status": "done",
+                "msg": "✅ Hoàn thành (Đã tạo lại)",
+                "video_url": f"/api/jobs/{job_id}/scenes/{idx}/video",
+                "last_frame_url": res.get("last_frame_url"),
+                "error": None,
+            })
             if idx in job.get("failed_scenes", []):
                 job["failed_scenes"].remove(idx)
             job_log(job, f"🎉 [Cảnh {idx}] Render lại thành công!")
@@ -719,7 +1134,8 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
                 try:
                     from composer import compose_scene_video
                     clip_out = str(output_dir / "final" / f"clip_{idx:03d}.mp4")
-                    compose_scene_video(
+                    await asyncio.to_thread(
+                        compose_scene_video,
                         scene_video=res["video_path"],
                         scene_audio=res["audio_path"],
                         output=clip_out,
@@ -740,22 +1156,23 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
                 if audit["is_complete"]:
                     job_log(job, f"🎞️ Toàn bộ {audit['total']} cảnh đã hoàn tất! Đang ghép lại phim hoàn chỉnh...")
                     try:
-                        final_path = compose_full_movie(
-                            results=all_results,
-                            output_dir=str(output_dir),
-                            project_title=req.title.replace(" ", "_"),
-                            font_size=req.font_size,
-                            bg_music_path=req.bg_music_path,
-                            music_volume=req.music_volume if req.music_volume is not None else 0.25,
-                            voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
-                            subtitle_mode=req.subtitle_mode or "burn_in",
-                            quality=req.quality or "720p",
-                            transition=req.transition or "none",
-                            aspect_ratio=req.aspect_ratio or "16:9",
-                            allow_partial=False,
+                        final_path = _unwrap_final_path(
+                            await asyncio.to_thread(
+                                compose_full_movie,
+                                results=all_results,
+                                output_dir=str(output_dir),
+                                project_title=req.title.replace(" ", "_"),
+                                font_size=req.font_size,
+                                bg_music_path=req.bg_music_path,
+                                music_volume=req.music_volume if req.music_volume is not None else 0.25,
+                                voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
+                                subtitle_mode=req.subtitle_mode or "burn_in",
+                                quality=req.quality or "720p",
+                                transition=req.transition or "none",
+                                aspect_ratio=req.aspect_ratio or "16:9",
+                                allow_partial=False,
+                            )
                         )
-                        if isinstance(final_path, dict):
-                            final_path = final_path.get('video_path') or str(final_path.get('video_filename', ''))
                         rel = Path(final_path).name
                         job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
                         srt_path = output_dir / "final" / f"{req.title.replace(' ', '_')}.srt"
@@ -771,28 +1188,31 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
                     job_log(job, f"ℹ️ [Cảnh {idx}] Đã tạo lại xong. Hiện có {audit['done_count']}/{audit['total']} cảnh hoàn tất.")
 
         else:
-            job["scenes"][idx]["status"] = "error"
-            job["scenes"][idx]["msg"] = f"❌ {res.get('error', 'Lỗi không xác định')}"
-            job["scenes"][idx]["error"] = res.get("error", "")
+            _scene(job, idx).update({
+                "status": "error",
+                "msg": f"❌ {res.get('error', 'Lỗi không xác định')}",
+                "error": res.get("error", ""),
+            })
             if idx not in job.get("failed_scenes", []):
                 job.setdefault("failed_scenes", []).append(idx)
             job_log(job, f"❌ [Cảnh {idx}] Thử lại thất bại: {res.get('error')}")
 
-        save_job(job)
+        _save_job_best_effort(job)
 
     except Exception as exc:
-        job["scenes"][idx]["status"] = "error"
-        job["scenes"][idx]["msg"] = f"❌ Lỗi: {exc}"
-        job["scenes"][idx]["error"] = str(exc)
+        _scene(job, idx).update({
+            "status": "error",
+            "msg": f"❌ Lỗi: {exc}",
+            "error": str(exc),
+        })
         job_log(job, f"❌ [Cảnh {idx}] Exception: {exc}")
-        save_job(job)
+        _save_job_best_effort(job)
 
 
 @app.post("/api/jobs/{job_id}/scenes/{scene_idx}/retry")
 async def retry_single_scene_endpoint(
     job_id: str,
     scene_idx: int,
-    background_tasks: BackgroundTasks,
     payload: Optional[RetrySingleSceneRequest] = None,
 ):
     """Render lại DUY NHẤT một cảnh với prompt đã chỉnh sửa."""
@@ -809,8 +1229,7 @@ async def retry_single_scene_endpoint(
     if not target_scene:
         return JSONResponse({"error": f"Không tìm thấy cảnh {scene_idx}"}, status_code=404)
 
-    scenes_dict = job.setdefault("scenes", {})
-    sc_entry = scenes_dict.get(scene_idx) or scenes_dict.get(str(scene_idx)) or {}
+    sc_entry = _scene(job, scene_idx)
     if payload and payload.prompt:
         target_scene.prompt = payload.prompt
         sc_entry["prompt"] = payload.prompt
@@ -821,11 +1240,10 @@ async def retry_single_scene_endpoint(
     sc_entry["status"] = "running"
     sc_entry["msg"] = "🔄 Đang chuẩn bị render lại..."
     sc_entry["error"] = None
-    scenes_dict[scene_idx] = sc_entry
-    scenes_dict[str(scene_idx)] = sc_entry
-    save_job(job)
+    _set_scene(job, scene_idx, sc_entry)
+    _save_job_or_http500(job)
 
-    background_tasks.add_task(single_scene_pipeline, job, target_scene)
+    _spawn_job_task(job_id, single_scene_pipeline(job, target_scene))
     return {
         "success": True,
         "message": f"Đang bắt đầu render lại Cảnh {scene_idx}",
@@ -859,40 +1277,53 @@ def get_job(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/sse")
-async def job_sse(job_id: str):
-    """Server-Sent Events: đẩy cập nhật tiến độ real-time."""
+async def job_sse(job_id: str, request: Request):
+    """Server-Sent Events: đẩy cập nhật tiến độ real-time.
+    - Đọc trạng thái từ bộ nhớ (get_or_restore_job chỉ chạm đĩa khi job chưa có
+      trong bộ nhớ) thay vì reload toàn bộ job_state.json mỗi 2s (audit §3.4).
+    - Ngắt khi client disconnect và timeout tối đa 30 phút/stream (EventSource
+      của trình duyệt tự reconnect); job chạy xong (done/error) thì kết thúc."""
     async def event_stream():
         last_log_count = 0
-        while True:
-            job = get_or_restore_job(job_id)
-            if not job:
-                yield f"data: {json.dumps({'error': 'not found'})}\n\n"
-                break
+        started = time.monotonic()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                if time.monotonic() - started > 1800:
+                    yield f"data: {json.dumps({'event': 'timeout', 'message': 'SSE timeout, client sẽ reconnect'})}\n\n"
+                    break
+                job = get_or_restore_job(job_id)
+                if not job:
+                    yield f"data: {json.dumps({'error': 'not found'})}\n\n"
+                    break
 
-            last_frames = {
-                r["index"]: r["last_frame_url"]
-                for r in job.get("results", [])
-                if isinstance(r, dict) and r.get("last_frame_url")
-            }
-            payload = {
-                "status": job["status"],
-                "progress": job["progress"],
-                "scenes": job["scenes"],
-                "logs": job["logs"][last_log_count:],
-                "final_video": job.get("final_video"),
-                "srt_file": job.get("srt_file"),
-                "audit": job.get("audit"),
-                "clips": job.get("clips", []),
-                "failed_scenes": job.get("failed_scenes", []),
-                "is_retrying": job.get("is_retrying", False),
-                "last_frames": last_frames,
-            }
-            last_log_count = len(job["logs"])
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                last_frames = {
+                    r["index"]: r["last_frame_url"]
+                    for r in job.get("results", [])
+                    if isinstance(r, dict) and r.get("last_frame_url")
+                }
+                payload = {
+                    "status": job["status"],
+                    "progress": job["progress"],
+                    "scenes": job["scenes"],
+                    "logs": job["logs"][last_log_count:],
+                    "final_video": job.get("final_video"),
+                    "srt_file": job.get("srt_file"),
+                    "audit": job.get("audit"),
+                    "clips": job.get("clips", []),
+                    "failed_scenes": job.get("failed_scenes", []),
+                    "is_retrying": job.get("is_retrying", False),
+                    "last_frames": last_frames,
+                }
+                last_log_count = len(job["logs"])
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-            if job["status"] in ("done", "error") and not job.get("is_retrying"):
-                break
-            await asyncio.sleep(2)
+                if job["status"] in ("done", "error") and not job.get("is_retrying"):
+                    break
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            pass
 
     return StreamingResponse(
         event_stream(),
@@ -946,6 +1377,8 @@ def download_video(job_id: str, filename: str):
 @app.get("/api/library")
 def list_jobs():
     """Lấy danh sách tất cả jobs đã sản xuất trong Workspace."""
+    # load_all_persisted_jobs() giờ chỉ load 1 lần (startup/lần đầu) — không đọc
+    # toàn bộ job_state.json mỗi request (audit §3.4).
     load_all_persisted_jobs()
     items = []
     for j in sorted(JOBS.values(), key=lambda x: x.get("created_at", 0), reverse=True):
@@ -970,8 +1403,14 @@ def list_jobs():
 @app.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str):
     """Xoá job và toàn bộ workspace của job đó an toàn."""
+    job = get_or_restore_job(job_id)
+    if job is not None and _is_job_running(job):
+        return JSONResponse(
+            {"error": "Job đang chạy, không thể xoá. Hãy hủy job trước."},
+            status_code=409)
     job_dir = get_safe_job_dir(job_id)
-    job = JOBS.pop(job_id, None)
+    with JOBS_LOCK:
+        job = JOBS.pop(job_id, None)
     if not job and not job_dir.exists():
         return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
     if job_dir.exists() and job_dir.is_dir():
@@ -983,12 +1422,12 @@ def delete_job(job_id: str):
 
 class ComposeJobRequest(BaseModel):
     allow_partial: bool = False
-    quality: Optional[str] = "720p"
-    subtitle_mode: Optional[str] = "burn_in"
-    transition: Optional[str] = "none"
+    quality: Optional[str] = Field(default="720p", max_length=20)
+    subtitle_mode: Optional[str] = Field(default="burn_in", max_length=20)
+    transition: Optional[str] = Field(default="none", max_length=20)
     bg_music_path: Optional[str] = None
-    music_volume: Optional[float] = 0.25
-    voice_volume: Optional[float] = 1.0
+    music_volume: Optional[float] = Field(default=0.25, ge=0.0, le=2.0)
+    voice_volume: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
 
 
 @app.post("/api/jobs/{job_id}/compose")
@@ -1017,22 +1456,23 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
     try:
         job_log(job, f"🎞️ Đang tiến hành xuất phim ({'Xuất bản nháp' if allow_partial else 'Xuất hoàn chỉnh'}, quality={quality}, sub={subtitle_mode}, trans={transition})...")
         aspect_ratio = req.aspect_ratio or "16:9" if req else "16:9"
-        final_path = compose_full_movie(
-            results=results,
-            output_dir=str(output_dir),
-            project_title=title,
-            font_size=font_size,
-            bg_music_path=bg_music_path,
-            music_volume=music_volume,
-            voice_volume=voice_volume,
-            subtitle_mode=subtitle_mode,
-            quality=quality,
-            transition=transition,
-            aspect_ratio=aspect_ratio,
-            allow_partial=allow_partial,
+        final_path = _unwrap_final_path(
+            await asyncio.to_thread(
+                compose_full_movie,
+                results=results,
+                output_dir=str(output_dir),
+                project_title=title,
+                font_size=font_size,
+                bg_music_path=bg_music_path,
+                music_volume=music_volume,
+                voice_volume=voice_volume,
+                subtitle_mode=subtitle_mode,
+                quality=quality,
+                transition=transition,
+                aspect_ratio=aspect_ratio,
+                allow_partial=allow_partial,
+            )
         )
-        if isinstance(final_path, dict):
-            final_path = final_path.get('video_path') or str(final_path.get('video_filename', ''))
         rel = Path(final_path).name
         job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
         srt_path = output_dir / "final" / f"{title}.srt"
@@ -1041,32 +1481,39 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
         job["progress"] = 100
         job["status"] = "done"
         job_log(job, f"🎉 Xuất phim thành công! → {rel}")
-        save_job(job)
+        _save_job_best_effort(job)
         return {"success": True, "video_url": job["final_video"], "srt_file": job.get("srt_file")}
     except Exception as e:
         job_log(job, f"❌ Lỗi xuất phim: {e}")
-        save_job(job)
+        _save_job_best_effort(job)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
 def api_cancel_job(job_id: str):
-    """Dừng hoặc hủy job đang chạy."""
+    """Dừng hoặc hủy job đang chạy (cancel thật task pipeline + cờ cancelled)."""
     job = get_or_restore_job(job_id)
     if not job:
         return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
-    job["status"] = "cancelled"
+    with JOBS_LOCK:
+        task = JOB_TASKS.get(job_id)
+        job["cancelled"] = True
+        job["status"] = "cancelled"
+    # Cancel thật task pipeline (nếu còn chạy): task dừng ở điểm await tiếp theo,
+    # pipeline kiểm tra cờ cancelled ở các mốc giai đoạn rồi thoát.
+    if task is not None and not task.done():
+        task.cancel()
     job_log(job, "🛑 Người dùng đã yêu cầu dừng/hủy job!")
-    save_job(job)
+    _save_job_best_effort(job)
     return {"success": True, "message": "Đã dừng job thành công"}
 
 
 class ResumeJobRequest(BaseModel):
-    from_scene_idx: Optional[int] = 1
+    from_scene_idx: Optional[int] = Field(default=1, ge=1)
 
 
 @app.post("/api/jobs/{job_id}/resume")
-async def api_resume_job(job_id: str, background_tasks: BackgroundTasks, payload: Optional[ResumeJobRequest] = None):
+async def api_resume_job(job_id: str, payload: Optional[ResumeJobRequest] = None):
     """Chạy tiếp job từ cảnh N mà không render lại các cảnh trước đã xong."""
     job = get_or_restore_job(job_id)
     if not job or not job.get("req"):
@@ -1074,16 +1521,22 @@ async def api_resume_job(job_id: str, background_tasks: BackgroundTasks, payload
     req: MovieRequest = job["req"]
     start_idx = payload.from_scene_idx if payload and payload.from_scene_idx else 1
     req.start_scene_idx = start_idx
-    job["status"] = "running"
+    with JOBS_LOCK:
+        if _is_job_running(job):
+            return JSONResponse(
+                {"error": "Job đang chạy, không thể resume chồng lên tiến trình hiện tại."},
+                status_code=409)
+        job["status"] = "running"
+        job["cancelled"] = False
     job_log(job, f"▶️ Tiếp tục chạy job từ Cảnh {start_idx}...")
-    save_job(job)
-    background_tasks.add_task(film_pipeline, job, req)
+    _save_job_or_http500(job)
+    _spawn_job_task(job_id, film_pipeline(job, req))
     return {"success": True, "message": f"Đang tiếp tục chạy job từ Cảnh {start_idx}"}
 
 
 class KeyframePreviewRequest(BaseModel):
-    prompt: str
-    aspect_ratio: Optional[str] = "16:9"
+    prompt: str = Field(max_length=5000)
+    aspect_ratio: Optional[str] = Field(default="16:9", max_length=10)
     reference_image: Optional[str] = None
     style_locks: Optional[Dict[str, str]] = None
 
@@ -1091,6 +1544,7 @@ class KeyframePreviewRequest(BaseModel):
 @app.post("/api/scenes/preview-keyframe")
 async def api_preview_keyframe(req: KeyframePreviewRequest):
     """Sinh ảnh keyframe xem trước bằng muse-image trước khi tốn lượt render video."""
+    require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
     try:
         styled = apply_style_locks(req.prompt, req.style_locks)
         fname = f"keyframe_{uuid.uuid4().hex[:8]}.png"
@@ -1173,10 +1627,59 @@ from shot_desk import (
 )
 
 
+# ── Upload guards (audit §2.6) ─────────────────────────────────────────────
+# Giới hạn size: ảnh 50MB, nhạc 100MB, ZIP Shot Desk 500MB (khớp giới hạn của
+# shot_desk.import_shot_desk_zip). Đọc theo chunk 1MB thay vì file.read() toàn bộ.
+_MAX_IMAGE_UPLOAD_BYTES = 50 * 1024 * 1024
+_MAX_MUSIC_UPLOAD_BYTES = 100 * 1024 * 1024
+_MAX_ZIP_UPLOAD_BYTES = 500 * 1024 * 1024
+
+
+async def _read_upload_capped(file: UploadFile, *, max_bytes: int, label: str) -> bytes:
+    """Đọc upload theo chunk 1MB, raise 413 khi vượt giới hạn (không file.read() toàn bộ)."""
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{label} vượt quá giới hạn {max_bytes // (1024 * 1024)}MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _sniff_image_kind(head: bytes) -> Optional[str]:
+    """Verify magic bytes ảnh: PNG/JPEG/WebP. Trả về kind hoặc None."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head.startswith(b"RIFF") and len(head) >= 12 and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _sniff_audio_kind(head: bytes, suffix: str) -> bool:
+    """Verify magic bytes nhạc khớp với suffix đã khai báo."""
+    if suffix == ".mp3":
+        return head.startswith(b"ID3") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0)
+    if suffix == ".wav":
+        return head.startswith(b"RIFF") and len(head) >= 12 and head[8:12] == b"WAVE"
+    if suffix in (".m4a", ".aac"):
+        return (len(head) >= 8 and head[4:8] == b"ftyp") or (len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xF0) == 0xF0)
+    if suffix == ".ogg":
+        return head.startswith(b"OggS")
+    return False
+
+
 @app.post("/api/shot-desk/import-zip")
 async def api_shot_desk_import_zip(file: UploadFile = File(...)):
     """Upload và import gói ZIP chuẩn Shot Desk."""
-    content = await file.read()
+    content = await _read_upload_capped(file, max_bytes=_MAX_ZIP_UPLOAD_BYTES, label="File ZIP")
     try:
         project = import_shot_desk_zip(content, file.filename)
         return {"success": True, "project": project}
@@ -1251,45 +1754,44 @@ def api_shot_desk_get_project_status(project_id: str):
     active_set = ACTIVE_SHOT_TASKS.get(project_id, set())
     proj_dir = get_safe_project_dir(project_id)
     clips_dir = proj_dir / "clips"
-    dirty = False
 
+    # GET KHÔNG có side-effect (audit §1.7): chỉ TÍNH trạng thái hiển thị từ clip
+    # trên đĩa + ACTIVE_SHOT_TASKS, KHÔNG sửa project và KHÔNG save. Việc chuyển
+    # trạng thái thật chỉ làm ở POST /reset-stuck hoặc khi worker render xong.
+    # (Lưu ý: get_shot_desk_project() trong shot_desk.py vẫn có thể save khi nó
+    # tự đồng bộ URL frame — nằm ngoài phạm vi refactor app.py, file đó bị đóng.)
     shots_summary = []
     is_rendering = False
     for s in p.get("shots", []):
         st = s.get("status", "ready")
         idx = s.get("index")
+        display_status = st
+        display_error = s.get("error")
+        display_video_url = s.get("video_url")
 
-        # Tự động giải phóng trạng thái kẹt (Orphaned rendering recovery)
+        # Trạng thái kẹt (orphaned rendering): hiển thị suy ra từ đĩa, không ghi.
         if st == "rendering" and idx not in active_set:
             clip_p = clips_dir / f"shot_{idx:03d}_clip.mp4"
             if clip_p.exists() and clip_p.stat().st_size > 500:
-                s["status"] = "review"
-                st = "review"
-                s["video_url"] = f"/api/shot-desk/projects/{project_id}/shots/{idx}/video"
+                display_status = "review"
+                if not display_video_url:
+                    display_video_url = f"/api/shot-desk/projects/{project_id}/shots/{idx}/video"
             else:
-                s["status"] = "ready"
-                st = "ready"
-                if not s.get("error"):
-                    s["error"] = "Tiến trình render trước bị gián đoạn do server khởi động lại. Hãy bấm Render lại."
-            dirty = True
+                display_status = "ready"
+                if not display_error:
+                    display_error = "Tiến trình render trước bị gián đoạn do server khởi động lại. Hãy bấm Render lại."
 
-        if st == "rendering":
+        if display_status == "rendering":
             is_rendering = True
 
         shots_summary.append({
             "index": idx,
-            "status": st,
-            "video_url": s.get("video_url"),
+            "status": display_status,
+            "video_url": display_video_url,
             "audio_url": s.get("audio_url"),
-            "error": s.get("error"),
+            "error": display_error,
             "audit": s.get("audit"),
         })
-
-    if dirty:
-        try:
-            save_shot_desk_project(p)
-        except Exception as e:
-            print(f"[ShotDesk Status] Auto-save recovery failed: {e}")
 
     return {
         "id": p.get("id"),
@@ -1321,6 +1823,10 @@ def api_shot_desk_reset_stuck(project_id: str):
 @app.delete("/api/shot-desk/projects/{project_id}")
 def api_shot_desk_delete_project(project_id: str):
     """Xóa dự án Shot Desk an toàn, chống path traversal."""
+    if ACTIVE_SHOT_TASKS.get(project_id) or project_id in ACTIVE_SHOT_DESK_COMPOSE:
+        return JSONResponse(
+            {"error": "Dự án đang render/dựng, không thể xoá. Hãy đợi hoàn tất trước."},
+            status_code=409)
     target = get_safe_project_dir(project_id)
     if target.exists():
         shutil.rmtree(target)
@@ -1404,7 +1910,7 @@ def api_shot_desk_get_shot_audio(project_id: str, shot_index: int):
 
 class ShotRenderRequest(BaseModel):
     use_compliance: bool = False
-    custom_prompt: Optional[str] = None
+    custom_prompt: Optional[str] = Field(default=None, max_length=5000)
     background: bool = True
 
 
@@ -1480,7 +1986,7 @@ async def api_shot_desk_render_shot(
 
 
 class RenderAllRequest(BaseModel):
-    concurrent: int = 6
+    concurrent: int = Field(default=6, ge=1, le=24)
 
 
 @app.post("/api/shot-desk/projects/{project_id}/render-all")
@@ -1493,14 +1999,14 @@ async def api_shot_desk_render_all(project_id: str, payload: Optional[RenderAllR
     # Tự động phát hiện số tài khoản Muse đang hoạt động để phân bổ tối đa toàn bộ tài khoản
     num_accounts = 6
     try:
-        async with httpx.AsyncClient(timeout=3.0) as cl:
-            hr = await cl.get(f"{MUSE_API_URL}/admin/accounts", headers={"Authorization": f"Bearer {MUSE_API_KEY}"})
-            if hr.status_code == 200:
-                d = hr.json()
-                accs = d.get("accounts", []) if isinstance(d, dict) else d
-                enabled_accs = [a for a in accs if a.get("enabled", True)]
-                if enabled_accs:
-                    num_accounts = len(enabled_accs)
+        _cl = get_http_client()
+        hr = await _cl.get(f"{MUSE_API_URL}/admin/accounts", headers={"Authorization": f"Bearer {MUSE_API_KEY}"}, timeout=3.0)
+        if hr.status_code == 200:
+            d = hr.json()
+            accs = d.get("accounts", []) if isinstance(d, dict) else d
+            enabled_accs = [a for a in accs if a.get("enabled", True)]
+            if enabled_accs:
+                num_accounts = len(enabled_accs)
     except Exception as acc_e:
         print(f"[RenderAll] Warning querying active accounts: {acc_e}")
 
@@ -1601,21 +2107,21 @@ def api_shot_desk_approve_all(project_id: str, payload: Optional[ApproveAllReque
 
 
 class ShotEditRequest(BaseModel):
-    prompt: Optional[str] = None
-    compliance_prompt: Optional[str] = None
-    voiceover: Optional[str] = None
-    duration: Optional[int] = None
-    transition_note: Optional[str] = None
+    prompt: Optional[str] = Field(default=None, max_length=5000)
+    compliance_prompt: Optional[str] = Field(default=None, max_length=5000)
+    voiceover: Optional[str] = Field(default=None, max_length=5000)
+    duration: Optional[int] = Field(default=None, ge=1, le=60)
+    transition_note: Optional[str] = Field(default=None, max_length=1000)
     reset_status: bool = True
     voice_mode: Optional[str] = None  # "narration" | "dialogue"
-    speaker: Optional[str] = None
-    voice: Optional[str] = None       # "vi-VN-HoaiMyNeural" | "vi-VN-NamMinhNeural"
+    speaker: Optional[str] = Field(default=None, max_length=200)
+    voice: Optional[str] = Field(default=None, max_length=200)  # "vi-VN-HoaiMyNeural" | "vi-VN-NamMinhNeural"
     lip_sync: Optional[bool] = None
 
 
 class ProjectSettingsRequest(BaseModel):
-    default_voice: Optional[str] = None
-    default_voice_mode: Optional[str] = None
+    default_voice: Optional[str] = Field(default=None, max_length=200)
+    default_voice_mode: Optional[str] = Field(default=None, max_length=200)
     apply_to_all_shots: bool = False
 
 
@@ -1756,11 +2262,11 @@ async def api_shot_desk_auto_heal_all(
 class ShotDeskComposeRequest(BaseModel):
     allow_partial: bool = False
     bg_music_path: Optional[str] = None
-    music_volume: float = 0.25
-    voice_volume: float = 1.0
-    subtitle_mode: str = "burn_in"
-    quality: str = "720p"
-    sound_bridge_duration: float = 0.75
+    music_volume: float = Field(default=0.25, ge=0.0, le=2.0)
+    voice_volume: float = Field(default=1.0, ge=0.0, le=2.0)
+    subtitle_mode: str = Field(default="burn_in", max_length=20)
+    quality: str = Field(default="720p", max_length=20)
+    sound_bridge_duration: float = Field(default=0.75, ge=0.0, le=5.0)
 
 
 COMPOSE_STATUS: dict[str, dict] = {}
@@ -1843,8 +2349,16 @@ def api_shot_desk_compose_status(project_id: str):
 
 
 @app.post("/api/shot-desk/projects/{project_id}/open-folder")
-def api_shot_desk_open_folder(project_id: str):
-    """Mở thư mục final/ chứa video thành phẩm trực tiếp trong Windows Explorer."""
+def api_shot_desk_open_folder(project_id: str, request: Request):
+    """Mở thư mục final/ chứa video thành phẩm trực tiếp trong Windows Explorer.
+    CHỈ khả dụng khi truy cập từ localhost (127.0.0.1/::1); truy cập từ xa -> 403.
+    Khi STUDIO_API_KEY được đặt thì request còn phải qua auth middleware (audit §2.8).
+    Frontend vẫn gọi được như cũ khi chạy local; mở folder từ xa bị chặn có chủ đích."""
+    _host = request.client.host if request.client else ""
+    if _host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(
+            status_code=403,
+            detail="open-folder chỉ khả dụng khi truy cập từ localhost")
     import sys
     clean_id = project_id.strip()
     proj_dir = get_safe_project_dir(clean_id)
@@ -1911,22 +2425,22 @@ PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class ProjectSaveRequest(BaseModel):
-    name: str
-    title: str = ""
-    script_text: str = ""
-    aspect_ratio: str = "16:9"
-    voice: str = "vi-VN-HoaiMyNeural"
-    export_mode: str = "full"
-    chain_mode: str = "none"
-    chain_fallback_mode: str = "independent"
-    subtitle_mode: str = "burn_in"
-    quality: str = "720p"
-    transition: str = "none"
+    name: str = Field(max_length=100)
+    title: str = Field(default="", max_length=200)
+    script_text: str = Field(default="", max_length=100000)
+    aspect_ratio: str = Field(default="16:9", max_length=10)
+    voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=200)
+    export_mode: str = Field(default="full", max_length=20)
+    chain_mode: str = Field(default="none", max_length=20)
+    chain_fallback_mode: str = Field(default="independent", max_length=20)
+    subtitle_mode: str = Field(default="burn_in", max_length=20)
+    quality: str = Field(default="720p", max_length=20)
+    transition: str = Field(default="none", max_length=20)
     bg_music_path: Optional[str] = None
-    music_volume: float = 0.25
-    voice_volume: float = 1.0
-    scenes: List[Dict[str, Any]] = []
-    characters: List[Dict[str, Any]] = []
+    music_volume: float = Field(default=0.25, ge=0.0, le=2.0)
+    voice_volume: float = Field(default=1.0, ge=0.0, le=2.0)
+    scenes: List[Dict[str, Any]] = Field(default=[], max_length=200)
+    characters: List[Dict[str, Any]] = Field(default=[], max_length=100)
     style_locks: Dict[str, str] = {}
 
 
@@ -1939,8 +2453,11 @@ def api_save_project(req: ProjectSaveRequest):
     filepath = PROJECTS_DIR / f"{clean_name}.json"
     data = req.model_dump()
     data["saved_at"] = time.time()
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        _atomic_write_json(filepath, data)
+    except Exception as exc:
+        logger.exception("Không lưu được project %s", clean_name)
+        return JSONResponse({"error": f"Không lưu được project: {exc}"}, status_code=500)
     return {"success": True, "name": clean_name, "message": f"Đã lưu project '{clean_name}'"}
 
 
@@ -1973,8 +2490,17 @@ def api_get_project(name: str):
     filepath = (PROJECTS_DIR / f"{clean_name}.json").resolve()
     if not filepath.is_relative_to(PROJECTS_DIR.resolve()) or not filepath.exists() or not filepath.is_file():
         return JSONResponse({"error": f"Không tìm thấy project '{name}'"}, status_code=404)
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        return JSONResponse(
+            {"error": f"File project '{name}' bị hỏng (JSON không hợp lệ): {exc}"},
+            status_code=500)
+    except OSError as exc:
+        return JSONResponse(
+            {"error": f"Không đọc được file project '{name}': {exc}"},
+            status_code=500)
     return data
 
 
@@ -2005,9 +2531,13 @@ async def api_upload_music(file: UploadFile = File(...)):
     suffix = Path(file.filename).suffix.lower()
     if suffix not in [".mp3", ".wav", ".m4a", ".aac", ".ogg"]:
         return JSONResponse({"error": "Định dạng âm thanh không hỗ trợ (chỉ nhận .mp3, .wav, .m4a, .aac, .ogg)"}, status_code=400)
+    content = await _read_upload_capped(file, max_bytes=_MAX_MUSIC_UPLOAD_BYTES, label="File nhạc")
+    if not _sniff_audio_kind(content[:16], suffix):
+        return JSONResponse(
+            {"error": "Nội dung file không khớp định dạng âm thanh đã khai báo"},
+            status_code=400)
     safe_name = f"{uuid.uuid4().hex[:6]}_{Path(file.filename).name.replace(' ', '_')}"
     target = MUSIC_DIR / safe_name
-    content = await file.read()
     with open(target, "wb") as f:
         f.write(content)
     return {
@@ -2048,6 +2578,14 @@ def api_get_music_file(filename: str):
 @app.post("/api/workspace/clean")
 def api_clean_workspace(keep_projects: bool = True):
     """Dọn dẹp các thư mục job tạm, giải phóng dung lượng đĩa cứng và bảo toàn thư viện dự án."""
+    with JOBS_LOCK:
+        running = [jid for jid, j in JOBS.items() if j.get("status") == "running"]
+        active_tasks = [jid for jid, t in JOB_TASKS.items() if not t.done()]
+    still_running = sorted(set(running) | set(active_tasks))
+    if still_running:
+        return JSONResponse(
+            {"error": f"Không thể dọn dẹp: còn job đang chạy ({', '.join(still_running)}). Hãy hủy/đợi hoàn tất trước."},
+            status_code=409)
     deleted_jobs = 0
     bytes_freed = 0
     protected_dirs = {"_uploads", "_music", "_voice_previews"}
@@ -2081,16 +2619,24 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 @app.post("/api/upload-image")
 async def upload_image(file: UploadFile = File(...)):
     """Upload ảnh tham chiếu nhân vật trực tiếp từ máy tính."""
+    # Đọc chunked + verify magic bytes TRƯỚC try (để 413/400 không bị nuốt thành 500).
+    # Chỉ nhận PNG/JPEG/WebP thật; .html/.svg/.htm giả dạng ảnh bị từ chối.
+    content = await _read_upload_capped(file, max_bytes=_MAX_IMAGE_UPLOAD_BYTES, label="Ảnh")
+    kind = _sniff_image_kind(content[:16])
+    if kind is None:
+        return JSONResponse(
+            {"error": "File không phải ảnh PNG/JPEG/WebP hợp lệ (đã kiểm tra magic bytes); không nhận .html/.svg/.htm"},
+            status_code=400)
+    mime = {"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}[kind]
+    ext = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}[kind]
     try:
-        content = await file.read()
         import base64
-        import mimetypes
-        mime = file.content_type or mimetypes.guess_type(file.filename)[0] or "image/png"
         b64_data = base64.b64encode(content).decode("ascii")
         data_url = f"data:{mime};base64,{b64_data}"
 
-        clean_name = Path(file.filename).name.replace(" ", "_")
-        safe_name = f"{uuid.uuid4().hex[:8]}_{clean_name}"
+        # Đuôi file lấy theo nội dung thật, tên chỉ giữ ký tự an toàn.
+        stem = re.sub(r"[^A-Za-z0-9_\-]", "_", Path(file.filename).stem)[:50] or "image"
+        safe_name = f"{uuid.uuid4().hex[:8]}_{stem}{ext}"
         save_path = UPLOAD_DIR / safe_name
         async with aiofiles.open(save_path, "wb") as f:
             await f.write(content)
@@ -2112,9 +2658,16 @@ def get_uploaded_image(filename: str):
     path = resolve_safe_upload_path(filename)
     if not path.exists() or not path.is_file():
         return JSONResponse({"error": "File ảnh không tồn tại"}, status_code=404)
+    # Chỉ phục vụ ảnh (upload mới đã verify magic bytes); header chống sniff/XSS
+    # nếu có file lạ lọt vào từ trước. Giữ inline để <img> trong UI vẫn hiển thị.
+    if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"):
+        return JSONResponse({"error": "File không phải định dạng ảnh cho phép"}, status_code=404)
     import mimetypes
     mime = mimetypes.guess_type(path.name)[0] or "image/png"
-    return FileResponse(str(path), media_type=mime)
+    return FileResponse(str(path), media_type=mime, headers={
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 CHARACTERS_FILE = WORKSPACE / "_characters.json"
@@ -2149,7 +2702,10 @@ DEFAULT_CHARACTERS = [
 
 def load_characters() -> List[Dict]:
     if not CHARACTERS_FILE.exists():
-        save_characters(DEFAULT_CHARACTERS)
+        try:
+            save_characters(DEFAULT_CHARACTERS)
+        except Exception:
+            logger.warning("Không ghi được _characters.json mặc định; dùng dữ liệu trong bộ nhớ.")
         return DEFAULT_CHARACTERS
     try:
         with open(CHARACTERS_FILE, "r", encoding="utf-8") as f:
@@ -2160,19 +2716,19 @@ def load_characters() -> List[Dict]:
 
 def save_characters(chars: List[Dict]):
     try:
-        with open(CHARACTERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(chars, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[SaveCharactersError] {e}")
+        _atomic_write_json(CHARACTERS_FILE, chars)
+    except Exception:
+        logger.exception("Không ghi được _characters.json")
+        raise
 
 
 class CharacterModel(BaseModel):
     id: Optional[str] = None
-    name: str
+    name: str = Field(max_length=200)
     aliases: Optional[List[str]] = []
     avatar: Optional[str] = ""
-    description: Optional[str] = ""
-    voice: Optional[str] = "vi-VN-HoaiMyNeural"
+    description: Optional[str] = Field(default="", max_length=5000)
+    voice: Optional[str] = Field(default="vi-VN-HoaiMyNeural", max_length=200)
     character_sheet: Optional[Dict[str, str]] = Field(default_factory=lambda: {
         "front": "", "side": "", "closeup": "", "fullbody": ""
     })
@@ -2223,7 +2779,10 @@ def api_save_character(char: CharacterModel):
     if not found:
         chars.insert(0, data)
 
-    save_characters(chars)
+    try:
+        save_characters(chars)
+    except Exception as exc:
+        return JSONResponse({"error": f"Không lưu được hồ sơ nhân vật: {exc}"}, status_code=500)
     return {"success": True, "character": data}
 
 
@@ -2232,14 +2791,16 @@ def api_delete_character(char_id: str):
     """Xóa hồ sơ nhân vật."""
     chars = load_characters()
     filtered = [c for c in chars if c.get("id") != char_id]
-    save_characters(filtered)
+    try:
+        save_characters(filtered)
+    except Exception as exc:
+        return JSONResponse({"error": f"Không xoá được hồ sơ nhân vật: {exc}"}, status_code=500)
     return {"success": True, "id": char_id}
 
 
 class SheetGenRequest(BaseModel):
-    angle: str = "front"  # "front" | "side" | "closeup" | "fullbody" | "all"
-    prompt_override: Optional[str] = ""
-
+    angle: str = Field(default="front", max_length=20)  # "front" | "side" | "closeup" | "fullbody" | "all"
+    prompt_override: Optional[str] = Field(default="", max_length=5000)
 
 @app.post("/api/characters/{char_id}/generate-sheet")
 async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
@@ -2257,6 +2818,7 @@ async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
             break
     if not target:
         raise HTTPException(404, "Không tìm thấy hồ sơ nhân vật")
+    require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
 
     char_sheet = target.get("character_sheet") or {"front": "", "side": "", "closeup": "", "fullbody": ""}
     for k in ["front", "side", "closeup", "fullbody"]:
@@ -2274,7 +2836,8 @@ async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
 
     base_ref = target.get("avatar") or char_sheet.get("front") or ""
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    client = get_http_client()
+    if True:  # giữ nguyên indent khối for bên dưới (client dùng chung, không đóng)
         for ang in angles:
             extra = req.prompt_override if req.prompt_override else angle_prompts.get(ang, angle_prompts["front"])
             full_prompt = f"{target.get('name', '')}, {target.get('description', '')}, {extra}"
@@ -2303,7 +2866,8 @@ async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
                 res = await client.post(
                     f"{MUSE_API_URL}/v1/images/generations",
                     json=payload,
-                    headers={"Authorization": f"Bearer {MUSE_API_KEY}", "Content-Type": "application/json"}
+                    headers={"Authorization": f"Bearer {MUSE_API_KEY}", "Content-Type": "application/json"},
+                    timeout=180.0,
                 )
                 if res.status_code == 200:
                     data = res.json()
@@ -2313,7 +2877,7 @@ async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
                         if img_url:
                             if img_url.startswith("/"):
                                 img_url = f"{MUSE_API_URL}{img_url}"
-                            img_resp = await client.get(img_url)
+                            img_resp = await client.get(img_url, timeout=180.0)
                             if img_resp.status_code == 200:
                                 fname = f"bible_{char_id}_{ang}_{uuid.uuid4().hex[:6]}.png"
                                 save_path = WORKSPACE / "_uploads" / fname
@@ -2332,12 +2896,15 @@ async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
                 print(f"[GenerateSheetException] Angle {ang}: {exc}")
 
     target["character_sheet"] = char_sheet
-    save_characters(chars)
+    try:
+        save_characters(chars)
+    except Exception as exc:
+        logger.warning("Không lưu được character sheet cho %s: %s", char_id, exc)
     return {"success": True, "character": target, "sheet": char_sheet}
 
 
 class SheetAngleRequest(BaseModel):
-    angle: str
+    angle: str = Field(max_length=20)
     image_url: str
 
 
@@ -2352,7 +2919,10 @@ def api_set_character_sheet_angle(char_id: str, req: SheetAngleRequest):
             c["character_sheet"][req.angle] = req.image_url.strip()
             if req.angle == "front" and not c.get("avatar"):
                 c["avatar"] = req.image_url.strip()
-            save_characters(chars)
+            try:
+                save_characters(chars)
+            except Exception as exc:
+                return JSONResponse({"error": f"Không lưu được character sheet: {exc}"}, status_code=500)
             return {"success": True, "character": c}
     raise HTTPException(404, "Không tìm thấy hồ sơ nhân vật")
 
@@ -2368,8 +2938,8 @@ def api_get_scene_last_frame(job_id: str, scene_idx: int):
 
 
 class BeatBreakdownRequest(BaseModel):
-    script_text: str
-    target_beat_duration: int = 4
+    script_text: str = Field(max_length=50000)
+    target_beat_duration: int = Field(default=4, ge=1, le=10)
 
 
 @app.post("/api/ai/breakdown-beats")
@@ -2404,7 +2974,10 @@ Trả về JSON mảng các đối tượng:
 Chỉ trả về JSON thuần, không giải thích thêm."""
 
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        if not MUSE_API_KEY:
+            # Không có key thì bỏ qua hẳn lượt gọi AI, dùng fallback cục bộ bên dưới.
+            raise RuntimeError("Muse API key chưa được cấu hình — dùng fallback cục bộ")
+        async with _shared_client_ctx() as client:
             res = await client.post(
                 f"{MUSE_API_URL}/v1/chat/completions",
                 json={
@@ -2412,7 +2985,8 @@ Chỉ trả về JSON thuần, không giải thích thêm."""
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.4
                 },
-                headers={"Authorization": f"Bearer {MUSE_API_KEY}"}
+                headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
+                timeout=45.0,
             )
             if res.status_code == 200:
                 content = res.json()["choices"][0]["message"]["content"]
@@ -2490,17 +3064,34 @@ async def preview_voice(voice: str = "vi-VN-HoaiMyNeural", text: str = ""):
     import hashlib
     cache_dir = WORKSPACE / "_voice_previews"
     cache_dir.mkdir(exist_ok=True)
-    safe_voice_filename = voice.replace(":", "_")
+    # Sanitize voice thành tên file an toàn (audit §2.7): chỉ [A-Za-z0-9_:-],
+    # thay ':' bằng '_', cấm '/', '\\', '..'. Vd 'vieneu:AdamBua' -> 'vieneu_AdamBua'.
+    safe_voice_filename = re.sub(r"[^A-Za-z0-9_:\-]", "_", voice or "")
+    safe_voice_filename = safe_voice_filename.replace(":", "_").strip("._")[:80] or "voice"
     if text.strip():
         text_hash = hashlib.md5(sample_text.encode("utf-8")).hexdigest()[:8]
         cache_file = cache_dir / f"{safe_voice_filename}_{text_hash}.mp3"
     else:
         cache_file = cache_dir / f"{safe_voice_filename}.mp3"
 
+    # Phòng thủ chiều sâu: đảm bảo path cuối vẫn nằm trong cache_dir.
+    cache_file = cache_file.resolve()
+    if not cache_file.is_relative_to(cache_dir.resolve()):
+        raise HTTPException(status_code=400, detail="Tên giọng không hợp lệ")
+
     if not cache_file.exists() or cache_file.stat().st_size < 500:
         await synthesize_voice(sample_text, voice, str(cache_file))
 
     return FileResponse(str(cache_file), media_type="audio/mpeg")
+
+
+@app.get("/api/auth/status")
+async def auth_status():
+    """Cho frontend biết server có bắt buộc X-API-Key không. Miễn auth.
+
+    Chỉ trả boolean — không trả key hay bất kỳ secret nào.
+    """
+    return {"auth_required": bool(os.getenv("STUDIO_API_KEY"))}
 
 
 @app.get("/api/health")
@@ -2512,7 +3103,9 @@ async def health_check():
     muse_error = ""
     accounts = 0
     try:
-        async with httpx.AsyncClient() as client:
+        if not MUSE_API_KEY:
+            raise RuntimeError("Muse API key chưa được cấu hình (MUSE2API_KEY)")
+        async with _shared_client_ctx() as client:
             r = await client.get(
                 f"{muse_url}/admin/accounts",
                 headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
@@ -2540,8 +3133,8 @@ async def health_check():
 
 
 class ScriptConvertRequest(BaseModel):
-    raw_script: str
-    style_preset: Optional[str] = "shot on ARRI Alexa 35, Zeiss Master Prime, anamorphic widescreen, 4K, teal and orange"
+    raw_script: str = Field(max_length=100000)
+    style_preset: Optional[str] = Field(default="shot on ARRI Alexa 35, Zeiss Master Prime, anamorphic widescreen, 4K, teal and orange", max_length=5000)
 
 
 def local_convert_script(raw: str, style_preset: Optional[str] = "") -> str:
@@ -2708,7 +3301,10 @@ async def ai_convert_script(req: ScriptConvertRequest):
     )
 
     try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
+        if not MUSE_API_KEY:
+            # Không có key thì bỏ qua hẳn lượt gọi AI, dùng fallback cục bộ bên dưới.
+            raise RuntimeError("Muse API key chưa được cấu hình — dùng fallback cục bộ")
+        async with _shared_client_ctx() as client:
             resp = await client.post(
                 f"{MUSE_API_URL}/v1/chat/completions",
                 headers={
@@ -2722,7 +3318,8 @@ async def ai_convert_script(req: ScriptConvertRequest):
                         {"role": "user", "content": f"Phong cách mong muốn: {req.style_preset}\n\nKịch bản thô cần chuyển thể:\n{raw}"}
                     ],
                     "temperature": 0.7
-                }
+                },
+                timeout=25.0,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -2772,7 +3369,10 @@ async def auto_enhance_prompt(prompt: str, size: str = "16:9") -> str:
         "Output ONLY the final English prompt as a single paragraph. Do not include markdown or explanations."
     )
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        if not MUSE_API_KEY:
+            # Không có key thì bỏ qua hẳn lượt gọi AI, dùng fallback heuristic bên dưới.
+            raise RuntimeError("Muse API key chưa được cấu hình — dùng fallback cục bộ")
+        async with _shared_client_ctx() as client:
             resp = await client.post(
                 f"{MUSE_API_URL}/v1/chat/completions",
                 headers={"Authorization": f"Bearer {MUSE_API_KEY}", "Content-Type": "application/json"},
@@ -2783,7 +3383,8 @@ async def auto_enhance_prompt(prompt: str, size: str = "16:9") -> str:
                         {"role": "user", "content": f"Aspect ratio: {size}. Prompt: {raw}"}
                     ],
                     "temperature": 0.4,
-                }
+                },
+                timeout=8.0,
             )
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -2801,15 +3402,15 @@ async def auto_enhance_prompt(prompt: str, size: str = "16:9") -> str:
 
 
 class QuickVideoRequest(BaseModel):
-    prompt: str
-    duration: int = 5
-    size: str = "16:9"
+    prompt: str = Field(max_length=5000)
+    duration: int = Field(default=5, ge=1, le=60)
+    size: str = Field(default="16:9", max_length=10)
     reference_image: Optional[str] = None
 
 
 class EnhancePromptReq(BaseModel):
-    prompt: str
-    size: str = "16:9"
+    prompt: str = Field(max_length=5000)
+    size: str = Field(default="16:9", max_length=10)
 
 
 @app.post("/api/quick-video/enhance-prompt")
@@ -2822,6 +3423,7 @@ async def api_quick_video_enhance_prompt(req: EnhancePromptReq):
 @app.post("/api/quick-video")
 async def api_quick_video(req: QuickVideoRequest):
     """Tạo video ngắn trực tiếp qua muse2api /v1/videos, bỏ qua toàn bộ pipeline phim."""
+    require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
     prompt_to_send = req.prompt.strip()
     # Tự động tối ưu hóa prompt nếu nhập tiếng Việt hoặc prompt quá ngắn để đảm bảo Muse AI nhận diện đúng
     if has_vietnamese(prompt_to_send) or len(prompt_to_send.split()) < 5:
@@ -2855,11 +3457,12 @@ async def api_quick_video(req: QuickVideoRequest):
     payload["timeout"] = 600
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _shared_client_ctx() as client:
             r = await client.post(
                 f"{MUSE_API_URL}/v1/videos",
                 json=payload,
                 headers={"Authorization": f"Bearer {MUSE_API_KEY}", "Content-Type": "application/json"},
+                timeout=30.0,
             )
         if r.status_code in (200, 202):
             data = r.json()
@@ -2875,11 +3478,13 @@ async def api_quick_video(req: QuickVideoRequest):
 @app.get("/api/quick-video/{task_id}")
 async def api_quick_video_status(task_id: str):
     """Kiểm tra trạng thái task video nhanh từ muse2api."""
+    require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with _shared_client_ctx() as client:
             r = await client.get(
                 f"{MUSE_API_URL}/v1/videos/{task_id}",
                 headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
+                timeout=15.0,
             )
         if r.status_code == 200:
             data = r.json()
@@ -2909,11 +3514,13 @@ async def api_quick_video_status(task_id: str):
 @app.get("/api/quick-video/{task_id}/stream")
 async def api_quick_video_stream(task_id: str):
     """Proxy stream video nhanh từ muse2api về browser (tránh CORS)."""
+    require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
     try:
-        async with httpx.AsyncClient(timeout=15.0) as status_client:
+        async with _shared_client_ctx() as status_client:
             r = await status_client.get(
                 f"{MUSE_API_URL}/v1/videos/{task_id}",
                 headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
+                timeout=15.0,
             )
         if r.status_code != 200:
             return JSONResponse({"error": "task not found"}, status_code=404)
@@ -2944,16 +3551,16 @@ async def api_quick_video_stream(task_id: str):
 # ── AFFILIATE MARKETING (TIẾP THỊ LIÊN KẾT) ──────────────────────────────────
 
 class AffiliateRenderRequest(BaseModel):
-    title: str = "Video Tiếp Thị"
-    scenes: List[Dict[str, Any]]
-    voice: str = "vieneu:AdamBua"
-    aspect_ratio: str = "9:16"
+    title: str = Field(default="Video Tiếp Thị", max_length=200)
+    scenes: List[Dict[str, Any]] = Field(max_length=200)
+    voice: str = Field(default="vieneu:AdamBua", max_length=200)
+    aspect_ratio: str = Field(default="9:16", max_length=10)
     bg_music_path: Optional[str] = None
-    music_volume: Optional[float] = 0.20
-    voice_volume: Optional[float] = 1.0
-    quality: Optional[str] = "720p"
-    transition: Optional[str] = "none"
-    font_size: Optional[int] = 22
+    music_volume: Optional[float] = Field(default=0.20, ge=0.0, le=2.0)
+    voice_volume: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
+    quality: Optional[str] = Field(default="720p", max_length=20)
+    transition: Optional[str] = Field(default="none", max_length=20)
+    font_size: Optional[int] = Field(default=22, ge=8, le=72)
 
 
 @app.get("/api/affiliate/templates")
@@ -2972,12 +3579,16 @@ async def api_generate_affiliate_script(req: ProductAffiliateRequest):
     """Sinh kịch bản video tiếp thị liên kết chuẩn chuyển đổi cao (TikTok Shop, Shopee, Reels)."""
     if not req.product_name or not req.product_name.strip():
         return JSONResponse({"error": "Vui lòng nhập tên sản phẩm"}, status_code=400)
-    res = await generate_affiliate_script_ai(req, MUSE_API_URL, MUSE_API_KEY)
+    if MUSE_API_KEY:
+        res = await generate_affiliate_script_ai(req, MUSE_API_URL, MUSE_API_KEY)
+    else:
+        # Không có key: bỏ qua lượt gọi AI, dùng bộ tạo cục bộ (không gọi gateway bằng key giả).
+        res = generate_affiliate_script_local(req)
     return res.model_dump()
 
 
 @app.post("/api/affiliate/render")
-async def api_render_affiliate(req: AffiliateRenderRequest, background_tasks: BackgroundTasks):
+async def api_render_affiliate(req: AffiliateRenderRequest):
     """Bắt đầu sản xuất video tiếp thị liên kết dọc 9:16 hoàn chỉnh với kịch bản, lồng tiếng, phụ đề và nhạc nền."""
     if not req.scenes:
         return JSONResponse({"error": "Không có phân cảnh nào để render"}, status_code=400)
@@ -3010,10 +3621,11 @@ async def api_render_affiliate(req: AffiliateRenderRequest, background_tasks: Ba
 
     job_id = uuid.uuid4().hex[:12]
     job = new_job(job_id, len(movie_req.scenes), req=movie_req)
-    save_job(job)
+    _save_job_or_http500(job)
     job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh (9:16) — Giọng: {movie_req.voice}")
-    save_job(job)
-    background_tasks.add_task(film_pipeline, job, movie_req)
+    _save_job_or_http500(job)
+    # Nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
+    _spawn_job_task(job_id, film_pipeline(job, movie_req))
 
     return {"job_id": job_id, "message": "Đã bắt đầu sản xuất video tiếp thị liên kết", "total_scenes": len(movie_req.scenes)}
 

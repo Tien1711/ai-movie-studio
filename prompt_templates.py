@@ -6,6 +6,7 @@ Giúp người mới bắt đầu dễ dàng copy/paste kịch bản từ ChatGP
 với định dạng chuẩn để công cụ AI Movie Studio tự động bóc tách 100% không lỗi.
 """
 
+import copy
 from typing import Dict, Any, List
 
 # ── 1. Prompt Master dành riêng cho ChatGPT / Claude / DeepSeek ──────────────
@@ -452,11 +453,15 @@ Cảnh 2 (6s): Góc cận mặt người phụ nữ mỉm cười. Phụng Anh: 
 
 
 def get_prompt_sheet_data() -> Dict[str, Any]:
-    """Trả về toàn bộ dữ liệu cấu trúc của Thư viện Sheet Prompt Mẫu."""
+    """Trả về toàn bộ dữ liệu cấu trúc của Thư viện Sheet Prompt Mẫu.
+
+    Trả bản copy sâu (deepcopy) để caller sửa thoải mái mà không mutate
+    các global SAMPLE_SCRIPTS / CINEMATIC_DICTIONARY / FORMAT_RULES.
+    """
     return {
         "success": True,
         "chatgpt_master_prompt": CHATGPT_MASTER_PROMPT,
-        "sample_scripts": SAMPLE_SCRIPTS,
-        "cinematic_dictionary": CINEMATIC_DICTIONARY,
-        "format_rules": FORMAT_RULES,
+        "sample_scripts": copy.deepcopy(SAMPLE_SCRIPTS),
+        "cinematic_dictionary": copy.deepcopy(CINEMATIC_DICTIONARY),
+        "format_rules": copy.deepcopy(FORMAT_RULES),
     }
