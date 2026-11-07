@@ -227,14 +227,64 @@ COMMON_PRODUCT_KEYWORDS = {
     "gối": "ergonomic memory foam cervical pillow"
 }
 
+# Bảng transliterate dấu tiếng Việt thủ công (dùng khi thư viện `unidecode`
+# không có sẵn trong requirements — KHÔNG strip dấu thành ký tự rác).
+_VI_DIACRITICS_MAP = str.maketrans({
+    "à": "a", "á": "a", "ả": "a", "ã": "a", "ạ": "a",
+    "ă": "a", "ằ": "a", "ắ": "a", "ẳ": "a", "ẵ": "a", "ặ": "a",
+    "â": "a", "ầ": "a", "ấ": "a", "ẩ": "a", "ẫ": "a", "ậ": "a",
+    "À": "A", "Á": "A", "Ả": "A", "Ã": "A", "Ạ": "A",
+    "Ă": "A", "Ằ": "A", "Ắ": "A", "Ẳ": "A", "Ẵ": "A", "Ặ": "A",
+    "Â": "A", "Ầ": "A", "Ấ": "A", "Ẩ": "A", "Ẫ": "A", "Ậ": "A",
+    "đ": "d", "Đ": "D",
+    "è": "e", "é": "e", "ẻ": "e", "ẽ": "e", "ẹ": "e",
+    "ê": "e", "ề": "e", "ế": "e", "ể": "e", "ễ": "e", "ệ": "e",
+    "È": "E", "É": "E", "Ẻ": "E", "Ẽ": "E", "Ẹ": "E",
+    "Ê": "E", "Ề": "E", "Ế": "E", "Ể": "E", "Ễ": "E", "Ệ": "E",
+    "ì": "i", "í": "i", "ỉ": "i", "ĩ": "i", "ị": "i",
+    "Ì": "I", "Í": "I", "Ỉ": "I", "Ĩ": "I", "Ị": "I",
+    "ò": "o", "ó": "o", "ỏ": "o", "õ": "o", "ọ": "o",
+    "ô": "o", "ồ": "o", "ố": "o", "ổ": "o", "ỗ": "o", "ộ": "o",
+    "ơ": "o", "ờ": "o", "ớ": "o", "ở": "o", "ỡ": "o", "ợ": "o",
+    "Ò": "O", "Ó": "O", "Ỏ": "O", "Õ": "O", "Ọ": "O",
+    "Ô": "O", "Ồ": "O", "Ố": "O", "Ổ": "O", "Ỗ": "O", "Ộ": "O",
+    "Ơ": "O", "Ờ": "O", "Ớ": "O", "Ở": "O", "Ỡ": "O", "Ợ": "O",
+    "ù": "u", "ú": "u", "ủ": "u", "ũ": "u", "ụ": "u",
+    "ư": "u", "ừ": "u", "ứ": "u", "ử": "u", "ữ": "u", "ự": "u",
+    "Ù": "U", "Ú": "U", "Ủ": "U", "Ũ": "U", "Ụ": "U",
+    "Ư": "U", "Ừ": "U", "Ứ": "U", "Ử": "U", "Ữ": "U", "Ự": "U",
+    "ỳ": "y", "ý": "y", "ỷ": "y", "ỹ": "y", "ỵ": "y",
+    "Ỳ": "Y", "Ý": "Y", "Ỷ": "Y", "Ỹ": "Y", "Ỵ": "Y",
+})
+
+try:
+    from unidecode import unidecode as _unidecode
+except Exception:  # unidecode không có trong requirements -> dùng bảng tay
+    _unidecode = None
+
+
+def _transliterate_vi(text: str) -> str:
+    """Bỏ dấu tiếng Việt mà không làm mất chữ: 'Đèn ngủ' -> 'Den ngu'.
+
+    Ưu tiên unidecode nếu có sẵn, nếu không dùng bảng mapping thủ công.
+    """
+    if _unidecode is not None:
+        return _unidecode(text)
+    return text.translate(_VI_DIACRITICS_MAP)
+
+
 def translate_product_to_en(vi_name: str) -> str:
     """Chuyển đổi tên sản phẩm tiếng Việt sang mô tả tiếng Anh để Muse AI nhận diện chuẩn 100%."""
     low = vi_name.lower().strip()
     for kw, en_trans in COMMON_PRODUCT_KEYWORDS.items():
         if kw in low:
             return f"sleek {en_trans} ({vi_name})"
-    clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', vi_name).strip()
-    return f"sleek commercial product ({clean})" if clean else "sleek lifestyle product"
+    # KHÔNG dùng re.sub(r'[^a-zA-Z0-9\\s]', ' ', ...) trực tiếp lên tiếng Việt
+    # có dấu: nó xóa dấu và biến "Đèn ngủ" thành "n ng". Transliterate trước,
+    # giữ nguyên tên gốc có dấu trong ngoặc để prompt không mất thông tin.
+    clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', _transliterate_vi(vi_name)).strip()
+    clean = re.sub(r'\s+', ' ', clean)
+    return f"sleek commercial product ({clean} / {vi_name})" if clean else "sleek lifestyle product"
 
 
 # ── 1.2. Kiểu quay Video (Shooting Styles) ───────────────────────────────────
@@ -346,6 +396,17 @@ def build_commercial_prompt(
     char_dna = persona_cfg["prompt_dna"]
     p_name_en = translate_product_to_en(product_name)
 
+    # Khung hình theo đúng aspect_ratio truyền vào (trước đây hardcode vertical
+    # 9:16 cho mọi tỉ lệ). Giá trị lạ -> fallback vertical 9:16 + giữ nguyên.
+    _framing_map = {
+        "16:9": "horizontal 16:9 framing",
+        "9:16": "vertical 9:16 framing",
+        "1:1": "square 1:1 framing",
+        "4:3": "horizontal 4:3 framing",
+        "21:9": "ultrawide 21:9 framing",
+    }
+    framing = _framing_map.get((aspect_ratio or "").strip(), "vertical 9:16 framing")
+
     # ─────────────────────────────────────────────────────────────
     # STYLE 1: Người mẫu không lộ mặt (Faceless Model)
     # Mẫu mặc/dùng sản phẩm, chỉ quay từ cổ trở xuống hoặc từ phía sau
@@ -358,36 +419,36 @@ def build_commercial_prompt(
             return (
                 f"High-energy commercial video hook, {faceless_tag}, enthusiastically lifting and presenting the {p_name_en} close to the camera, "
                 f"framed strictly from chest down, dynamic subtle push-in camera movement, dramatic warm studio rim lighting, "
-                f"vertical 9:16 framing, photorealistic 8k, crisp depth of field, {style_tag}, luxury commercial advertising masterpiece, strictly no face, no head portrait, no text, no watermark"
+                f"{framing}, photorealistic 8k, crisp depth of field, {style_tag}, luxury commercial advertising masterpiece, strictly no face, no head portrait, no text, no watermark"
             )
         elif role == "pain":
             return (
                 f"Relatable everyday lifestyle scene, {faceless_tag}, viewed from behind or shoulders down, showing authentic restless body language "
                 f"struggling with common hassle before discovering {p_name_en}, moody ambient indoor lighting, medium close-up shot from neck down, "
-                f"consistent identical clothing, vertical 9:16 framing, hyper-realistic 8k, cinematic realism, no face visible, no text, no watermark"
+                f"consistent identical clothing, {framing}, hyper-realistic 8k, cinematic realism, no face visible, no text, no watermark"
             )
         elif role == "demo":
             return (
                 f"Cinematic product in action shot, {faceless_tag}, shot from torso down effortlessly wearing and operating the {p_name_en}, "
                 f"showcasing {key_feature or 'smooth premium functionality'}, softbox diffused studio lighting, pristine clean reflections, "
-                f"vertical 9:16 framing, ultra-sharp textile and product detail, 60fps smooth movement, commercial product cinematography, 8k, no face, no text, no watermark"
+                f"{framing}, ultra-sharp textile and product detail, 60fps smooth movement, commercial product cinematography, 8k, no face, no text, no watermark"
             )
         elif role == "proof":
             return (
                 f"Aesthetic modern lifestyle result, {faceless_tag}, viewed gracefully from behind or waist down posing with the {p_name_en}, "
                 f"relaxed confident posture, warm ambient golden hour lighting, clean aesthetic minimalist room, "
-                f"vertical 9:16 framing, identical stylish outfit, authentic satisfaction, 8k photorealistic masterpiece, no face, no text, no watermark"
+                f"{framing}, identical stylish outfit, authentic satisfaction, 8k photorealistic masterpiece, no face, no text, no watermark"
             )
         elif role == "cta":
             return (
                 f"High conversion commercial finale, {faceless_tag}, holding {p_name_en} prominently in front of the vertical camera, "
                 f"hand gesturing excitedly pointing down towards the bottom-left corner of the vertical screen, "
-                f"studio spotlight, sparkling particle bokeh, dramatic rim light, vertical 9:16 framing, strictly shot from neck down, "
+                f"studio spotlight, sparkling particle bokeh, dramatic rim light, {framing}, strictly shot from neck down, "
                 f"high conversion e-commerce aesthetic, 8k resolution, luxury commercial advertising masterpiece, no face, no text, no watermark"
             )
         else:
             return (
-                f"Commercial advertising shot, {faceless_tag} with {p_name_en}, vertical 9:16 framing, studio lighting, "
+                f"Commercial advertising shot, {faceless_tag} with {p_name_en}, {framing}, studio lighting, "
                 f"8k resolution, cinematic color grading, photorealistic masterpiece, strictly no face, no text, no watermark"
             )
 
@@ -402,37 +463,37 @@ def build_commercial_prompt(
             return (
                 f"Eye-catching macro unboxing hook, clean well-groomed aesthetic hands lifting and revealing the {p_name_en} from a sleek minimalist gift box, "
                 f"placed on a {tabletop_env}, dynamic 45-degree macro angle, crisp focus on the product, warm softbox lighting, "
-                f"vertical 9:16 framing, 8k resolution, commercial advertising masterpiece, strictly only hands and product, no person, no face, no text, no watermark"
+                f"{framing}, 8k resolution, commercial advertising masterpiece, strictly only hands and product, no person, no face, no text, no watermark"
             )
         elif role == "pain":
             return (
                 f"Macro close-up demonstration, aesthetic hands struggling with an inferior old broken alternative, then gently pushing it aside for the new {p_name_en}, "
-                f"on a {tabletop_env}, moody dramatic lighting, extreme macro detail, vertical 9:16 framing, "
+                f"on a {tabletop_env}, moody dramatic lighting, extreme macro detail, {framing}, "
                 f"crisp tactile details, strictly hands only, no human face, 8k, cinematic product ad, no text, no watermark"
             )
         elif role == "demo":
             return (
                 f"Satisfying macro hands-on operation shot, pair of elegant hands effortlessly rotating 360 degrees, pressing buttons and demonstrating the {p_name_en}, "
                 f"showcasing {key_feature or 'smooth mechanical precision'}, on a {tabletop_env}, soft diffused studio light, pristine product reflections, "
-                f"vertical 9:16 framing, ultra-sharp macro lens, 60fps smooth movement, commercial product cinematography, strictly hands only, zero face, 8k, no text, no watermark"
+                f"{framing}, ultra-sharp macro lens, 60fps smooth movement, commercial product cinematography, strictly hands only, zero face, 8k, no text, no watermark"
             )
         elif role == "proof":
             return (
                 f"Satisfying macro showcase, aesthetic hands gently presenting the finished perfect result with the {p_name_en}, "
                 f"resting hands next to the product on a {tabletop_env}, soft golden hour rim light, beautiful creamy depth of field bokeh, "
-                f"vertical 9:16 framing, close-up hands only, no face, no torso, 8k photorealistic commercial, no text, no watermark"
+                f"{framing}, close-up hands only, no face, no torso, 8k photorealistic commercial, no text, no watermark"
             )
         elif role == "cta":
             return (
                 f"Commercial close-up finale, aesthetic hands placing the {p_name_en} heroically in center frame, "
                 f"one index finger pointing clearly down towards the bottom-left corner of the vertical screen, "
-                f"sparkling dust particles bokeh, dynamic studio spotlight, vertical 9:16 framing, strictly hands and product only, "
+                f"sparkling dust particles bokeh, dynamic studio spotlight, {framing}, strictly hands and product only, "
                 f"high conversion e-commerce commercial, 8k resolution, no person, no face, no text, no watermark"
             )
         else:
             return (
                 f"Macro commercial advertising shot, aesthetic hands interacting with {p_name_en} on a {tabletop_env}, "
-                f"vertical 9:16 framing, studio lighting, 8k resolution, strictly hands only, no face, no text, no watermark"
+                f"{framing}, studio lighting, 8k resolution, strictly hands only, no face, no text, no watermark"
             )
 
     # ─────────────────────────────────────────────────────────────
@@ -446,35 +507,35 @@ def build_commercial_prompt(
             return (
                 f"High-end 3D commercial advertising hook, pure product shot with STRICTLY ZERO HUMANS and NO HANDS, {p_name_en} floating dynamically "
                 f"or rising dramatically on a {studio_env}, dramatic volumetric rim lighting, cinematic slow-motion rotation, "
-                f"crisp 8k product reflections, metallic and glass highlights, vertical 9:16 framing, luxury TV commercial grade advertising, masterpiece, strictly no people, no text, no watermark"
+                f"crisp 8k product reflections, metallic and glass highlights, {framing}, luxury TV commercial grade advertising, masterpiece, strictly no people, no text, no watermark"
             )
         elif role == "pain":
             return (
                 f"Cinematic mood shot, the {p_name_en} displayed with dramatic high-contrast moody lighting on a textured dark granite pedestal, "
                 f"extreme macro detail, dramatic shallow depth of field, showcasing durable robust build, pure product showcase with ZERO HUMANS, "
-                f"vertical 9:16 framing, 8k resolution, cinematic commercial color grading, no person, no hands, no text, no watermark"
+                f"{framing}, 8k resolution, cinematic commercial color grading, no person, no hands, no text, no watermark"
             )
         elif role == "demo":
             return (
                 f"Pristine commercial demonstration, slow orbiting camera gliding smoothly 360 degrees around the {p_name_en}, "
                 f"demonstrating {key_feature or 'cutting-edge design and flawless functionality'}, mechanical precision, crystal clear reflections, "
-                f"luxury commercial cinematography, {studio_env}, STRICTLY NO PEOPLE, NO HANDS, vertical 9:16 framing, 8k resolution, advertising masterpiece, no text, no watermark"
+                f"luxury commercial cinematography, {studio_env}, STRICTLY NO PEOPLE, NO HANDS, {framing}, 8k resolution, advertising masterpiece, no text, no watermark"
             )
         elif role == "proof":
             return (
                 f"Gleaming luxury advertising beauty shot, the {p_name_en} resting on a premium minimalist white stone podium with soft pastel shadows and ambient light rays, "
                 f"glowing halo rim effect, 8k advertising masterpiece, pure clean product cinematography, zero people, zero hands, "
-                f"vertical 9:16 framing, photorealistic commercial, no text, no watermark"
+                f"{framing}, photorealistic commercial, no text, no watermark"
             )
         elif role == "cta":
             return (
                 f"Explosive commercial finale, the {p_name_en} in centered hero pose on a reflective glossy pedestal, dynamic spotlight flare, "
                 f"sparkling particle bokeh, dramatic camera tilt-up, high converting e-commerce commercial banner, "
-                f"STRICTLY NO HUMANS, NO HANDS, vertical 9:16 framing, 8k resolution, commercial advertising masterpiece, no text, no watermark"
+                f"STRICTLY NO HUMANS, NO HANDS, {framing}, 8k resolution, commercial advertising masterpiece, no text, no watermark"
             )
         else:
             return (
-                f"Commercial product advertising shot, {p_name_en} on {studio_env}, vertical 9:16 framing, studio lighting, "
+                f"Commercial product advertising shot, {p_name_en} on {studio_env}, {framing}, studio lighting, "
                 f"8k resolution, strictly no people, no hands, photorealistic masterpiece, no text, no watermark"
             )
 
@@ -487,36 +548,36 @@ def build_commercial_prompt(
             return (
                 f"High-energy commercial video hook, {char_dna}, looking directly at camera with an excited shocked expression, "
                 f"holding up the {p_name_en} enthusiastically, dynamic subtle push-in camera movement, dramatic studio rim lighting, "
-                f"vertical 9:16 framing, photorealistic 8k, crisp macro focus, depth of field, {style_tag}, masterpiece, commercial advertising, no text, no watermark"
+                f"{framing}, photorealistic 8k, crisp macro focus, depth of field, {style_tag}, masterpiece, commercial advertising, no text, no watermark"
             )
         elif role == "pain":
             return (
                 f"Relatable everyday lifestyle scene, the EXACT SAME {char_dna}, showing relatable funny frustration and distress "
                 f"while struggling with everyday annoyance before having {p_name_en}, cinematic moody indoor lighting, medium close-up shot, "
-                f"consistent facial identity, same hair and same outfit, vertical 9:16 framing, hyper-realistic 8k, masterpiece, no text, no watermark"
+                f"consistent facial identity, same hair and same outfit, {framing}, hyper-realistic 8k, masterpiece, no text, no watermark"
             )
         elif role == "demo":
             return (
                 f"Macro product demonstration shot, the hands of the SAME {char_dna} effortlessly operating the {p_name_en}, "
                 f"showcasing {key_feature or 'smooth functionality'}, softbox diffused studio lighting, pristine clean reflections, "
-                f"vertical 9:16 framing, ultra-sharp detail, 60fps smooth movement, commercial product cinematography, 8k, masterpiece, no text, no watermark"
+                f"{framing}, ultra-sharp detail, 60fps smooth movement, commercial product cinematography, 8k, masterpiece, no text, no watermark"
             )
         elif role == "proof":
             return (
                 f"Bright joyful lifestyle result, the EXACT SAME {char_dna}, smiling radiantly with a satisfied nod and giving a confident thumbs up "
-                f"next to the {p_name_en}, modern aesthetic background, warm ambient indoor lighting, vertical 9:16 framing, "
+                f"next to the {p_name_en}, modern aesthetic background, warm ambient indoor lighting, {framing}, "
                 f"identical facial features, same clothing, authentic satisfaction, cinematic color grading, 8k, photorealistic, masterpiece, no text, no watermark"
             )
         elif role == "cta":
             return (
                 f"High conversion commercial finale, the EXACT SAME {char_dna}, holding the {p_name_en} with a big winning smile, "
                 f"pointing finger excitedly down towards the bottom-left corner of the vertical screen, "
-                f"studio spotlight, sparkling particle bokeh, dramatic rim light, vertical 9:16 framing, identical character face and attire, "
+                f"studio spotlight, sparkling particle bokeh, dramatic rim light, {framing}, identical character face and attire, "
                 f"high conversion e-commerce aesthetic, 8k resolution, luxury commercial advertising masterpiece, no text, no watermark"
             )
         else:
             return (
-                f"Commercial advertising shot, {char_dna} with {p_name_en}, vertical 9:16 framing, studio lighting, "
+                f"Commercial advertising shot, {char_dna} with {p_name_en}, {framing}, studio lighting, "
                 f"8k resolution, cinematic color grading, photorealistic masterpiece, no text, no watermark"
             )
 
@@ -564,7 +625,13 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
     # --- KHUNG 1: HÀI HƯỚC / BỰA TROLL (Tối ưu riêng cho ⭐ Adam bựa) ---
     if framework == "hai_bua" or req.tone == "hai_bua":
         title = f"🤣 [BỰA REVIEW] {p_name} — Thề luôn, không xem phí cả nửa đời người!"
-        voice = "vieneu:AdamBua"
+        # Tôn trọng giọng user đã chọn: chỉ dùng giọng mặc định của framework
+        # (AdamBua) khi user chưa chọn giọng khác. Override thì log rõ ràng.
+        _default_voice = ProductAffiliateRequest.model_fields["voice"].default
+        if voice and voice != _default_voice:
+            print(f"[Affiliate Local] Warning: framework 'hai_bua' khuyến nghị giọng vieneu:AdamBua nhưng tôn trọng giọng user đã chọn ({voice}).")
+        else:
+            voice = "vieneu:AdamBua"
         scenes = [
             AffiliateScene(
                 index=1,
@@ -626,7 +693,13 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
     # --- KHUNG 2: REVIEW KOC / ĐẬP HỘP CHÂN THỰC ---
     elif framework == "review_koc":
         title = f"📦 Đập Hộp & Test Thực Tế {p_name} — Có Thực Sự Đáng Mua Không?"
-        voice = req.voice if req.voice != "vieneu:AdamBua" else "vieneu:TrucLy"
+        # Giọng user khác default thì giữ nguyên; chỉ khi user để giọng mặc
+        # định mới đổi sang TrucLy (giọng hợp framework này) và log rõ ràng.
+        if req.voice and req.voice != ProductAffiliateRequest.model_fields["voice"].default:
+            voice = req.voice
+        else:
+            print("[Affiliate Local] Warning: framework 'review_koc' đổi giọng mặc định sang vieneu:TrucLy (hợp format đập hộp/review).")
+            voice = "vieneu:TrucLy"
         scenes = [
             AffiliateScene(
                 index=1,
@@ -882,15 +955,40 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
 
 # ── 5. AI Script Generator (Gọi Muse2API hoặc LLM có Fallback) ───────────────
 
+def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
+    """Bóc JSON object khỏi phản hồi LLM một cách cân bằng (không dùng regex greedy).
+
+    Tìm dấu '{' đầu tiên rồi dùng json.JSONDecoder().raw_decode để parse đúng
+    tới dấu '}' đóng tương ứng — LLM trả thêm text sau JSON cũng không fail.
+    """
+    start = raw_text.find("{")
+    if start == -1:
+        return None
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(raw_text[start:])
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 async def generate_affiliate_script_ai(
     req: ProductAffiliateRequest,
     muse_api_url: str = "http://localhost:18610",
-    muse_api_key: str = "muse2api"
+    muse_api_key: Optional[str] = None
 ) -> AffiliateScriptResponse:
     """
     Tạo kịch bản video tiếp thị liên kết bằng AI LLM thông minh qua muse2api /v1/chat/completions.
     Nếu Muse bận render hoặc không phản hồi, tự động fallback sang bộ tạo cục bộ siêu tốc.
+
+    muse_api_key: None -> resolve từ env MUSE2API_KEY tại thời điểm gọi.
+    Thiếu key thì fallback local ngay và log rõ ràng (không gọi AI với key
+    sai rồi mới fallback).
     """
+    if not muse_api_key:
+        muse_api_key = (os.getenv("MUSE2API_KEY") or "").strip() or None
+    if not muse_api_key:
+        print("[Affiliate AI] Thiếu cấu hình MUSE2API_KEY: bỏ qua gọi AI, dùng bộ tạo cục bộ.")
+        return generate_affiliate_script_local(req)
     sys_instruction = (
         "Bạn là Chuyên gia Marketing Tiếp thị Liên kết hàng đầu (TikTok Shop & Shopee Top Creator).\n"
         "Nhiệm vụ: Viết kịch bản video ngắn (15s-30s) dọc 9:16 bán hàng bùng nổ chuyển đổi theo đúng định dạng JSON.\n"
@@ -922,7 +1020,9 @@ async def generate_affiliate_script_ai(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        # Timeout 60s cho chat completion (LLM thường cần >8s; timeout 8s cũ
+        # khiến đường AI gần như luôn rớt sang fallback). Connect riêng 5s.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
             resp = await client.post(
                 f"{muse_api_url.rstrip('/')}/v1/chat/completions",
                 headers={
@@ -940,10 +1040,10 @@ async def generate_affiliate_script_ai(
             )
             if resp.status_code == 200:
                 raw_text = resp.json()["choices"][0]["message"]["content"]
-                # Bóc tách JSON từ phản hồi LLM
-                json_match = re.search(r'\{[\s\S]*\}', raw_text)
-                if json_match:
-                    parsed = json.loads(json_match.group(0))
+                # Bóc tách JSON từ phản hồi LLM (parse cân bằng, chịu được
+                # text thừa sau JSON — regex greedy cũ làm json.loads fail).
+                parsed = _extract_json_object(raw_text)
+                if parsed is not None:
                     scenes_list = []
                     for item in parsed.get("scenes", []):
                         scenes_list.append(AffiliateScene(

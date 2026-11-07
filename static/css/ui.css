@@ -1,0 +1,138 @@
+/* ── AI Movie Studio · UI layer (refactor 2026-11-07) ──────────────────────────
+   Lop phu tren css/app.css: tokens, theme, sidebar, wizard, responsive, skeleton.
+   Khong sua app.css; muon ve mac dinh thi chi can bo file nay + js/ui.js. */
+
+/* Tokens bo sung (spacing / radius dung chung, app.css da co --radius, --shadow) */
+:root {
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 24px;
+  --sidebar-w: 280px; --sidebar-w-collapsed: 64px;
+  --topbar-h: 56px;
+}
+
+/* Light theme: chi doi bien (da so component dung bien). Mot so mau cung trong
+   template JS (chu #fff tren nen toi) van giu dang dark — xem README muc han che. */
+[data-theme="light"] {
+  --bg0: #f4f4f5; --bg1: #ffffff; --bg2: #fafafa; --bg3: #e4e4e7;
+  --border: rgba(0, 0, 0, .12); --border-light: rgba(0, 0, 0, .06); --border-hover: rgba(0, 0, 0, .22);
+  --text: #18181b; --text-secondary: #52525b; --muted: #71717a;
+  --shadow: 0 4px 20px -2px rgba(0, 0, 0, .12); --shadow-lg: 0 16px 40px -4px rgba(0, 0, 0, .18);
+}
+[data-theme="light"] body { background: var(--bg0); color: var(--text); }
+
+/* ── Utility classes (thay cho 1 so style inline lap lai) ── */
+.field-label { font-size: 12px; font-weight: 600; color: var(--text); display: block; margin-bottom: 4px; }
+.u-row-between { display: flex; justify-content: space-between; align-items: center; }
+.u-flex-wrap { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.u-col-12 { display: flex; flex-direction: column; gap: 12px; }
+.u-flex-10 { display: flex; align-items: center; gap: 10px; }
+.u-w-full { width: 100%; }
+.u-muted-sm { font-size: 11px; color: var(--muted); }
+
+/* ── Sidebar thu gon (desktop) ── */
+body.sidebar-collapsed .shell { grid-template-columns: var(--sidebar-w-collapsed) 1fr; }
+body.sidebar-collapsed .sidebar .nav-section,
+body.sidebar-collapsed .sidebar .sidebar-footer,
+body.sidebar-collapsed .sidebar .nav-item .badge { display: none; }
+body.sidebar-collapsed .sidebar .nav-item { justify-content: center; padding: 12px 0; }
+body.sidebar-collapsed .sidebar .nav-item .nav-label { display: none; }
+body.sidebar-collapsed .sidebar .nav-item { position: relative; }
+body.sidebar-collapsed .sidebar .nav-item:hover::after {
+  content: attr(data-label); position: absolute; left: calc(100% + 10px); top: 50%;
+  transform: translateY(-50%); background: var(--bg3); color: var(--text);
+  padding: 4px 10px; border-radius: 6px; font-size: 12px; white-space: nowrap;
+  border: 1px solid var(--border); z-index: 60; pointer-events: none;
+}
+.sidebar-overlay { display: none; }
+
+/* ── Topbar gon ── */
+.topbar { gap: var(--space-3); }
+.topbar .logo { flex-shrink: 0; }
+#btnThemeToggle, #btnSidebarToggle { flex-shrink: 0; }
+
+/* ── Wizard Tao phim (3 buoc) ── */
+.create-wizard-nav { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-4); }
+.wizard-step-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px;
+  border: 1px solid var(--border); background: var(--bg1); color: var(--muted);
+  font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.wizard-step-btn .wizard-num {
+  width: 18px; height: 18px; border-radius: 50%; background: var(--bg3); color: var(--text);
+  display: inline-flex; align-items: center; justify-content: center; font-size: 11px;
+}
+.wizard-step-btn.is-active { border-color: var(--accent); color: var(--text); background: rgba(99, 102, 241, .12); }
+.wizard-step-btn.is-active .wizard-num { background: var(--accent); color: #fff; }
+.wizard-step-btn:disabled { opacity: .45; cursor: not-allowed; }
+.wizard-step { display: none; }
+.wizard-step.is-active { display: block; animation: fadeIn .2s ease; }
+.wizard-sticky-cta {
+  position: sticky; bottom: 0; z-index: 5; background: var(--bg0);
+  padding: 12px 0; border-top: 1px solid var(--border);
+}
+
+/* ── Shot Desk: filter pills + grid + mini-map (da co san, chi nang cap style) ── */
+.sd-filter-pill { transition: background .15s ease, border-color .15s ease; }
+.sd-filter-pill.is-active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sd-filter-pill.is-active .sd-filter-count { background: rgba(255, 255, 255, .25); color: #fff; }
+#sdCinemaMiniMapWrap { margin-top: 10px; }
+.sd-storyboard-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+
+/* ── Skeleton loading (thu vien) ── */
+.sk { position: relative; overflow: hidden; background: var(--bg2); border-radius: 6px; color: transparent !important; }
+.sk::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .07), transparent);
+  animation: sk-shimmer 1.2s infinite; transform: translateX(-100%);
+}
+@keyframes sk-shimmer { to { transform: translateX(100%); } }
+
+/* ── Anh thumbnail: hien dan khi cuon toi (them class qua IntersectionObserver) ── */
+img.img-lazy-fade { opacity: 0; transition: opacity .35s ease; }
+img.img-lazy-fade.img-in { opacity: 1; }
+
+/* ── Responsive: breakpoint 1024px (moi) ── */
+@media (max-width: 1024px) {
+  .shell { grid-template-columns: 1fr; } /* sidebar luc nay la drawer fixed, khong chiem cot grid nua */
+  .panel { padding: 16px; }
+  .form-row.cols-4 { grid-template-columns: 1fr 1fr; }
+  .form-row.cols-3 { grid-template-columns: 1fr 1fr; }
+  .topbar { padding: 0 12px; overflow-x: auto; scrollbar-width: none; }
+  .topbar::-webkit-scrollbar { display: none; }
+  .topbar .topbar-actions .btn-ghost:not(#btnThemeToggle):not(#btnSidebarToggle) { display: none; }
+  /* Sidebar thanh drawer truot (mo bang nut ☰, dong bang overlay / chon muc) */
+  .sidebar {
+    position: fixed; top: var(--topbar-h); bottom: 0; left: 0; width: var(--sidebar-w);
+    z-index: 55; transform: translateX(-105%); transition: transform .2s ease;
+    box-shadow: var(--shadow-lg);
+  }
+  body.sidebar-open .sidebar { transform: none; }
+  body.sidebar-open .sidebar-overlay {
+    display: block; position: fixed; inset: var(--topbar-h) 0 0 0;
+    background: rgba(0, 0, 0, .5); z-index: 54;
+  }
+  body.sidebar-collapsed .shell { grid-template-columns: 1fr; }
+}
+
+/* ── Responsive: 768px (mo rong @media hien co: sidebar -> bottom nav) ── */
+@media (max-width: 768px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar {
+    top: auto; bottom: 0; left: 0; right: 0; width: auto; height: 60px;
+    transform: none; flex-direction: row; overflow-x: auto; overflow-y: hidden;
+    border-top: 1px solid var(--border); border-right: none; box-shadow: none;
+  }
+  body.sidebar-open .sidebar-overlay { display: none; }
+  .sidebar .nav-section, .sidebar .sidebar-footer { display: none; }
+  .sidebar .nav-item {
+    flex-direction: column; gap: 2px; padding: 6px 12px; font-size: 10px;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .sidebar .nav-item .icon { font-size: 18px; }
+  .main { padding-bottom: 72px; }
+  .panel { padding: 12px; }
+  .form-row.cols-2, .form-row.cols-3, .form-row.cols-4 { grid-template-columns: 1fr; }
+  .topbar .logo span:not(:first-child) { display: none; }
+  .create-wizard-nav { gap: 6px; }
+  .wizard-step-btn { padding: 5px 9px; font-size: 11.5px; }
+  .sd-storyboard-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+}

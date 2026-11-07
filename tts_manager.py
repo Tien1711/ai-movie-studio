@@ -14,6 +14,7 @@ import re
 import sys
 import asyncio
 import tempfile
+import threading
 import subprocess
 import logging
 from pathlib import Path
@@ -40,13 +41,46 @@ def get_media_duration(file_path: str) -> float:
         return 0.0
     try:
         cmd = [FFMPEG_EXE, "-i", file_path]
-        proc = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True, errors="replace")
+        proc = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True, errors="replace", timeout=30)
         m = re.search(r"Duration:\s*(\d+):(\d+):([\d\.]+)", proc.stderr)
         if m:
             return float(m.group(1)) * 3600 + float(m.group(2)) * 60 + float(m.group(3))
     except Exception as exc:
         logger.warning(f"Error checking duration for {file_path}: {exc}")
     return 3.0
+
+
+def _voice_gender_tokens(voice: str) -> List[str]:
+    """Tách voice key thành token chữ thường (tách cả camelCase / _ / - / :).
+
+    Dùng để suy luận giới tính mà KHÔNG dùng substring 'nam'/'male' thô —
+    substring sẽ nhận nhầm ('female' chứa 'male', 'NamMinh' chứa 'nam'...).
+    """
+    parts = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", voice or "")
+    return [p.lower() for p in parts]
+
+
+def _is_male_voice(voice: str) -> bool:
+    """True nếu voice key chỉ rõ giọng nam (theo token, không substring).
+
+    Ưu tiên tra config: VieNeu/OmniVoice/Edge đều có trường gender.
+    """
+    v = (voice or "").strip()
+    for cfg in VIENEU_VOICES_CONFIG:
+        if cfg["id"].lower() == v.lower() or cfg["preset"].lower() == v.replace("vieneu:", "").strip().lower():
+            return cfg.get("gender") == "male"
+    for cfg in OMNIVOICE_VOICES_CONFIG:
+        if cfg["id"].lower() == v.lower():
+            return cfg.get("gender") == "male"
+    for cfg in EDGE_VOICES_CONFIG:
+        if cfg["id"].lower() == v.lower():
+            return cfg.get("gender") == "male"
+    tokens = _voice_gender_tokens(v)
+    if "male" in tokens or "nam" in tokens:
+        return True
+    if "female" in tokens or "nu" in tokens:
+        return False
+    return False
 
 
 # ── 1. VIENEU-TTS ENGINE ────────────────────────────────────────────────────────
@@ -93,35 +127,43 @@ VIENEU_NAME_MAP = {
 class VieNeuEngine:
     _nano_instance = None
     _turbo_instance = None
+    # Audit §4: singleton lazy-init phải có lock — gọi qua asyncio.to_thread
+    # từ nhiều worker có thể load model 2 lần (tốn RAM lớn).
+    _nano_lock = threading.Lock()
+    _turbo_lock = threading.Lock()
 
     @classmethod
     def get_nano_instance(cls):
         if cls._nano_instance is None:
-            try:
-                from vieneu import Vieneu
-                logger.info("Initializing VieNeu-TTS (mode='v3nano' ONNX)...")
-                cls._nano_instance = Vieneu(mode="v3nano")
-                logger.info("VieNeu-TTS (v3nano) ready.")
-            except Exception as e:
-                logger.error(f"Failed to initialize VieNeu-TTS v3nano: {e}")
-                raise
+            with cls._nano_lock:
+                if cls._nano_instance is None:  # double-checked locking
+                    try:
+                        from vieneu import Vieneu
+                        logger.info("Initializing VieNeu-TTS (mode='v3nano' ONNX)...")
+                        cls._nano_instance = Vieneu(mode="v3nano")
+                        logger.info("VieNeu-TTS (v3nano) ready.")
+                    except Exception as e:
+                        logger.error(f"Failed to initialize VieNeu-TTS v3nano: {e}")
+                        raise
         return cls._nano_instance
 
     @classmethod
     def get_turbo_instance(cls):
         if cls._turbo_instance is None:
-            try:
-                from vieneu import Vieneu
-                logger.info("Initializing VieNeu-TTS (mode='v3turbo' PyTorch)...")
-                cls._turbo_instance = Vieneu(mode="v3turbo")
-                logger.info("VieNeu-TTS (v3turbo) ready.")
-            except Exception as e:
-                logger.error(f"Failed to initialize VieNeu-TTS v3turbo: {e}")
-                raise
+            with cls._turbo_lock:
+                if cls._turbo_instance is None:  # double-checked locking
+                    try:
+                        from vieneu import Vieneu
+                        logger.info("Initializing VieNeu-TTS (mode='v3turbo' PyTorch)...")
+                        cls._turbo_instance = Vieneu(mode="v3turbo")
+                        logger.info("VieNeu-TTS (v3turbo) ready.")
+                    except Exception as e:
+                        logger.error(f"Failed to initialize VieNeu-TTS v3turbo: {e}")
+                        raise
         return cls._turbo_instance
 
     @classmethod
-    def resolve_preset_name_and_mode(cls, voice_key: str):
+    def resolve_preset_name_and_mode(cls, voice_key: str, allow_fallback: bool = True):
         k = voice_key.replace("vieneu:", "").strip()
         normalized = k.lower()
         preset = VIENEU_NAME_MAP.get(normalized)
@@ -137,8 +179,23 @@ class VieNeuEngine:
             mode = "v3turbo" if preset in turbo_voices else "v3nano"
 
         if not preset:
-            preset = "Adam bựa" if ("bua" in normalized or "bựa" in normalized) else "Trúc Ly"
-            mode = "v3turbo" if preset == "Adam bựa" else "v3nano"
+            # Audit §1.17: voice không nhận diện được thì KHÔNG được lặng lẽ
+            # dùng giọng mặc định. Mặc định allow_fallback=True để không vỡ
+            # caller cũ (chỉ log warning rõ ràng); truyền allow_fallback=False
+            # để raise ValueError rõ ràng.
+            # TODO: khi mọi caller đã truyền allow_fallback=False rõ ràng thì
+            # đổi default thành False và bỏ nhánh fallback này.
+            if not allow_fallback:
+                raise ValueError(
+                    f"VieNeu voice không nhận diện được: {voice_key!r}. "
+                    "Các giọng hợp lệ: " + ", ".join(c["id"] for c in VIENEU_VOICES_CONFIG)
+                )
+            logger.warning(
+                f"[VieNeu] Voice không nhận diện được: {voice_key!r} — "
+                "fallback tạm sang giọng mặc định Trúc Ly (xem TODO ở resolve_preset_name_and_mode)."
+            )
+            preset = "Trúc Ly"
+            mode = "v3nano"
         return preset, mode
 
     @classmethod
@@ -149,9 +206,14 @@ class VieNeuEngine:
         output_path: str,
         ref_audio: Optional[str] = None,
         speed: float = 1.0,
+        allow_fallback: bool = False,
     ) -> float:
-        """Sinh audio VieNeu-TTS đồng bộ (hoặc bọc qua to_thread) và xuất ra MP3/WAV."""
-        preset, mode = cls.resolve_preset_name_and_mode(voice_key)
+        """Sinh audio VieNeu-TTS đồng bộ (hoặc bọc qua to_thread) và xuất ra MP3/WAV.
+
+        allow_fallback=False (mặc định): voice không nhận diện được thì raise
+        ValueError rõ ràng thay vì lặng lẽ dùng giọng mặc định (§1.17).
+        """
+        preset, mode = cls.resolve_preset_name_and_mode(voice_key, allow_fallback=allow_fallback)
         clean_text = text.strip() or "..."
         logger.info(f"[VieNeu] Synthesizing '{clean_text[:40]}...' with preset='{preset}', mode='{mode}'")
 
@@ -187,7 +249,7 @@ class VieNeuEngine:
                     "-qscale:a", "2",
                     output_path
                 ]
-                subprocess.run(cmd, check=True, capture_output=True)
+                subprocess.run(cmd, check=True, capture_output=True, timeout=120)
         finally:
             if os.path.exists(tmp_wav_path):
                 os.remove(tmp_wav_path)
@@ -258,21 +320,33 @@ OMNIVOICE_VOICES_CONFIG = [
 
 class OmniVoiceEngine:
     _instance = None
-    _loading = False
+    _loading = False  # cờ thật: True trong lúc đang load model (§4)
+    _lock = threading.Lock()
 
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            import torch
-            from omnivoice.models.omnivoice import OmniVoice
-            logger.info("Loading OmniVoice model (k2-fsa/OmniVoice on CPU)...")
-            cls._instance = OmniVoice.from_pretrained(
-                "k2-fsa/OmniVoice",
-                device_map="cpu",
-                dtype=torch.float32,
-            )
-            logger.info("OmniVoice model loaded successfully.")
+            with cls._lock:
+                if cls._instance is None:  # double-checked locking
+                    cls._loading = True
+                    try:
+                        import torch
+                        from omnivoice.models.omnivoice import OmniVoice
+                        logger.info("Loading OmniVoice model (k2-fsa/OmniVoice on CPU)...")
+                        cls._instance = OmniVoice.from_pretrained(
+                            "k2-fsa/OmniVoice",
+                            device_map="cpu",
+                            dtype=torch.float32,
+                        )
+                        logger.info("OmniVoice model loaded successfully.")
+                    finally:
+                        cls._loading = False
         return cls._instance
+
+    @classmethod
+    def is_loading(cls) -> bool:
+        """Model có đang được load bởi thread khác không."""
+        return cls._loading
 
     @classmethod
     def is_available(cls) -> bool:
@@ -337,7 +411,7 @@ class OmniVoiceEngine:
                     "-qscale:a", "2",
                     output_path
                 ]
-                subprocess.run(cmd, check=True, capture_output=True)
+                subprocess.run(cmd, check=True, capture_output=True, timeout=120)
         finally:
             if os.path.exists(tmp_wav_path):
                 os.remove(tmp_wav_path)
@@ -381,12 +455,17 @@ async def synthesize_edge_tts(text: str, voice: str, output_path: str) -> float:
     estimated_dur = max(2.0, len(clean_text) / 15.0)
     communicate = edge_tts.Communicate(clean_text, voice)
     await communicate.save(output_path)
-    actual_dur = get_media_duration(output_path)
+    actual_dur = await asyncio.to_thread(get_media_duration, output_path)
     return actual_dur if actual_dur and actual_dur > 0.3 else estimated_dur
 
 
-def create_silent_audio_fallback(output_path: str, duration: float = 3.0) -> float:
-    """Tạo audio im lặng dự phòng khẩn cấp để render video không bao giờ bị fail."""
+def create_silent_audio_fallback(output_path: str, duration: float = 3.0) -> Optional[float]:
+    """Tạo audio im lặng dự phòng khẩn cấp để render video không bao giờ bị fail.
+
+    Trả về duration khi ffmpeg thành công VÀ file thật sự tồn tại (size > 0);
+    trả về None khi ffmpeg fail — caller KHÔNG được coi duration giả là đã
+    có audio (audit §1.12). Có timeout để ffmpeg treo không treo luôn worker.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     cmd = [
         FFMPEG_EXE, "-y",
@@ -397,9 +476,13 @@ def create_silent_audio_fallback(output_path: str, duration: float = 3.0) -> flo
         output_path
     ]
     try:
-        subprocess.run(cmd, capture_output=True, check=True)
+        subprocess.run(cmd, capture_output=True, check=True, timeout=60)
     except Exception as e:
         logger.error(f"Failed to create silent fallback audio: {e}")
+        return None
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        logger.error("Silent fallback audio: ffmpeg báo thành công nhưng không có file output.")
+        return None
     return duration
 
 
@@ -456,6 +539,13 @@ def list_all_voices() -> List[Dict[str, Any]]:
     return voices
 
 
+async def _silent_fallback_or_raise(output_path: str, estimated_dur: float) -> float:
+    """Gọi create_silent_audio_fallback qua to_thread; raise nếu ffmpeg fail."""
+    fb_dur = await asyncio.to_thread(create_silent_audio_fallback, output_path, estimated_dur)
+    if fb_dur is None:
+        raise RuntimeError("Silent audio fallback thất bại (ffmpeg lỗi, không có file audio).")
+    return fb_dur
+
 async def synthesize_voice(
     text: str,
     voice: str,
@@ -491,12 +581,13 @@ async def synthesize_voice(
         except Exception as e:
             logger.warning(f"[VieNeu Error] {e}. Falling back to Edge-TTS...")
             # Fallback sang Edge-TTS theo giới tính
-            fb_voice = "vi-VN-NamMinhNeural" if any(x in voice.lower() for x in ["nam", "ductri", "adam", "anhkhoi", "huuquan", "minhquan", "manhdung"]) else "vi-VN-HoaiMyNeural"
+            # Suy luận giới tính bằng token (không substring "nam" thô — §1.17).
+            fb_voice = "vi-VN-NamMinhNeural" if _is_male_voice(voice) else "vi-VN-HoaiMyNeural"
             try:
                 return await synthesize_edge_tts(clean_text, fb_voice, output_path)
             except Exception as e2:
                 logger.error(f"[TTS Fallback Error] {e2}. Creating silent audio.")
-                return create_silent_audio_fallback(output_path, estimated_dur)
+                return await _silent_fallback_or_raise(output_path, estimated_dur)
 
     # 2. Dispatch OmniVoice
     elif voice.startswith("omnivoice:"):
@@ -516,7 +607,7 @@ async def synthesize_voice(
             logger.warning(f"[OmniVoice Error] {e}. Falling back to VieNeu / Edge-TTS...")
             # Thử fallback sang VieNeu trước
             try:
-                fb_vieneu = "vieneu:DucTri" if "male" in voice.lower() else "vieneu:TrucLy"
+                fb_vieneu = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
                 return await asyncio.to_thread(
                     VieNeuEngine.synthesize,
                     text=clean_text,
@@ -526,11 +617,11 @@ async def synthesize_voice(
                 )
             except Exception:
                 try:
-                    fb_voice = "vi-VN-NamMinhNeural" if "male" in voice.lower() else "vi-VN-HoaiMyNeural"
+                    fb_voice = "vi-VN-NamMinhNeural" if _is_male_voice(voice) else "vi-VN-HoaiMyNeural"
                     return await synthesize_edge_tts(clean_text, fb_voice, output_path)
                 except Exception as e3:
                     logger.error(f"[TTS Fallback Error] {e3}. Creating silent audio.")
-                    return create_silent_audio_fallback(output_path, estimated_dur)
+                    return await _silent_fallback_or_raise(output_path, estimated_dur)
 
     # 3. Dispatch Edge-TTS
     else:
@@ -541,7 +632,7 @@ async def synthesize_voice(
             try:
                 # Nếu là tiếng Việt thì fallback sang VieNeu
                 if voice.startswith("vi"):
-                    fb_vn = "vieneu:DucTri" if "nam" in voice.lower() else "vieneu:TrucLy"
+                    fb_vn = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
                     return await asyncio.to_thread(
                         VieNeuEngine.synthesize,
                         text=clean_text,
@@ -551,4 +642,4 @@ async def synthesize_voice(
                     )
             except Exception:
                 pass
-            return create_silent_audio_fallback(output_path, estimated_dur)
+            return await _silent_fallback_or_raise(output_path, estimated_dur)

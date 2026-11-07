@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import time
 import tempfile
+import math
 import re
 import uuid
 import imageio_ffmpeg
@@ -77,6 +78,61 @@ SFX_PRESETS = {
     "ambience": "anoisesrc=d={dur}:c=pink:a=0.22,lowpass=f=600",
 }
 
+# --- Helpers bảo mật / vệ sinh (audit 2026-11-07) ---
+
+_DURATION_CACHE_MAX_SIZE = 512
+_DURATION_CACHE: Dict[Tuple[str, float, int], float] = {}
+
+
+def _unique_suffix() -> str:
+    """Hậu tố duy nhất cho file tạm/xuất (ms + uuid ngắn): tránh ghi đè
+    khi 2 lần export cùng giây / chạy song song."""
+    return f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+
+
+def _concat_list_line(path: str) -> str:
+    """Một dòng `file '...'` cho ffmpeg concat demuxer, đã escape dấu `'`
+    theo chuẩn ffmpeg (thay ' bằng '\\'')."""
+    p = os.path.abspath(path).replace("\\", "/")
+    return "file '" + p.replace("'", "'\\''") + "'\n"
+
+
+def _as_float(value: Any, name: str) -> float:
+    """Ép giá trị nội suy vào filter string thành float hữu hạn.
+    Chặn filter injection qua volume/noise_db/... (audit §2.10)."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{name} phải là số, nhận {value!r}")
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} phải là số, nhận {value!r}")
+    if not math.isfinite(out):
+        raise ValueError(f"{name} phải là số hữu hạn, nhận {value!r}")
+    return out
+
+
+def _safe_sfx_candidate(custom_sfx_dir: Optional[str], sfx_tag: Any) -> Optional[str]:
+    """Trả về file SFX thật khớp tag trong custom_sfx_dir, hoặc None.
+    Chặn path traversal (audit §2.5): tag chứa '/', '\\' hoặc '..' thì
+    raise ValueError; tag không khớp [A-Za-z0-9_-]+ thì bỏ qua lookup
+    (rơi về procedural) thay vì nối path bừa."""
+    if not custom_sfx_dir or not os.path.isdir(custom_sfx_dir):
+        return None
+    if not isinstance(sfx_tag, str) or not sfx_tag:
+        return None
+    if "/" in sfx_tag or "\\" in sfx_tag or ".." in sfx_tag:
+        raise ValueError(f"sfx_tag không hợp lệ (chứa path separator): {sfx_tag!r}")
+    tag = sfx_tag.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", tag):
+        return None
+    base = Path(custom_sfx_dir).resolve()
+    for ext in (".mp3", ".wav", ".aac", ".ogg"):
+        cand = (base / f"{tag}{ext}").resolve()
+        if cand.is_relative_to(base) and cand.is_file():
+            return str(cand)
+    return None
+
+
 def detect_sfx_from_text(text: str) -> Optional[str]:
     """Tự động phân tích từ khóa âm thanh / bối cảnh để chọn preset SFX phù hợp."""
     if not text:
@@ -102,20 +158,21 @@ def detect_sfx_from_text(text: str) -> Optional[str]:
 
 def generate_sfx_audio(sfx_tag: str, duration: float, output_path: str, custom_sfx_dir: Optional[str] = None) -> str:
     """Tạo hoặc trích xuất file âm thanh SFX thật sự cho cảnh phim."""
+    duration = _as_float(duration, "duration")
     # 1. Kiểm tra nếu có file âm thanh thật trong thư mục SFX
-    if custom_sfx_dir and os.path.exists(custom_sfx_dir):
-        for ext in (".mp3", ".wav", ".aac", ".ogg"):
-            cand = os.path.join(custom_sfx_dir, f"{sfx_tag}{ext}")
-            if os.path.exists(cand):
-                cmd = [
-                    FFMPEG, "-y",
-                    "-stream_loop", "-1", "-i", cand,
-                    "-t", f"{max(0.5, duration):.2f}",
-                    "-c:a", "libmp3lame", "-b:a", "192k",
-                    output_path
-                ]
-                _run(cmd, f"Tạo SFX từ file mẫu: {sfx_tag}")
-                return output_path
+    # (tag đã sanitize trong _safe_sfx_candidate: chặn traversal, chỉ
+    #  cho phép [A-Za-z0-9_-]; tag khác chỉ dùng procedural bên dưới)
+    cand = _safe_sfx_candidate(custom_sfx_dir, sfx_tag)
+    if cand:
+        cmd = [
+            FFMPEG, "-y",
+            "-stream_loop", "-1", "-i", cand,
+            "-t", f"{max(0.5, duration):.2f}",
+            "-c:a", "libmp3lame", "-b:a", "192k",
+            output_path
+        ]
+        _run(cmd, f"Tạo SFX từ file mẫu: {sfx_tag}")
+        return output_path
 
     # 2. Sinh âm thanh SFX thủ tục (procedural audio) điện ảnh chất lượng cao
     norm_tag = sfx_tag.lower().strip()
@@ -134,33 +191,52 @@ def generate_sfx_audio(sfx_tag: str, duration: float, output_path: str, custom_s
 
 
 def get_media_duration(file_path: str) -> float:
-    """Đo thời lượng thực tế chính xác (giây) của file audio hoặc video bằng FFmpeg."""
+    """Đo thời lượng thực tế chính xác (giây) của file audio hoặc video bằng FFmpeg.
+
+    Có cache theo (path, mtime, size), tối đa 512 entry (FIFO evict) để
+    compose_full_movie / compute_timeline_offsets / create_srt không đo
+    lặp cùng một clip nhiều lần (audit §3.5). Chỉ cache kết quả đo thành
+    công; file thiếu/lỗi vẫn trả 5.0 như trước."""
     if not file_path or not os.path.exists(file_path):
         return 5.0
+    cache_key = None
+    try:
+        st = os.stat(file_path)
+        cache_key = (os.path.abspath(file_path), st.st_mtime, st.st_size)
+        hit = _DURATION_CACHE.get(cache_key)
+        if hit is not None:
+            return hit
+    except Exception:
+        cache_key = None
     try:
         res = subprocess.run(
             [FFMPEG, "-i", file_path],
             stderr=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             text=True,
-            errors="replace"
+            errors="replace",
+            timeout=30,
         )
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
         if m:
-            return float(m.group(1)) * 3600 + float(m.group(2)) * 60 + float(m.group(3))
+            dur = float(m.group(1)) * 3600 + float(m.group(2)) * 60 + float(m.group(3))
+            if cache_key is not None:
+                if len(_DURATION_CACHE) >= _DURATION_CACHE_MAX_SIZE:
+                    _DURATION_CACHE.pop(next(iter(_DURATION_CACHE)), None)
+                _DURATION_CACHE[cache_key] = dur
+            return dur
     except Exception as exc:
         print(f"[get_media_duration error] {exc}")
     return 5.0
 
 
 def _fmt_srt_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds - int(seconds)) * 1000))
-    if ms >= 1000:
-        s += 1
-        ms = 0
+    """Định dạng giây -> HH:MM:SS,mmm, cascade đúng khi ms tròn lên 1000
+    (audit §1.13: 119.9996s trước đây ra 00:01:60,000)."""
+    total_ms = int(round(max(0.0, float(seconds)) * 1000))
+    h, rem = divmod(total_ms, 3600000)
+    m, rem = divmod(rem, 60000)
+    s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -173,6 +249,9 @@ def detect_audio_speech_bounds(media_path: str, noise_db: float = -28.0, min_sil
     """
     if not media_path or not os.path.exists(media_path):
         return 0.0, 0.0, 0.0
+
+    noise_db = _as_float(noise_db, "noise_db")
+    min_silence = _as_float(min_silence, "min_silence")
 
     try:
         cmd = [
@@ -250,6 +329,7 @@ def compute_timeline_offsets(clips: List[str], transitions: Optional[List[str]] 
     Tính toán chính xác mốc thời gian bắt đầu (offset) của từng clip trên timeline phim hoàn chỉnh,
     có tính đến thời gian chồng lấn của chuyển cảnh (transitions) và sound bridge (acrossfade).
     """
+    sound_bridge_duration = _as_float(sound_bridge_duration, "sound_bridge_duration")
     n = len(clips)
     if n == 0:
         return []
@@ -340,9 +420,12 @@ def create_srt(
     return output_srt
 
 
-def _run(cmd: List[str], label: str = ""):
+def _run(cmd: List[str], label: str = "", timeout: int = 120):
     print(f"[FFmpeg] {label}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"FFmpeg timeout ({label}) sau {timeout}s")
     if result.returncode != 0:
         raise RuntimeError(
             f"FFmpeg lỗi ({label}):\n{result.stderr[-2000:]}"
@@ -353,7 +436,7 @@ def check_video_has_audio(video_path: str) -> bool:
     """Kiểm tra file video có chứa stream âm thanh hay không."""
     try:
         cmd = [FFMPEG, "-i", video_path]
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return "Audio:" in res.stderr
     except Exception:
         return False
@@ -423,18 +506,43 @@ def compose_scene_video(
 
     # Bảo vệ chống trùng lặp cảnh: nếu video tải về từ Muse bị nối tiếp dài hơn thời lượng kịch bản,
     # tự động cắt đúng phần đuôi (nội dung mới sinh) thay vì lấy nhầm phần đầu (cảnh cũ bị Muse nối vào).
+    # LƯU Ý (audit §1.17, kiểm chứng thực tế 2026-11-07): "-ss <offset>" đặt
+    # trước "-stream_loop -1 -i" KHÔNG giữ offset khi loop — ffmpeg loop lại
+    # từ ĐẦU clip (đoạn đầu cũ) thay vì từ offset. Vì vậy ở đây cắt đuôi
+    # thành file tạm re-encode rồi mới loop file tạm đó (loop đúng đoạn đuôi).
+    input_video = scene_video
+    trimmed_video = None
     seek_args = []
     if vid_dur > dur * 1.15 and (vid_dur - dur) > 0.4:
         offset = max(0.0, vid_dur - dur)
-        print(f"[compose_scene_video] Canh bao: Video goc ({vid_dur:.2f}s) dai hon thoi luong ({dur:.2f}s). Lay {dur:.2f}s doan duoi moi sinh (offset={offset:.2f}s)...")
-        seek_args = ["-ss", f"{offset:.3f}"]
+        tail_dur = max(0.1, vid_dur - offset)
+        print(f"[compose_scene_video] Canh bao: Video goc ({vid_dur:.2f}s) dai hon thoi luong ({dur:.2f}s). Lay {tail_dur:.2f}s doan duoi moi sinh (offset={offset:.2f}s)...")
+        _fd, trimmed_video = tempfile.mkstemp(prefix="composer_tail_", suffix=".mp4")
+        os.close(_fd)
+        try:
+            _run([
+                FFMPEG, "-y",
+                "-ss", f"{offset:.3f}", "-i", scene_video,
+                "-t", f"{tail_dur:.3f}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                trimmed_video,
+            ], "Cắt đuôi video tích lũy")
+        except Exception:
+            try: os.remove(trimmed_video)
+            except Exception: pass
+            trimmed_video = None
+            raise
+        input_video = trimmed_video
+        seek_args = []
 
     if has_audio:
         # Có file lồng tiếng riêng (TTS voiceover / dialogue): ghép đè scene_audio vào video
         cmd = [
             FFMPEG, "-y",
             *seek_args,
-            "-stream_loop", "-1", "-i", scene_video,   # Loop video nếu audio dài hơn
+            "-stream_loop", "-1", "-i", input_video,   # Loop video nếu audio dài hơn
             "-i", scene_audio,
             "-map", "0:v:0",
             "-map", "1:a:0",
@@ -455,7 +563,7 @@ def compose_scene_video(
             cmd = [
                 FFMPEG, "-y",
                 *seek_args,
-                "-stream_loop", "-1", "-i", scene_video,
+                "-stream_loop", "-1", "-i", input_video,
                 "-map", "0:v:0",
                 "-map", "0:a:0",
                 "-af", "aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
@@ -472,7 +580,7 @@ def compose_scene_video(
             cmd = [
                 FFMPEG, "-y",
                 *seek_args,
-                "-stream_loop", "-1", "-i", scene_video,
+                "-stream_loop", "-1", "-i", input_video,
                 "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=44100:cl=stereo",
                 "-map", "0:v:0",
                 "-map", "1:a:0",
@@ -484,7 +592,12 @@ def compose_scene_video(
                 "-t", f"{dur:.3f}",
                 output,
             ]
-    _run(cmd, f"Ghép scene: {os.path.basename(output)}")
+    try:
+        _run(cmd, f"Ghép scene: {os.path.basename(output)}", timeout=300)
+    finally:
+        if trimmed_video and os.path.exists(trimmed_video):
+            try: os.remove(trimmed_video)
+            except Exception: pass
 
 
 def merge_clips_advanced(
@@ -502,6 +615,8 @@ def merge_clips_advanced(
     - Chuyển cảnh & Sound Bridge (Acrossfade + Dissolve) xử lý Single-Pass trong 1 lượt encode duy nhất
     - Loại bỏ hoàn toàn suy hao nén H.264 nhiều vòng (Generational Loss) và loại bỏ file tạm O(N^2)
     - Tự động fallback an toàn đảm bảo không bao giờ dừng đột ngột
+    - Dissolve/fade hoặc sound_bridge >= 0.05s dùng nhánh Pairwise xfade
+      (đúng độ dài timeline); chỉ cut thuần mới dùng concat.
     """
     if not clips:
         raise ValueError("Danh sách clip trống")
@@ -514,115 +629,139 @@ def merge_clips_advanced(
     while len(transitions) < n - 1:
         transitions.append("dissolve")
 
-    all_cuts = all((t or "none").lower() in ("none", "cut", "match cut") for t in transitions) or sound_bridge_duration < 0.05
+    sound_bridge_duration = _as_float(sound_bridge_duration, "sound_bridge_duration")
+    # Chỉ dùng concat thuần khi TẤT CẢ transitions là cut/none VÀ không có
+    # sound bridge: dissolve/fade hoặc bridge >= 0.05s phải đi nhánh xfade.
+    all_cuts = (
+        all((t or "none").lower() in ("none", "cut", "match cut") for t in transitions)
+        and sound_bridge_duration < 0.05
+    )
 
     # ── Chiến lược 1: Concat Demuxer siêu tốc (Zero Re-encoding khi toàn bộ là Cut) ──
     if all_cuts:
         if progress_cb:
             progress_cb(40, "Đang ghép nối timeline siêu tốc (Lossless Concat)...")
-        clist = output_path + f".concat_{int(time.time()*1000)}.txt"
+        clist = output_path + f".concat_{_unique_suffix()}.txt"
         with open(clist, "w", encoding="utf-8") as f:
             for c in clips:
-                f.write(f"file '{os.path.abspath(c).replace(chr(92), '/')}'\n")
+                f.write(_concat_list_line(c))
         try:
-            subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", output_path], check=True, capture_output=True)
-            if os.path.exists(clist):
-                os.remove(clist)
-            return output_path
-        except Exception:
+            try:
+                subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", output_path], check=True, capture_output=True, timeout=120)
+                return output_path
+            except Exception:
+                pass
             # Fallback sang encode 1 lượt nếu stream copy không tương thích
             subprocess.run([
                 FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "20",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
-            ], check=True, capture_output=True)
+            ], check=True, capture_output=True, timeout=120)
+            return output_path
+        except Exception as _demux_err:
+            print(f"[merge_clips_advanced] Concat Demuxer thất bại ({_demux_err}), thử Concat Filter...")
+        finally:
             if os.path.exists(clist):
-                os.remove(clist)
+                try: os.remove(clist)
+                except Exception: pass
+
+    # ── Chiến lược 2: Concat Filter — CHỈ cho cut/none (fallback khi Demuxer lỗi).
+    # Dissolve/fade hoặc sound_bridge >= 0.05s bỏ qua nhánh này, đi thẳng Pairwise xfade.
+    if all_cuts:
+        try:
+            if progress_cb:
+                progress_cb(35, f"Đang ghép nối timeline mượt mà ({n} cảnh)...")
+
+            inputs = []
+            filter_in = ""
+            for i, c in enumerate(clips):
+                inputs.extend(["-i", c])
+                filter_in += f"[{i}:v:0][{i}:a:0]"
+            fc = f"{filter_in}concat=n={n}:v=1:a=1[v][a]"
+            cmd = [
+                FFMPEG, "-y",
+                *inputs,
+                "-filter_complex", fc,
+                "-map", "[v]",
+                "-map", "[a]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                output_path
+            ]
+            _run(cmd, f"Ghép Concat Filter ({n} cảnh)", timeout=300)
             return output_path
 
-    # ── Chiến lược 2: Concat Filter Đồng Bộ Tuyệt Đối (Zero Freeze / Zero Drop) ──
-    # Loại bỏ hoàn toàn lỗi đứng hình của overlay filter, đảm bảo hình và tiếng liên tục 100%
-    try:
-        if progress_cb:
-            progress_cb(35, f"Đang ghép nối timeline mượt mà ({n} cảnh)...")
-
-        inputs = []
-        filter_in = ""
-        for i, c in enumerate(clips):
-            inputs.extend(["-i", c])
-            filter_in += f"[{i}:v:0][{i}:a:0]"
-        fc = f"{filter_in}concat=n={n}:v=1:a=1[v][a]"
-        cmd = [
-            FFMPEG, "-y",
-            *inputs,
-            "-filter_complex", fc,
-            "-map", "[v]",
-            "-map", "[a]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
-            output_path
-        ]
-        _run(cmd, f"Ghép Concat Filter ({n} cảnh)")
-        return output_path
-
-    except Exception as sp_err:
-        print(f"[merge_clips_advanced] Concat Filter gặp exception ({sp_err}), chuyển sang Pairwise Fallback...")
+        except Exception as sp_err:
+            print(f"[merge_clips_advanced] Concat Filter gặp exception ({sp_err}), chuyển sang Pairwise Fallback...")
 
     # ── Chiến lược 3: Pairwise Fallback Dự Phòng An Toàn Tuyệt Đối ──
     out_dir = os.path.dirname(os.path.abspath(output_path))
     current_merged = clips[0]
     total_steps = n - 1
 
-    for i in range(1, n):
-        next_clip = clips[i]
-        trans = (transitions[i - 1] or "dissolve").lower()
-        step_out = os.path.join(out_dir, f"_step_{i}_{int(time.time() * 1000)}.mp4")
+    _pairwise_steps: List[str] = []
+    try:
+        for i in range(1, n):
+            next_clip = clips[i]
+            trans = (transitions[i - 1] or "dissolve").lower()
+            step_out = os.path.join(out_dir, f"_step_{i}_{_unique_suffix()}.mp4")
+            _pairwise_steps.append(step_out)
 
-        d1 = get_media_duration(current_merged)
-        d2 = get_media_duration(next_clip)
-        t_dur = min(sound_bridge_duration, min(d1, d2) * 0.4)
+            d1 = get_media_duration(current_merged)
+            d2 = get_media_duration(next_clip)
+            t_dur = min(sound_bridge_duration, min(d1, d2) * 0.4)
 
-        if progress_cb:
-            pct = 25 + int((i / total_steps) * 45)
-            progress_cb(pct, f"Dựng chuyển cảnh ({i}/{total_steps}): {trans}...")
+            if progress_cb:
+                pct = 25 + int((i / total_steps) * 45)
+                progress_cb(pct, f"Dựng chuyển cảnh ({i}/{total_steps}): {trans}...")
 
-        if t_dur < 0.1 or trans in ("none", "cut", "match cut"):
-            clist = step_out + ".txt"
-            with open(clist, "w", encoding="utf-8") as f:
-                f.write(f"file '{os.path.abspath(current_merged).replace(chr(92), '/')}'\nfile '{os.path.abspath(next_clip).replace(chr(92), '/')}'\n")
-            try:
-                subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", step_out], check=True, capture_output=True)
-            except Exception:
-                subprocess.run([
-                    FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist,
+            if t_dur < 0.1 or trans in ("none", "cut", "match cut"):
+                clist = step_out + ".txt"
+                with open(clist, "w", encoding="utf-8") as f:
+                    f.write(_concat_list_line(current_merged))
+                    f.write(_concat_list_line(next_clip))
+                try:
+                    try:
+                        subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", step_out], check=True, capture_output=True, timeout=120)
+                    except Exception:
+                        subprocess.run([
+                            FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist,
+                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", step_out
+                        ], check=True, capture_output=True, timeout=120)
+                finally:
+                    if os.path.exists(clist):
+                        try: os.remove(clist)
+                        except Exception: pass
+            else:
+                offset = max(0.1, d1 - t_dur)
+                fc = f"[1:v]format=yuva420p,fade=t=in:st=0:d={t_dur:.2f}:alpha=1,setpts=PTS-STARTPTS+{offset:.2f}/TB[v1];[0:v]format=yuva420p[v0];[v0][v1]overlay=eof_action=pass[v];[0:a][1:a]acrossfade=d={t_dur:.2f}[a]"
+                cmd = [
+                    FFMPEG, "-y",
+                    "-i", current_merged,
+                    "-i", next_clip,
+                    "-filter_complex", fc,
+                    "-map", "[v]", "-map", "[a]",
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", step_out
-                ], check=True, capture_output=True)
-            try: os.remove(clist)
-            except Exception: pass
-        else:
-            offset = max(0.1, d1 - t_dur)
-            fc = f"[1:v]format=yuva420p,fade=t=in:st=0:d={t_dur:.2f}:alpha=1,setpts=PTS-STARTPTS+{offset:.2f}/TB[v1];[0:v]format=yuva420p[v0];[v0][v1]overlay=eof_action=pass[v];[0:a][1:a]acrossfade=d={t_dur:.2f}[a]"
-            cmd = [
-                FFMPEG, "-y",
-                "-i", current_merged,
-                "-i", next_clip,
-                "-filter_complex", fc,
-                "-map", "[v]", "-map", "[a]",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                step_out
-            ]
-            _run(cmd, f"Ghép chuyển cảnh clip {i}: {trans}")
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    step_out
+                ]
+                _run(cmd, f"Ghép chuyển cảnh clip {i}: {trans}")
 
-        if current_merged != clips[0] and os.path.exists(current_merged):
-            try: os.remove(current_merged)
-            except Exception: pass
-        current_merged = step_out
+            if current_merged != clips[0] and os.path.exists(current_merged):
+                try: os.remove(current_merged)
+                except Exception: pass
+            current_merged = step_out
 
-    shutil.move(current_merged, output_path)
+        shutil.move(current_merged, output_path)
+    except Exception:
+        for _p in _pairwise_steps:
+            if _p != output_path and os.path.exists(_p):
+                try: os.remove(_p)
+                except Exception: pass
+        raise
     return output_path
 
 
@@ -658,6 +797,10 @@ def mix_multitrack_timeline(
     - Scale chuẩn theo tỉ lệ (9:16 hoặc 16:9) và độ phân giải chọn (draft, 720p, 1080p, 4k)
     - Hòa âm 2 hoặc 3 track âm thanh độc lập với bộ lọc làm mờ audio (fade in/out)
     """
+    voice_volume = _as_float(voice_volume, "voice_volume")
+    music_volume = _as_float(music_volume, "music_volume")
+    sfx_volume = _as_float(sfx_volume, "sfx_volume")
+    fade_duration = _as_float(fade_duration, "fade_duration")
     vid_dur = get_media_duration(video_path)
     fade_out_start = max(0.0, vid_dur - fade_duration)
 
@@ -725,7 +868,7 @@ def mix_multitrack_timeline(
         output_path
     ]
 
-    _run(cmd, f"Xuất phim hoàn chỉnh ({quality} - Đa tầng âm thanh)")
+    _run(cmd, f"Xuất phim hoàn chỉnh ({quality} - Đa tầng âm thanh)", timeout=600)
     return output_path
 
 
@@ -739,6 +882,7 @@ def merge_audio_with_transitions(
     Ghép các track âm thanh (SFX/Ambience) có áp dụng Acrossfade đồng bộ 100% với video timeline.
     Loại bỏ hoàn toàn hiện tượng lệch pha âm thanh khi các clip video chồng mờ (crossfade) qua nhau.
     """
+    sound_bridge_duration = _as_float(sound_bridge_duration, "sound_bridge_duration")
     n = len(audio_clips)
     if n == 0:
         return output_path
@@ -758,12 +902,12 @@ def merge_audio_with_transitions(
 
     # Nếu tất cả là cut: ghép concat thông thường
     if all(td <= 0.05 for td in t_durs):
-        clist = output_path + f".sfx_concat_{int(time.time()*1000)}.txt"
+        clist = output_path + f".sfx_concat_{_unique_suffix()}.txt"
         with open(clist, "w", encoding="utf-8") as fsfx:
             for sc in audio_clips:
-                fsfx.write(f"file '{os.path.abspath(sc).replace(chr(92), '/')}'\n")
+                fsfx.write(_concat_list_line(sc))
         try:
-            subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c:a", "libmp3lame", "-b:a", "192k", output_path], check=True, capture_output=True)
+            subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c:a", "libmp3lame", "-b:a", "192k", output_path], check=True, capture_output=True, timeout=120)
         finally:
             if os.path.exists(clist):
                 try: os.remove(clist)
@@ -796,16 +940,16 @@ def merge_audio_with_transitions(
             "-c:a", "libmp3lame", "-b:a", "192k",
             output_path
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
         return output_path
     except Exception as e:
         print(f"[merge_audio_with_transitions warning] Acrossfade error ({e}), fallback to concat...")
-        clist = output_path + f".sfx_concat_{int(time.time()*1000)}.txt"
+        clist = output_path + f".sfx_concat_{_unique_suffix()}.txt"
         with open(clist, "w", encoding="utf-8") as fsfx:
             for sc in audio_clips:
-                fsfx.write(f"file '{os.path.abspath(sc).replace(chr(92), '/')}'\n")
+                fsfx.write(_concat_list_line(sc))
         try:
-            subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c:a", "libmp3lame", "-b:a", "192k", output_path], check=True, capture_output=True)
+            subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c:a", "libmp3lame", "-b:a", "192k", output_path], check=True, capture_output=True, timeout=120)
         finally:
             if os.path.exists(clist):
                 try: os.remove(clist)
@@ -879,7 +1023,14 @@ def burn_subtitles(
                                 progress_cb(overall_pct, f"Đang khắc phụ đề điện ảnh: {sub_pct}% ({int(sec)}s / {int(total_duration)}s)...")
                         except Exception:
                             pass
-                proc.wait()
+                try:
+                    proc.wait(timeout=300)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    print("[FFmpeg Cảnh báo] Burn-in timeout sau 300s, fallback video gốc.")
+                    shutil.copy2(input_video, output_video)
+                    return output_video
                 if proc.returncode != 0:
                     err_file.seek(0)
                     err = err_file.read()[-1000:]
@@ -887,7 +1038,7 @@ def burn_subtitles(
                     shutil.copy2(input_video, output_video)
                     return output_video
         else:
-            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
+            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 print(f"[FFmpeg Cảnh báo] Lỗi burn phụ đề, fallback video gốc: {result.stderr[-1000:]}")
                 shutil.copy2(input_video, output_video)
@@ -915,6 +1066,9 @@ def add_background_music(
     - Tự động loop nhạc nếu video dài hơn nhạc.
     - Tự động áp dụng Audio Fade-in đầu video và Fade-out cuối video để âm thanh êm dịu.
     """
+    music_volume = _as_float(music_volume, "music_volume")
+    voice_volume = _as_float(voice_volume, "voice_volume")
+    fade_duration = _as_float(fade_duration, "fade_duration")
     vid_dur = get_media_duration(input_video)
     fade_out_start = max(0.0, vid_dur - fade_duration)
 
@@ -936,7 +1090,7 @@ def add_background_music(
         "-t", f"{vid_dur:.3f}",
         "-shortest",
         output_video,
-    ], "Mix nhạc nền với Audio Fade")
+    ], "Mix nhạc nền với Audio Fade", timeout=600)
 
 
 def audit_movie_scenes(arg1: Any, arg2: Any = None) -> Dict[str, Any]:
@@ -1054,145 +1208,150 @@ def compose_full_movie(
     6. Mix nhạc nền (BGM) đa tầng với volume độc lập và audio fade
     Trả về Dictionary kết quả xuất phim chi tiết.
     """
-    ts = int(time.time())
+    ts = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
     final_dir = os.path.join(output_dir, "final")
     tmp_dir = os.path.join(output_dir, "_tmp")
     os.makedirs(final_dir, exist_ok=True)
     os.makedirs(tmp_dir, exist_ok=True)
 
-    expected_total = total_scenes or len(results)
-    audit = audit_movie_scenes(results, expected_total)
+    try:
+        expected_total = total_scenes or len(results)
+        audit = audit_movie_scenes(results, expected_total)
 
-    if not audit["is_complete"] and not allow_partial:
-        missing_count = expected_total - audit["done_count"]
-        raise ValueError(
-            f"Không thể xuất phim vì thiếu {missing_count}/{expected_total} cảnh! "
-            f"Cảnh lỗi: {audit['failed_indices']}, Cảnh chờ: {audit['pending_indices']}. "
-            f"Vui lòng chọn 'Render lại cảnh lỗi' hoặc bật 'Xuất bản nháp có cảnh thiếu'."
-        )
+        if not audit["is_complete"] and not allow_partial:
+            missing_count = expected_total - audit["done_count"]
+            raise ValueError(
+                f"Không thể xuất phim vì thiếu {missing_count}/{expected_total} cảnh! "
+                f"Cảnh lỗi: {audit['failed_indices']}, Cảnh chờ: {audit['pending_indices']}. "
+                f"Vui lòng chọn 'Render lại cảnh lỗi' hoặc bật 'Xuất bản nháp có cảnh thiếu'."
+            )
 
-    def _resolve_media_path(p: Any) -> str:
-        if not p:
-            return ""
-        sp = str(p)
-        if os.path.isabs(sp) and os.path.exists(sp):
+        def _resolve_media_path(p: Any) -> str:
+            if not p:
+                return ""
+            sp = str(p)
+            if os.path.isabs(sp) and os.path.exists(sp):
+                return sp
+            if os.path.exists(sp):
+                return os.path.abspath(sp)
+            studio_dir = os.path.dirname(os.path.abspath(__file__))
+            cand = os.path.join(studio_dir, sp)
+            if os.path.exists(cand):
+                return cand
             return sp
-        if os.path.exists(sp):
-            return os.path.abspath(sp)
-        studio_dir = os.path.dirname(os.path.abspath(__file__))
-        cand = os.path.join(studio_dir, sp)
-        if os.path.exists(cand):
-            return cand
-        return sp
 
-    # Lọc các cảnh thành công, sắp xếp đúng thứ tự
-    ok_results = []
-    for r in results:
-        if isinstance(r, dict) and r.get("status") == "done":
-            vp = _resolve_media_path(r.get("video_path"))
-            if vp and os.path.exists(vp) and os.path.getsize(vp) > 500:
-                r_copy = dict(r)
-                r_copy["video_path"] = vp
-                if r_copy.get("audio_path"):
-                    r_copy["audio_path"] = _resolve_media_path(r_copy["audio_path"])
-                ok_results.append(r_copy)
-    ok_results.sort(key=lambda x: x["index"])
+        # Lọc các cảnh thành công, sắp xếp đúng thứ tự
+        ok_results = []
+        for r in results:
+            if isinstance(r, dict) and r.get("status") == "done":
+                vp = _resolve_media_path(r.get("video_path"))
+                if vp and os.path.exists(vp) and os.path.getsize(vp) > 500:
+                    r_copy = dict(r)
+                    r_copy["video_path"] = vp
+                    if r_copy.get("audio_path"):
+                        r_copy["audio_path"] = _resolve_media_path(r_copy["audio_path"])
+                    ok_results.append(r_copy)
+        ok_results.sort(key=lambda x: x["index"])
 
-    if not ok_results:
-        raise ValueError("Không có cảnh nào thành công để ghép phim!")
+        if not ok_results:
+            raise ValueError("Không có cảnh nào thành công để ghép phim!")
 
-    # Bước 1: Ghép video + audio từng cảnh
-    scene_clips = []
-    clip_durations = []
-    for r in ok_results:
-        idx = r["index"]
-        clip_out = os.path.join(tmp_dir, f"clip_{idx:03d}.mp4")
-        act_audio = get_media_duration(r["audio_path"]) if (r.get("audio_path") and os.path.exists(r["audio_path"])) else float(r.get("audio_duration", 5))
-        compose_scene_video(
-            scene_video=r["video_path"],
-            scene_audio=r["audio_path"],
-            output=clip_out,
-            audio_duration=act_audio,
-            quality=quality,
-            aspect_ratio=aspect_ratio,
+        # Bước 1: Ghép video + audio từng cảnh
+        scene_clips = []
+        clip_durations = []
+        for r in ok_results:
+            idx = r["index"]
+            clip_out = os.path.join(tmp_dir, f"clip_{idx:03d}.mp4")
+            act_audio = get_media_duration(r["audio_path"]) if (r.get("audio_path") and os.path.exists(r["audio_path"])) else float(r.get("audio_duration", 5))
+            compose_scene_video(
+                scene_video=r["video_path"],
+                scene_audio=r["audio_path"],
+                output=clip_out,
+                audio_duration=act_audio,
+                quality=quality,
+                aspect_ratio=aspect_ratio,
+            )
+            scene_clips.append(clip_out)
+            real_clip_dur = get_media_duration(clip_out)
+            clip_durations.append(real_clip_dur)
+            print(f"[Hậu kỳ] Clip cảnh {idx} OK ({real_clip_dur:.2f}s) → {clip_out}")
+
+        # Bước 2: Tạo SRT đồng bộ chính xác với audio onset và timeline chuyển cảnh
+        bridge_dur = 0.5 if transition in ("fade", "dissolve") else 0.0
+        timeline_offsets = compute_timeline_offsets(scene_clips, [transition] * max(0, len(scene_clips) - 1), bridge_dur)
+
+        # Chuẩn hóa tên file an toàn cho hệ thống tập tin và FFmpeg (bỏ emoji, dấu ngoặc, dấu phẩy)
+        clean_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', project_title)
+        clean_title = re.sub(r'_+', '_', clean_title).strip('_')
+        safe_title = clean_title[:45] if clean_title else "movie"
+
+        srt_filename = f"{safe_title}_{ts}.srt"
+        srt_path = os.path.join(final_dir, srt_filename)
+        create_srt(
+            ok_results,
+            srt_path,
+            clip_durations=clip_durations,
+            media_paths=scene_clips,
+            timeline_offsets=timeline_offsets,
         )
-        scene_clips.append(clip_out)
-        real_clip_dur = get_media_duration(clip_out)
-        clip_durations.append(real_clip_dur)
-        print(f"[Hậu kỳ] Clip cảnh {idx} OK ({real_clip_dur:.2f}s) → {clip_out}")
+        print(f"[Hậu kỳ] Đã tạo file SRT phụ đề chuẩn âm thanh: {srt_path}")
 
-    # Bước 2: Tạo SRT đồng bộ chính xác với audio onset và timeline chuyển cảnh
-    bridge_dur = 0.5 if transition in ("fade", "dissolve") else 0.0
-    timeline_offsets = compute_timeline_offsets(scene_clips, [transition] * max(0, len(scene_clips) - 1), bridge_dur)
+        # Bước 3: Ghép tất cả clip với hiệu ứng chuyển cảnh
+        merged = os.path.join(tmp_dir, f"merged_{ts}.mp4")
+        merge_all_scenes(scene_clips, merged, transition=transition)
+        print(f"[Hậu kỳ] Đã ghép video thành công: {merged}")
 
-    # Chuẩn hóa tên file an toàn cho hệ thống tập tin và FFmpeg (bỏ emoji, dấu ngoặc, dấu phẩy)
-    clean_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', project_title)
-    clean_title = re.sub(r'_+', '_', clean_title).strip('_')
-    safe_title = clean_title[:45] if clean_title else "movie"
-
-    srt_filename = f"{safe_title}_{ts}.srt"
-    srt_path = os.path.join(final_dir, srt_filename)
-    create_srt(
-        ok_results,
-        srt_path,
-        clip_durations=clip_durations,
-        media_paths=scene_clips,
-        timeline_offsets=timeline_offsets,
-    )
-    print(f"[Hậu kỳ] Đã tạo file SRT phụ đề chuẩn âm thanh: {srt_path}")
-
-    # Bước 3: Ghép tất cả clip với hiệu ứng chuyển cảnh
-    merged = os.path.join(tmp_dir, f"merged_{ts}.mp4")
-    merge_all_scenes(scene_clips, merged, transition=transition)
-    print(f"[Hậu kỳ] Đã ghép video thành công: {merged}")
-
-    # Bước 4: Xử lý phụ đề theo cấu hình người dùng
-    if subtitle_mode == "burn_in":
-        with_sub = os.path.join(tmp_dir, f"with_sub_{ts}.mp4")
-        try:
-            burn_subtitles(merged, srt_path, with_sub, font_size=font_size)
-            if os.path.exists(with_sub) and os.path.getsize(with_sub) > 1000:
-                video_to_mix = with_sub
-                print(f"[Hậu kỳ] Đã khắc phụ đề Burn-in: {with_sub}")
-            else:
+        # Bước 4: Xử lý phụ đề theo cấu hình người dùng
+        if subtitle_mode == "burn_in":
+            with_sub = os.path.join(tmp_dir, f"with_sub_{ts}.mp4")
+            try:
+                burn_subtitles(merged, srt_path, with_sub, font_size=font_size)
+                if os.path.exists(with_sub) and os.path.getsize(with_sub) > 1000:
+                    video_to_mix = with_sub
+                    print(f"[Hậu kỳ] Đã khắc phụ đề Burn-in: {with_sub}")
+                else:
+                    video_to_mix = merged
+            except Exception as burn_err:
+                print(f"[Hậu kỳ Cảnh báo] Không thể khắc phụ đề ({burn_err}), giữ nguyên video gốc.")
                 video_to_mix = merged
-        except Exception as burn_err:
-            print(f"[Hậu kỳ Cảnh báo] Không thể khắc phụ đề ({burn_err}), giữ nguyên video gốc.")
+        else:
+            # "srt_only" hoặc "none" -> Giữ video gốc không khắc chữ
             video_to_mix = merged
-    else:
-        # "srt_only" hoặc "none" -> Giữ video gốc không khắc chữ
-        video_to_mix = merged
-        print(f"[Hậu kỳ] Bỏ qua Burn-in (Chế độ phụ đề: {subtitle_mode})")
+            print(f"[Hậu kỳ] Bỏ qua Burn-in (Chế độ phụ đề: {subtitle_mode})")
 
-    # Bước 5: Mix nhạc nền nếu có
-    final_video_name = f"{safe_title}_{ts}.mp4"
-    final_path = os.path.join(final_dir, final_video_name)
+        # Bước 5: Mix nhạc nền nếu có
+        final_video_name = f"{safe_title}_{ts}.mp4"
+        final_path = os.path.join(final_dir, final_video_name)
 
-    if bg_music_path and os.path.exists(bg_music_path):
-        add_background_music(
-            input_video=video_to_mix,
-            music_file=bg_music_path,
-            output_video=final_path,
-            music_volume=music_volume,
-            voice_volume=voice_volume,
-        )
-        print(f"[Hậu kỳ] Đã mix nhạc nền hoàn tất: {final_path}")
-    else:
-        shutil.copy2(video_to_mix, final_path)
-        print(f"[Hậu kỳ] Không có nhạc nền, xuất thẳng video: {final_path}")
+        if bg_music_path and os.path.exists(bg_music_path):
+            add_background_music(
+                input_video=video_to_mix,
+                music_file=bg_music_path,
+                output_video=final_path,
+                music_volume=music_volume,
+                voice_volume=voice_volume,
+            )
+            print(f"[Hậu kỳ] Đã mix nhạc nền hoàn tất: {final_path}")
+        else:
+            shutil.copy2(video_to_mix, final_path)
+            print(f"[Hậu kỳ] Không có nhạc nền, xuất thẳng video: {final_path}")
 
-    total_movie_duration = get_media_duration(final_path)
+        total_movie_duration = get_media_duration(final_path)
 
-    return {
-        "video_path": final_path,
-        "video_filename": final_video_name,
-        "srt_path": srt_path if subtitle_mode in ("burn_in", "srt_only") else None,
-        "srt_filename": srt_filename if subtitle_mode in ("burn_in", "srt_only") else None,
-        "duration": round(total_movie_duration, 2),
-        "audit": audit,
-        "scenes_used": [r["index"] for r in ok_results],
-        "is_draft": not audit["is_complete"],
-        "subtitle_mode": subtitle_mode,
-        "quality": quality,
-        "transition": transition,
-    }
+        return {
+            "video_path": final_path,
+            "video_filename": final_video_name,
+            "srt_path": srt_path if subtitle_mode in ("burn_in", "srt_only") else None,
+            "srt_filename": srt_filename if subtitle_mode in ("burn_in", "srt_only") else None,
+            "duration": round(total_movie_duration, 2),
+            "audit": audit,
+            "scenes_used": [r["index"] for r in ok_results],
+            "is_draft": not audit["is_complete"],
+            "subtitle_mode": subtitle_mode,
+            "quality": quality,
+            "transition": transition,
+        }
+
+    finally:
+        # Dọn thư mục tạm (_tmp: clip cảnh / merged / with_sub) kể cả khi lỗi.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
