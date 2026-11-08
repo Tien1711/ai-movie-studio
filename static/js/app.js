@@ -1615,6 +1615,9 @@ function startMonitoring(jobId, title, totalScenes) {
   // Tạo khung task matrix
   const matrix = document.getElementById('taskMatrix');
   matrix.innerHTML = '';
+  // Affiliate continuity 2026-11-07: job mới bắt đầu thì mở lại matrix đầy đủ.
+  window.__matrixAutoCollapsedForJob = null;
+  if (typeof window.setTaskMatrixCollapsed === 'function') window.setTaskMatrixCollapsed(false);
   for (let i = 1; i <= totalScenes; i++) {
     const defaultPrompt = (scenes[i - 1] ? scenes[i - 1].prompt : '');
     const defaultVoice = (scenes[i - 1] ? scenes[i - 1].voiceover : '');
@@ -1785,6 +1788,12 @@ function updateMonitor(data, jobId) {
     showAffiliateFinishedVideo(data.final_video, data.title || (data.req && data.req.title) || "Video Tiếp Thị", `/api/jobs/${jobId}/subtitles`);
     if (wasHidden) {
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    // Affiliate continuity 2026-11-07: có video cuối thì thu gọn Batch Matrix
+    // thành dải tiến độ compact (chỉ 1 lần/job; user mở lại bằng nút toggle).
+    if (!window.__matrixAutoCollapsedForJob || window.__matrixAutoCollapsedForJob !== jobId) {
+      window.__matrixAutoCollapsedForJob = jobId;
+      if (typeof window.setTaskMatrixCollapsed === 'function') window.setTaskMatrixCollapsed(true);
     }
   }
 
@@ -7366,6 +7375,11 @@ function showAffiliateFinishedVideo(finalVideoUrl, title, srtUrl) {
 
   if (card && player) {
     card.style.display = 'block';
+    // Affiliate continuity 2026-11-07: video cuối nổi bật ở đầu panel affiliate.
+    card.classList.add('aff-finished-prominent');
+    if (document.getElementById('panel-affiliate')?.classList.contains('active')) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
     player.src = finalVideoUrl;
     if (titleEl) titleEl.textContent = title || "Video Tiếp Thị Đã Xuất Bản";
     const dlUrl = finalVideoUrl.replace('/video/', '/download/');
@@ -7745,8 +7759,8 @@ function renderAffiliateScenes(scenes) {
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <label style="font-size:11px;color:var(--muted);margin:0;">Thời lượng:</label>
-            <input type="number" id="affSceneDur_${idx}" value="${s.duration || 5}" min="3" max="10" style="width:48px;padding:2px 6px;text-align:center;font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);">
-            <span style="font-size:11px;color:var(--muted);">giây</span>
+            <input type="number" id="affSceneDur_${idx}" value="10" min="10" max="10" disabled title="Chuẩn 10 giây — đúng clip API 10s trả về, dùng trọn vẹn không cắt đuôi" style="width:48px;padding:2px 6px;text-align:center;font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);">
+            <span style="font-size:11px;color:var(--muted);">giây (chuẩn 10s)</span>
             <button type="button" class="btn btn-ghost btn-xs" onclick="deleteAffiliateScene(${idx})" style="color:#ef4444;" title="Xóa cảnh này">✕</button>
           </div>
         </div>
@@ -7850,7 +7864,7 @@ function addAffiliateSceneCustom() {
     index: newIdx,
     title: `Cảnh ${newIdx}`,
     role: 'demo',
-    duration: 5,
+    duration: 10, // Affiliate chuẩn 10s/cảnh = clip API trả về
     prompt: `Commercial showcase shot, vertical 9:16 framing, studio lighting, 8k, photorealistic, masterpiece, no text, no watermark`,
     voiceover: `Trải nghiệm thực tế sản phẩm vô cùng mượt mà và tiện lợi.`,
     voice: document.getElementById('affiliateVoiceSelect')?.value || 'vieneu:AdamBua',
@@ -7893,10 +7907,12 @@ async function startAffiliateRenderJob() {
   }
 
   // Thu thập dữ liệu từ các input trên màn hình
+  // Affiliate chuẩn 10s/cảnh = clip API trả về (backend cũng ép 10 ở
+  // /api/affiliate/render kể cả khi script cũ gửi duration khác).
   const scenesPayload = window.affiliateCurrentScript.scenes.map((s, idx) => {
     const vo = document.getElementById(`affSceneVo_${idx}`)?.value || s.voiceover;
     const pr = document.getElementById(`affScenePrompt_${idx}`)?.value || s.prompt;
-    const dur = parseInt(document.getElementById(`affSceneDur_${idx}`)?.value || s.duration || 5);
+    const dur = 10;
     const vc = document.getElementById(`affSceneVoice_${idx}`)?.value || s.voice;
     return {
       prompt: pr,
@@ -7977,7 +7993,7 @@ function sendAffiliateToMainStudio() {
       window.affiliateCurrentScript.scenes.forEach((s, idx) => {
         const vo = document.getElementById(`affSceneVo_${idx}`)?.value || s.voiceover;
         const pr = document.getElementById(`affScenePrompt_${idx}`)?.value || s.prompt;
-        const dur = parseInt(document.getElementById(`affSceneDur_${idx}`)?.value || s.duration || 5);
+        const dur = 10; // Affiliate chuẩn 10s/cảnh = clip API trả về
         const vc = document.getElementById(`affSceneVoice_${idx}`)?.value || s.voice;
         if (typeof addScene === 'function') {
           addScene(

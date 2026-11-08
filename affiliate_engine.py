@@ -328,6 +328,12 @@ AFFILIATE_SHOOTING_STYLES = {
     }
 }
 
+# Chuẩn affiliate (đặt trước Data Models vì AffiliateScene dùng làm default).
+AFFILIATE_SCENE_DURATION = 10  # giây/cảnh — đúng clip API 10s trả về
+AFFILIATE_VOICEOVER_MAX_WORDS = 30  # ~25-30 từ tiếng Việt đọc vừa trong 10s
+PRODUCT_LOCK_MARKER = "PRODUCT CONTINUITY LOCK"
+
+
 # ── 2. Data Models ──────────────────────────────────────────────────────────
 
 class ProductAffiliateRequest(BaseModel):
@@ -354,7 +360,7 @@ class AffiliateScene(BaseModel):
     index: int
     title: str
     role: str # hook | pain | demo | proof | cta
-    duration: int = 5
+    duration: int = AFFILIATE_SCENE_DURATION  # chuẩn 10s = clip API trả về
     prompt: str
     voiceover: str
     voice: str = ""
@@ -372,9 +378,124 @@ class AffiliateScriptResponse(BaseModel):
     scenes: List[AffiliateScene]
 
 
+# ── 2.5. Product DNA Lock + chuẩn hóa 10s ──────────────────────────────────
+# API video trả đúng 1 clip 10s/cảnh. Vì vậy mọi cảnh affiliate chuẩn 10s
+# (dùng trọn vẹn clip, không cắt đuôi, không loop) và mọi prompt đều dán
+# NGUYÊN VĂN cùng một Product DNA lock để tay/sản phẩm/bối cảnh không trôi
+# giữa các cảnh (cùng nguyên tắc Character Block của phim dài).
+
+
+
+def build_product_dna_lock(
+    product_name: str,
+    category: str = "gadgets",
+    key_features: str = "",
+    koc_persona_id: str = "nam_bua_hai",
+    shooting_style: str = "faceless",
+) -> str:
+    """Khối khóa liên tục của sản phẩm — dán NGUYÊN VĂN vào MỌI prompt cảnh.
+
+    Gồm: tên sản phẩm (EN + giữ tên gốc), tính năng chính, neo liên tục theo
+    kiểu quay (tay/bối cảnh/trang phục/KOC) và style_tag của ngành hàng.
+    Không chứa từ cấm (no text/watermark nằm ở prompt gốc, không lặp ở đây).
+    """
+    cat_cfg = AFFILIATE_CATEGORIES.get(category, AFFILIATE_CATEGORIES["gadgets"])
+    persona_cfg = KOC_PERSONAS.get(koc_persona_id, KOC_PERSONAS["nam_bua_hai"])
+    p_name_en = translate_product_to_en(product_name)
+    feats = re.sub(r"\s+", " ", _transliterate_vi((key_features or "").strip())).strip()
+    if len(feats) > 160:
+        feats = feats[:160].rsplit(" ", 1)[0].strip() + "..."
+    if shooting_style == "hands":
+        anchor = ("the EXACT SAME pair of clean well-groomed aesthetic hands, "
+                  "the EXACT SAME clean aesthetic minimalist oak wood desk tabletop "
+                  "with soft morning daylight and pastel props")
+    elif shooting_style == "product":
+        anchor = ("the EXACT SAME luxury minimalist studio showcase with rotating "
+                  "motorized matte turntable, volumetric softbox lighting and clean "
+                  "gradient background, no people, no hands")
+    elif shooting_style == "koc_face":
+        anchor = f"the EXACT SAME {persona_cfg['prompt_dna']}"
+    else:  # faceless
+        wardrobe = ("stylish modern neutral oversized streetwear"
+                    if persona_cfg.get("gender") == "male"
+                    else "elegant modern minimalist pastel outfit")
+        anchor = (f"the EXACT SAME aesthetic faceless model wearing {wardrobe}, "
+                  "strictly shot from neck down or from behind, "
+                  "absolutely no facial features visible")
+    feat_part = f", key features: {feats}" if feats else ""
+    return (
+        f"[{PRODUCT_LOCK_MARKER} — identical in EVERY scene, do not change anything: "
+        f"the EXACT SAME {p_name_en}{feat_part}; {anchor}; "
+        f"{cat_cfg['style_tag']}]"
+    )
+
+
+def build_product_dna_lock_for_request(req: "ProductAffiliateRequest") -> str:
+    """Tiện ích: dựng lock trực tiếp từ request kịch bản."""
+    return build_product_dna_lock(
+        req.product_name,
+        req.category,
+        req.key_features or "",
+        getattr(req, "koc_persona", "nam_bua_hai") or "nam_bua_hai",
+        getattr(req, "shooting_style", "faceless") or "faceless",
+    )
+
+
+def validate_affiliate_script(
+    scenes: List[Any], product_name: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Kiểm tra cảnh nào thiếu Product DNA lock (dùng cho test + log warning).
+
+    Trả về danh sách {"index": int, "missing": ["product_lock" | "product_name"]}.
+    Chấp nhận cả AffiliateScene lẫn dict.
+    """
+    issues: List[Dict[str, Any]] = []
+    core_name = ""
+    if product_name:
+        core_name = translate_product_to_en(product_name).split(" (")[0].strip().lower()
+    for s in scenes:
+        prompt = s.get("prompt", "") if isinstance(s, dict) else getattr(s, "prompt", "")
+        idx = s.get("index", 0) if isinstance(s, dict) else getattr(s, "index", 0)
+        missing: List[str] = []
+        if PRODUCT_LOCK_MARKER not in (prompt or ""):
+            missing.append("product_lock")
+        if core_name and core_name not in (prompt or "").lower():
+            missing.append("product_name")
+        if missing:
+            issues.append({"index": idx, "missing": missing})
+    return issues
+
+
+def _normalize_affiliate_script(
+    scenes: List[AffiliateScene], req: "ProductAffiliateRequest"
+) -> tuple[List[AffiliateScene], List[str]]:
+    """Chuẩn hóa hậu xử lý cho kịch bản affiliate (dùng chung local + AI).
+
+    - Ép mọi cảnh duration = AFFILIATE_SCENE_DURATION (10s, đúng clip API).
+    - Prompt nào thiếu lock thì APPEND lock (không viết lại prompt của LLM).
+    - Thoại dài hơn AFFILIATE_VOICEOVER_MAX_WORDS từ thì chỉ ghi warning,
+      KHÔNG cắt lặng lẽ (cắt thoại làm mất ý bán hàng).
+    Trả về (scenes, warnings).
+    """
+    lock = build_product_dna_lock_for_request(req)
+    warnings: List[str] = []
+    for s in scenes:
+        s.duration = AFFILIATE_SCENE_DURATION
+        if PRODUCT_LOCK_MARKER not in (s.prompt or ""):
+            s.prompt = f"{(s.prompt or '').strip()} {lock}".strip()
+        words = len((s.voiceover or "").split())
+        if words > AFFILIATE_VOICEOVER_MAX_WORDS:
+            warnings.append(
+                f"Cảnh {s.index}: thoại {words} từ (>{AFFILIATE_VOICEOVER_MAX_WORDS} từ "
+                f"cho clip 10s) — đọc có thể không kịp, nên rút ngắn thoại."
+            )
+    return scenes, warnings
+
+
+
 # ── 3. Prompt Builder (Sinh Visual Prompt Tiếng Anh chuẩn Commercial) ─────────
 
-def build_commercial_prompt(
+def _build_commercial_prompt_base(
     role: str,
     product_name: str,
     category: str,
@@ -383,12 +504,15 @@ def build_commercial_prompt(
     aspect_ratio: str = "9:16",
     shooting_style: str = "faceless"
 ) -> str:
-    """
-    Tạo prompt tiếng Anh thương mại điện ảnh cực nét theo 4 Kiểu quay (Shooting Styles):
-    1. 'faceless': Người mẫu không lộ mặt (quay từ cổ trở xuống hoặc từ phía sau, no face visible)
-    2. 'hands': Chỉ quay tay (cầm, xoay, thao tác trên nền đẹp, macro tabletop, no face)
-    3. 'product': Chỉ quay sản phẩm (quảng cáo studio, hoàn toàn không người, 360 turntable)
+    """Prompt gốc theo từng style/role (CHƯA có Product DNA lock).
+
+    Tạo prompt tiếng Anh thương mại điện ảnh cực nét theo 4 Kiểu quay:
+    1. 'faceless': Người mẫu không lộ mặt (quay từ cổ trở xuống hoặc từ phía sau)
+    2. 'hands': Chỉ quay tay (cầm, xoay, thao tác trên nền đẹp, macro tabletop)
+    3. 'product': Chỉ quay sản phẩm (quảng cáo studio, hoàn toàn không người)
     4. 'koc_face': KOC lộ mặt đầy đủ (khóa ADN nhân vật đồng nhất 100%)
+
+    Hàm public build_commercial_prompt() bọc hàm này và append lock nguyên văn.
     """
     cat_cfg = AFFILIATE_CATEGORIES.get(category, AFFILIATE_CATEGORIES["gadgets"])
     style_tag = cat_cfg["style_tag"]
@@ -582,6 +706,32 @@ def build_commercial_prompt(
             )
 
 
+def build_commercial_prompt(
+    role: str,
+    product_name: str,
+    category: str,
+    key_feature: str,
+    koc_persona_id: str = "nam_bua_hai",
+    aspect_ratio: str = "9:16",
+    shooting_style: str = "faceless"
+) -> str:
+    """Prompt thương mại cho 1 cảnh — LUÔN kèm Product DNA lock nguyên văn.
+
+    Bọc _build_commercial_prompt_base() và append build_product_dna_lock()
+    vào cuối prompt để tay/sản phẩm/bối cảnh không trôi giữa các cảnh.
+    """
+    base = _build_commercial_prompt_base(
+        role, product_name, category, key_feature,
+        koc_persona_id, aspect_ratio, shooting_style,
+    )
+    if PRODUCT_LOCK_MARKER in base:
+        return base
+    lock = build_product_dna_lock(
+        product_name, category, key_feature, koc_persona_id, shooting_style
+    )
+    return f"{base} {lock}"
+
+
 # ── 4. Bộ Sinh Kịch Bản Tiếp Thị Ngoại Tuyến Siêu Tốc (Local Generator) ────────
 
 def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateScriptResponse:
@@ -637,7 +787,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=1,
                 title="Cảnh 1: Hook Bựa 3 Giây Chặn Lướt",
                 role="hook",
-                duration=4,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("hook"),
                 voiceover=f"Dừng lại 3 giây! Thề với các bác, ai mà lướt qua cái clip này thì chỉ có nước tiếc đứt ruột thôi!",
                 voice=voice,
@@ -648,7 +798,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=2,
                 title="Cảnh 2: Tình Huống Cay Đắng Hàng Ngày",
                 role="pain",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("pain"),
                 voiceover=f"Bình thường ở nhà toàn dính quả {p_pain}, vừa tốn tiền oan lại còn rước bực vào người, cay không chịu nổi!",
                 voice=voice,
@@ -659,7 +809,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=3,
                 title="Cảnh 3: Cứu Tinh Xuất Hiện Đỉnh Chóp",
                 role="demo",
-                duration=6,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("demo"),
                 voiceover=f"Cho đến khi tôi vớ được em {p_name} này! Úi chùi ui, nó đỉnh của chóp luôn các bác ạ. {p_features}, dùng sướng tê người!",
                 voice=voice,
@@ -670,7 +820,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=4,
                 title="Cảnh 4: Deal Hời Tụt Quần",
                 role="proof",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
                 voiceover=f"Đã thế hôm nay TikTok Shop trợ giá tụt quần, đang giảm chỉ còn {p_sale}, lại còn {p_deal} nữa chứ!",
                 voice=voice,
@@ -681,7 +831,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=5,
                 title="Cảnh 5: Chốt Đơn Gấp Trong Giỏ Hàng",
                 role="cta",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
                 voiceover=f"Nhanh cái tay lẹ cái mắt bấm ngay vào giỏ hàng màu vàng bên góc trái để múc luôn, chậm là người ta hốt sạch đấy nha!",
                 voice=voice,
@@ -705,7 +855,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=1,
                 title="Cảnh 1: Mở Đầu Đập Hộp Trực Tiếp",
                 role="hook",
-                duration=4,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("hook"),
                 voiceover=f"Cùng mình đập hộp và test thử em {p_name} đang làm mưa làm gió mấy ngày nay xem có xịn thật không nha!",
                 voice=voice,
@@ -716,7 +866,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=2,
                 title="Cảnh 2: Cảm Quan & Chất Lượng Hoàn Thiện",
                 role="pain",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("pain"),
                 voiceover=f"Trước đây mình rất ngại mua trên mạng vì sợ hàng đểu mau hỏng, nhưng cầm em này trên tay cảm giác chắc chắn cực kỳ.",
                 voice=voice,
@@ -727,7 +877,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=3,
                 title="Cảnh 3: Test Tính Năng Cốt Lõi Tại Chỗ",
                 role="demo",
-                duration=6,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("demo"),
                 voiceover=f"Mình test luôn công năng thực tế cho mọi người xem nè. Điểm mình ưng nhất là {p_features}, hoạt động siêu mượt mà.",
                 voice=voice,
@@ -738,7 +888,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=4,
                 title="Cảnh 4: Đánh Giá 10/10 & Giá Khuyến Mãi",
                 role="proof",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
                 voiceover=f"Chấm điểm 9.5 trên 10 luôn nha! Hiện tại đang có giá ưu đãi chỉ {p_sale} và kèm {p_deal}.",
                 voice=voice,
@@ -749,7 +899,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=5,
                 title="Cảnh 5: Hướng Dẫn Săn Deal Góc Trái",
                 role="cta",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
                 voiceover=f"Mọi người muốn mua hàng chuẩn thì bấm ngay vào giỏ hàng màu vàng bên góc trái màn hình để nhận voucher nhé!",
                 voice=voice,
@@ -766,7 +916,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=1,
                 title="Cảnh 1: Hook Biến Hóa Trước Sau",
                 role="hook",
-                duration=4,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("hook"),
                 voiceover=f"Sự khác biệt một trời một vực trước và sau khi mình biết đến em {p_name} này, xem mà ngỡ ngàng luôn!",
                 voice=voice,
@@ -777,7 +927,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=2,
                 title="Cảnh 2: Trước Khi Dùng (Vất Vả, Khó Chịu)",
                 role="pain",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("pain"),
                 voiceover=f"Trước đây mỗi lần gặp cảnh {p_pain} là mình chỉ muốn bỏ cuộc, vừa mất thời gian vừa bực mình cả ngày.",
                 voice=voice,
@@ -788,7 +938,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=3,
                 title="Cảnh 3: Sau Khi Dùng (Nhàn Tênh, Thư Thái)",
                 role="demo",
-                duration=6,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("demo"),
                 voiceover=f"Còn bây giờ thì nhàn tênh! Nhờ có {p_features}, chỉ cần vài giây là mọi thứ xong xuôi gọn gàng.",
                 voice=voice,
@@ -799,7 +949,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=4,
                 title="Cảnh 4: Giá Trị Vượt Xa Mong Đợi",
                 role="proof",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
                 voiceover=f"Đúng là đầu tư thông minh nhất tháng này, vừa tiết kiệm công sức mà giá sale hôm nay chỉ còn {p_sale}.",
                 voice=voice,
@@ -810,7 +960,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=5,
                 title="Cảnh 5: Nhanh Tay Nhận Voucher",
                 role="cta",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
                 voiceover=f"Voucher giảm giá và {p_deal} mình để sẵn ở giỏ hàng góc trái, cả nhà nhanh tay chốt ngay kẻo hết hạn nha!",
                 voice=voice,
@@ -827,7 +977,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=1,
                 title="Cảnh 1: Attention - Cảnh Báo Gây Sốc",
                 role="hook",
-                duration=4,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("hook"),
                 voiceover=f"Cảnh báo: Đây là món đồ mà bạn ước gì mình đã mua sớm hơn, xem ngay để không bị mua đắt nhé!",
                 voice=voice,
@@ -838,7 +988,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=2,
                 title="Cảnh 2: Interest - Tính Năng Bất Ngờ",
                 role="pain",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("pain"),
                 voiceover=f"Đừng để việc {p_pain} làm phiền bạn thêm một ngày nào nữa, bởi giải pháp đã nằm trọn trong chiếc hộp này.",
                 voice=voice,
@@ -849,7 +999,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=3,
                 title="Cảnh 3: Desire - Khao Khát Sở Hữu",
                 role="demo",
-                duration=6,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("demo"),
                 voiceover=f"Sở hữu {p_name} với công nghệ {p_features}. Thiết kế sang xịn mịn, ai nhìn qua cũng phải hỏi địa chỉ mua.",
                 voice=voice,
@@ -860,7 +1010,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=4,
                 title="Cảnh 4: Cam Kết Uy Tín & Deal",
                 role="proof",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
                 voiceover=f"Hàng ngàn lượt đánh giá 5 sao uy tín, đang có deal hời tụt đỉnh {p_sale} kèm {p_deal}.",
                 voice=voice,
@@ -871,7 +1021,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=5,
                 title="Cảnh 5: Action - Chốt Đơn Lập Tức",
                 role="cta",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
                 voiceover=f"Số lượng flash sale có hạn, chạm ngay vào giỏ hàng màu vàng góc dưới bên trái để nhận ưu đãi ngay hôm nay!",
                 voice=voice,
@@ -888,7 +1038,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=1,
                 title="Cảnh 1: Hook 3s Đánh Trúng Tâm Lý",
                 role="hook",
-                duration=4,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("hook"),
                 voiceover=f"Nếu bạn đang phát bực vì {p_pain} thì dừng lại 3 giây, đây chính là chân ái dành riêng cho bạn!",
                 voice=voice,
@@ -899,7 +1049,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=2,
                 title="Cảnh 2: Thổi Bùng Nỗi Đau Khó Chịu",
                 role="pain",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("pain"),
                 voiceover=f"Cứ tưởng tượng mỗi ngày đi làm về mệt mỏi mà vẫn phải chịu đựng cảnh này, vừa tốn thời gian lại hại sức khỏe.",
                 voice=voice,
@@ -910,7 +1060,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=3,
                 title="Cảnh 3: Giải Pháp & Trình Diễn Đột Phá",
                 role="demo",
-                duration=6,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("demo"),
                 voiceover=f"Nhưng mọi thứ được giải quyết êm ru nhờ {p_name}! Điểm ăn tiền nhất là {p_features}, tiện lợi vô cùng.",
                 voice=voice,
@@ -921,7 +1071,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=4,
                 title="Cảnh 4: Kết Quả & Giá Siêu Ưu Đãi",
                 role="proof",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
                 voiceover=f"Hiệu quả rõ rệt ngay lần đầu dùng! Giá hôm nay siêu sốc chỉ {p_sale}, lại còn được {p_deal}.",
                 voice=voice,
@@ -932,7 +1082,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 index=5,
                 title="Cảnh 5: Kêu Gọi Mua Hàng Góc Trái",
                 role="cta",
-                duration=5,
+                duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
                 voiceover=f"Bấm ngay vào giỏ hàng màu vàng ở góc trái màn hình để săn deal hời trước khi hết mã freeship nhé!",
                 voice=voice,
@@ -940,6 +1090,14 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 reference_image=ref_img
             )
         ]
+
+    # Chuẩn hóa 10s + lock (phòng khi framework nào đó quên): ép duration 10,
+    # append lock nếu thiếu, cảnh báo thoại dài quá 10s (không cắt lặng lẽ).
+    scenes, _vo_warnings = _normalize_affiliate_script(scenes, req)
+    notes = notes + [
+        "Mỗi cảnh chuẩn 10 giây đúng clip API trả về — dùng trọn vẹn, không cắt đuôi, không loop.",
+        "Render nối tiếp (sequential chain): cảnh sau dùng last frame cảnh trước để giữ tay/sản phẩm/bối cảnh đồng nhất.",
+    ] + _vo_warnings
 
     return AffiliateScriptResponse(
         title=title,
@@ -989,6 +1147,9 @@ async def generate_affiliate_script_ai(
     if not muse_api_key:
         print("[Affiliate AI] Thiếu cấu hình MUSE2API_KEY: bỏ qua gọi AI, dùng bộ tạo cục bộ.")
         return generate_affiliate_script_local(req)
+    # Product DNA lock: yêu cầu LLM dán nguyên văn vào cuối prompt MỌI cảnh;
+    # hậu xử lý vẫn append lại nếu LLM quên (không viết lại prompt của LLM).
+    _dna_lock = build_product_dna_lock_for_request(req)
     sys_instruction = (
         "Bạn là Chuyên gia Marketing Tiếp thị Liên kết hàng đầu (TikTok Shop & Shopee Top Creator).\n"
         "Nhiệm vụ: Viết kịch bản video ngắn (15s-30s) dọc 9:16 bán hàng bùng nổ chuyển đổi theo đúng định dạng JSON.\n"
@@ -1000,10 +1161,14 @@ async def generate_affiliate_script_ai(
         "{\n"
         '  "title": "Tên kịch bản giật tít",\n'
         '  "scenes": [\n'
-        '    {"index": 1, "title": "...", "role": "hook", "duration": 4, "prompt": "...", "voiceover": "...", "badge": "..."},\n'
+        '    {"index": 1, "title": "...", "role": "hook", "duration": 10, "prompt": "...", "voiceover": "...", "badge": "..."},\n'
         "    ...\n"
         "  ]\n"
-        "}"
+        "}\n"
+        "5. Mỗi cảnh duration bắt buộc = 10 (clip API video trả đúng 10 giây/cảnh); "
+        "voiceover mỗi cảnh khoảng 25-30 từ tiếng Việt để đọc vừa trong 10 giây.\n"
+        "6. Dán NGUYÊN VĂN khối PRODUCT CONTINUITY LOCK sau vào CUỐI prompt của MỌI cảnh, không sửa một chữ:\n"
+        f"{_dna_lock}"
     )
 
     user_prompt = (
@@ -1016,7 +1181,8 @@ async def generate_affiliate_script_ai(
         f"Ưu đãi đi kèm: {req.promotion_deal}\n"
         f"Công thức kịch bản: {req.framework}\n"
         f"Kiểu quay (shooting_style): {getattr(req, 'shooting_style', 'faceless') or 'faceless'}\n"
-        f"Giọng điệu/Tone: {req.tone}"
+        f"Giọng điệu/Tone: {req.tone}\n"
+        f"PRODUCT LOCK (dán nguyên văn vào cuối prompt của mọi cảnh): {_dna_lock}"
     )
 
     try:
@@ -1050,7 +1216,7 @@ async def generate_affiliate_script_ai(
                             index=int(item.get("index", len(scenes_list) + 1)),
                             title=item.get("title", f"Cảnh {len(scenes_list) + 1}"),
                             role=item.get("role", "demo"),
-                            duration=int(item.get("duration", 5)),
+                            duration=int(item.get("duration", AFFILIATE_SCENE_DURATION)),
                             prompt=item.get("prompt", build_commercial_prompt("demo", req.product_name, req.category, req.key_features or "")),
                             voiceover=item.get("voiceover", ""),
                             voice=req.voice,
@@ -1058,6 +1224,9 @@ async def generate_affiliate_script_ai(
                             reference_image=req.reference_image
                         ))
                     if len(scenes_list) >= 3:
+                        # Chuẩn hóa hậu xử lý: ép duration 10, append lock nếu
+                        # LLM quên (không viết lại prompt), cảnh báo thoại dài.
+                        scenes_list, _vo_warnings = _normalize_affiliate_script(scenes_list, req)
                         return AffiliateScriptResponse(
                             title=parsed.get("title", f"🔥 Video Tiếp Thị {req.product_name}"),
                             framework=req.framework,
@@ -1065,7 +1234,11 @@ async def generate_affiliate_script_ai(
                             aspect_ratio=req.aspect_ratio,
                             recommended_voice=req.voice,
                             hook_strength="99/100",
-                            marketing_notes=["Được tạo bởi AI Muse Chat Model với tối ưu chuyển đổi trực tuyến."],
+                            marketing_notes=[
+                                "Được tạo bởi AI Muse Chat Model với tối ưu chuyển đổi trực tuyến.",
+                                "Mỗi cảnh chuẩn 10 giây đúng clip API trả về — dùng trọn vẹn, không cắt đuôi, không loop.",
+                                "Render nối tiếp (sequential chain): cảnh sau dùng last frame cảnh trước để giữ tay/sản phẩm/bối cảnh đồng nhất.",
+                            ] + _vo_warnings,
                             scenes=scenes_list
                         )
     except Exception as e:

@@ -186,3 +186,32 @@ img.img-lazy-fade.img-in { opacity: 1; }
   .tl-ab-grid { grid-template-columns: 1fr; }
   .tl-cell { min-width: 34px; }
 }
+/* ── Affiliate continuity 2026-11-07: video cuối nổi bật + matrix compact ── */
+.aff-finished-prominent {
+  outline: 2px solid rgba(16, 185, 129, 0.65);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.12), 0 8px 28px rgba(16, 185, 129, 0.28) !important;
+}
+.task-matrix-compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+}
+.tm-compact-summary { font-size: 12px; font-weight: 700; color: var(--text); margin-right: 4px; }
+.tm-compact-pill {
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  white-space: nowrap;
+}
+.tm-compact-pill.tm-done { border-color: rgba(16, 185, 129, 0.5); color: #34d399; }
+.tm-compact-pill.tm-error { border-color: rgba(239, 68, 68, 0.5); color: #f87171; }
+.tm-compact-pill.tm-running { border-color: rgba(251, 191, 36, 0.5); color: #fbbf24; }

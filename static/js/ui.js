@@ -268,6 +268,52 @@
     if (typeof window.resetApiKeyModalFlag === 'function') window.resetApiKeyModalFlag();
     refreshStudioApiKeyStatus();
   });
+  /* ── Batch Matrix: thu gọn thành dải tiến độ compact ───────────────────
+     Khi job có video cuối, app.js (updateMonitor) tự gọi setTaskMatrixCollapsed(true).
+     Mặc định mở đầy đủ lúc đang render; user mở lại bằng nút toggle ở header
+     của card matrix. Dải compact đọc data-status live của từng .task-cell. */
+  let taskMatrixCollapsed = false;
+  function buildTaskMatrixCompact() {
+    const strip = $('#taskMatrixCompact');
+    const matrix = $('#taskMatrix');
+    if (!strip || !matrix) return;
+    const cells = $$('.task-cell', matrix);
+    if (!cells.length) { strip.innerHTML = ''; return; }
+    const iconFor = (st) => ({ done: '✅', error: '❌', running: '▶️', queued: '⌛' }[st] || '⌛');
+    const done = cells.filter((c) => (c.dataset.status || '') === 'done').length;
+    strip.innerHTML =
+      `<span class="tm-compact-summary">Đã xong ${done}/${cells.length} cảnh</span>` +
+      cells.map((c, i) => {
+        const st = c.dataset.status || 'queued';
+        const title = (c.querySelector('.cell-title')?.textContent || `Cảnh ${i + 1}`).trim();
+        return `<span class="tm-compact-pill tm-${st}" title="${title} — ${st}">${iconFor(st)} ${title}</span>`;
+      }).join('') +
+      `<button type="button" class="btn btn-ghost btn-xs" onclick="toggleTaskMatrix()">🔼 Mở rộng xem từng cảnh</button>`;
+  }
+  function setTaskMatrixCollapsed(collapsed) {
+    const matrix = $('#taskMatrix');
+    const strip = $('#taskMatrixCompact');
+    const btn = $('#btnToggleTaskMatrix');
+    if (!matrix || !strip) return;
+    taskMatrixCollapsed = !!collapsed;
+    matrix.style.display = taskMatrixCollapsed ? 'none' : '';
+    strip.style.display = taskMatrixCollapsed ? 'flex' : 'none';
+    if (taskMatrixCollapsed) buildTaskMatrixCompact();
+    if (btn) btn.textContent = taskMatrixCollapsed ? '🔼 Mở rộng' : '🔽 Thu gọn';
+  }
+  window.setTaskMatrixCollapsed = setTaskMatrixCollapsed;
+  window.toggleTaskMatrix = function () { setTaskMatrixCollapsed(!taskMatrixCollapsed); };
+  // Cell đổi trạng thái trong lúc đang thu gọn -> vẽ lại dải compact (debounce).
+  const _matrixEl = $('#taskMatrix');
+  if (_matrixEl && 'MutationObserver' in window) {
+    let _tmTimer = null;
+    new MutationObserver(() => {
+      if (!taskMatrixCollapsed) return;
+      clearTimeout(_tmTimer);
+      _tmTimer = setTimeout(buildTaskMatrixCompact, 300);
+    }).observe(_matrixEl, { attributes: true, subtree: true, attributeFilter: ['data-status'] });
+  }
+
   refreshStudioApiKeyStatus();
 
   /* ── Timeline Editor: kéo-thả + xem trước + render lại từng shot ────────

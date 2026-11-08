@@ -39,6 +39,7 @@ from affiliate_engine import (
     AFFILIATE_FRAMEWORKS,
     KOC_PERSONAS,
     AFFILIATE_SHOOTING_STYLES,
+    AFFILIATE_SCENE_DURATION,
     ProductAffiliateRequest,
     AffiliateScriptResponse,
     generate_affiliate_script_ai,
@@ -3979,7 +3980,10 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
             prompt=s.get("prompt", ""),
             voiceover=s.get("voiceover", ""),
             voice=s.get("voice") or req.voice or "vieneu:AdamBua",
-            duration=int(s.get("duration", 5)),
+            # Affiliate chuẩn 10s/cảnh = đúng clip API 10s trả về: ép ở đây kể
+            # cả khi script cũ gửi duration khác, để compose dùng trọn vẹn
+            # clip, không cắt đuôi, không loop.
+            duration=AFFILIATE_SCENE_DURATION,
             size=req.aspect_ratio or "9:16",
             reference_image=s.get("reference_image") or None
         ))
@@ -3995,13 +3999,20 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
         voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
         quality=req.quality or "720p",
         transition=req.transition or "dissolve",
+        # Affiliate LUÔN nối tiếp (sequential chain): cảnh sau dùng last frame
+        # cảnh trước làm first frame, giữ tay/sản phẩm/bối cảnh đồng nhất.
+        # TRADE-OFF: render tuần tự nên wall-time ≈ tổng thời gian từng cảnh
+        # (5 cảnh ≈ 5 lần 1 cảnh), chậm hơn song song — đổi lại video bán hàng
+        # không bị trôi sản phẩm giữa các cảnh. Cảnh 1 giữ reference_image
+        # sản phẩm user đưa vào; cảnh sau bị ghi đè bằng last frame (chủ đích).
+        chain_mode="sequential",
         scenes=scene_items
     )
 
     job_id = uuid.uuid4().hex[:12]
     job = new_job(job_id, len(movie_req.scenes), req=movie_req)
     _save_job_or_http500(job)
-    job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh (9:16) — Giọng: {movie_req.voice}")
+    job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh × 10s (9:16, chain sequential) — Giọng: {movie_req.voice}")
     _save_job_or_http500(job)
     # Nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
     _spawn_job_task(job_id, film_pipeline(job, movie_req))
