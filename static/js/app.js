@@ -83,34 +83,15 @@ function showToast(msg, type = 'info', duration = 3000) {
   if (!toastContainer) {
     toastContainer = document.createElement('div');
     toastContainer.id = 'globalToastContainer';
-    toastContainer.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:99999;display:flex;flex-direction:column;gap:8px;max-width:380px;pointer-events:none;';
+    toastContainer.className = 'toast-container'; // vi tri/style o css/ui.css (.toast-container)
     document.body.appendChild(toastContainer);
   }
 
   const toast = document.createElement('div');
-  const borderCol = type === 'error' ? '#f87171' : type === 'warning' ? '#fbbf24' : 'rgba(56, 189, 248, 0.4)';
-  const bgCol = type === 'error' ? 'rgba(239, 68, 68, 0.95)' : type === 'warning' ? 'rgba(245, 158, 11, 0.95)' : 'rgba(15, 23, 42, 0.95)';
-  toast.style.cssText = `
-    pointer-events:auto;
-    background:${bgCol};
-    color:#fff;
-    padding:10px 14px;
-    border-radius:8px;
-    font-size:13px;
-    font-weight:500;
-    box-shadow:0 8px 24px rgba(0,0,0,0.4);
-    border:1px solid ${borderCol};
-    backdrop-filter:blur(8px);
-    transition:all 0.25s ease;
-    opacity:0;
-    transform:translateY(12px);
-    display:flex;
-    align-items:center;
-    gap:8px;
-  `;
+  toast.className = 'toast' + (type === 'error' ? ' toast-error' : type === 'warning' ? ' toast-warning' : '');
   const icon = type === 'error' ? '❌' : type === 'warning' ? '⚠️' : '✨';
   const cleanMsg = (typeof esc === 'function') ? esc(msg) : String(msg).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  toast.innerHTML = `<span>${icon}</span><span style="flex:1;line-height:1.4;">${cleanMsg}</span>`;
+  toast.innerHTML = `<span>${icon}</span><span class="toast-msg">${cleanMsg}</span>`;
   toastContainer.appendChild(toast);
 
   requestAnimationFrame(() => {
@@ -274,7 +255,7 @@ async function checkApiHealth() {
 // ── Scene management ────────────────────────────────────────────────────
 let VOICES = [];  // Loaded from /api/voices
 // Màu avatar cho nhân vật (luân phiên)
-const CHAR_COLORS = ['#38bdf8','#f472b6','#34d399','#fbbf24','#a78bfa','#fb923c','#e879f9'];
+const CHAR_COLORS = ['#818cf8','#f472b6','#34d399','#fbbf24','#a78bfa','#fb923c','#e879f9'];
 
 async function loadVoices() {
   try {
@@ -493,7 +474,7 @@ function renderSceneItemHtml(s, i) {
       return `
         <div class="char-seg-item">
           <div>
-            <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;">
+            <div class="fx fx-ac fx-g5 u-mb4">
               <div class="dot" style="background:${color};width:10px;height:10px;border-radius:50%;flex-shrink:0;"></div>
               <span class="gender-badge ${gender}">${gender==='female'?'Nu':'Nam'}</span>
             </div>
@@ -505,15 +486,15 @@ function renderSceneItemHtml(s, i) {
               placeholder="Loi thoai cua nhan vat...">${esc(seg.text)}</textarea>
           </div>
           <div>
-            <div style="display:flex;gap:4px;align-items:center;">
+            <div class="fx fx-g4 fx-ac">
               <select class="seg-voice" style="width:100%;background:var(--bg0);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:12px;">
                 ${voiceSelectHtml(seg.voice)}
               </select>
-              <button type="button" class="btn btn-ghost btn-sm" style="padding:3px 6px;" title="Nghe thử giọng nhân vật này" onclick="testPlayVoice(this.previousElementSibling.value, this.closest('.char-seg-item').querySelector('.seg-text').value)">🔊</button>
+              <button type="button" class="btn btn-ghost btn-sm u-p-3-6" title="Nghe thử giọng nhân vật này" onclick="testPlayVoice(this.previousElementSibling.value, this.closest('.char-seg-item').querySelector('.seg-text').value)">🔊</button>
             </div>
           </div>
-          <div style="display:flex;align-items:center;justify-content:center;">
-            <button class="btn btn-ghost btn-sm" style="color:var(--red);padding:4px 8px;" onclick="removeCharSegment(${s.id},${si})">✕</button>
+          <div class="fx fx-ac fx-jc-c">
+            <button class="btn btn-ghost btn-sm u-c-red u-p-4-8" onclick="removeCharSegment(${s.id},${si})">✕</button>
           </div>
         </div>`;
     }).join('');
@@ -534,18 +515,18 @@ function renderSceneItemHtml(s, i) {
       refImgHtml = `
         <div class="ref-img-preview-box">
           <img loading="lazy" decoding="async" src="${esc(s.reference_image)}" class="ref-img-thumb" alt="Tham chiếu nhân vật" onclick="triggerSceneUpload(${s.id})" title="Bấm để đổi ảnh khác">
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:12px;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:6px;">
+          <div class="fx-f1">
+            <div class="u-fs12 u-fw600 u-c-accent fx fx-ac fx-g6">
               <span>🔒 Đã khóa nhân vật theo ảnh này</span>
             </div>
             <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;">
               ${esc(refName)}
             </div>
           </div>
-          <div style="display:flex;gap:6px;align-items:center;">
+          <div class="fx fx-g6 fx-ac">
             ${libOptions}
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 8px;" onclick="triggerSceneUpload(${s.id})">🔄 Đổi ảnh</button>
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 8px;color:var(--red);" onclick="clearSceneImage(${s.id})">🗑️ Xóa</button>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-4-8" onclick="triggerSceneUpload(${s.id})">🔄 Đổi ảnh</button>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-4-8 u-c-red" onclick="clearSceneImage(${s.id})">🗑️ Xóa</button>
           </div>
           <input type="hidden" class="scene-ref-img-val" value="${esc(s.reference_image)}">
           <input type="hidden" class="scene-ref-img-name" value="${esc(refName)}">
@@ -558,18 +539,18 @@ function renderSceneItemHtml(s, i) {
              ondragover="handleDragOver(event, ${s.id})"
              ondragleave="handleDragLeave(event, ${s.id})"
              ondrop="handleSceneDrop(event, ${s.id})">
-          <div style="display:flex;align-items:center;gap:10px;">
+          <div class="fx fx-ac fx-g10">
             <div style="width:36px;height:36px;border-radius:6px;background:var(--bg2);display:flex;align-items:center;justify-content:center;font-size:18px;">📁</div>
             <div>
-              <div style="font-size:12px;font-weight:600;color:var(--text);">
-                <span style="color:var(--accent);">Tải ảnh nhân vật từ máy tính</span> hoặc kéo thả vào đây
+              <div class="u-fs12 u-fw600 u-c-text">
+                <span class="u-c-accent">Tải ảnh nhân vật từ máy tính</span> hoặc kéo thả vào đây
               </div>
-              <div style="font-size:11px;color:var(--muted);margin-top:2px;">Hỗ trợ PNG, JPG, WEBP (Để khóa khuôn mặt / trang phục) hoặc dán Clipboard (Ctrl+V)</div>
+              <div class="u-fs11 u-c-muted u-mt2">Hỗ trợ PNG, JPG, WEBP (Để khóa khuôn mặt / trang phục) hoặc dán Clipboard (Ctrl+V)</div>
             </div>
           </div>
-          <div style="display:flex;gap:6px;align-items:center;" onclick="event.stopPropagation();">
+          <div class="fx fx-g6 fx-ac" onclick="event.stopPropagation();">
             ${libOptions}
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:3px 8px;" onclick="promptImageUrl(${s.id})">🌐 Dán link</button>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-3-8" onclick="promptImageUrl(${s.id})">🌐 Dán link</button>
           </div>
           <input type="hidden" class="scene-ref-img-val" value="">
           <input type="hidden" class="scene-ref-img-name" value="">
@@ -593,7 +574,7 @@ function renderSceneItemHtml(s, i) {
         const isSel = curAngle === ang.key;
         return `
           <button type="button" class="btn btn-ghost btn-sm"
-            style="font-size:10.5px;padding:2px 7px;${isSel ? 'border-color:var(--accent);color:var(--accent);background:rgba(56,189,248,0.14);font-weight:700;' : ''}${!hasImg ? 'opacity:0.6;' : ''}"
+            style="font-size:10.5px;padding:2px 7px;${isSel ? 'border-color:var(--accent);color:var(--accent);background:rgba(99,102,241,0.14);font-weight:700;' : ''}${!hasImg ? 'opacity:0.6;' : ''}"
             onclick="applyCharSheetAngle(${s.id}, '${matchedChar.id}', '${ang.key}')"
             title="${hasImg ? `Khóa góc ${ang.label} từ Character Sheet` : `Góc này chưa có ảnh trong Sheet - bấm để tạo hoặc dùng ảnh avatar`}">
             ${ang.label} ${hasImg ? '✓' : ''}
@@ -603,29 +584,29 @@ function renderSceneItemHtml(s, i) {
       charMatchBannerHtml = `
         <div class="char-match-banner" id="scene-char-match-${s.id}">
           <div style="width:36px;height:36px;border-radius:50%;overflow:hidden;background:var(--bg2);flex-shrink:0;border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;">
-            ${matchedChar.avatar ? `<img loading="lazy" decoding="async" src="${esc(matchedChar.avatar)}" style="width:100%;height:100%;object-fit:cover;">` : `<span style="font-size:18px;">👤</span>`}
+            ${matchedChar.avatar ? `<img loading="lazy" decoding="async" src="${esc(matchedChar.avatar)}" style="width:100%;height:100%;object-fit:cover;">` : `<span class="u-fs18">👤</span>`}
           </div>
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:12.5px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-              <span>🎯 Đã nhận diện nhân vật: <b style="color:var(--accent);">${esc(matchedChar.name)}</b></span>
-              <span class="pill running" style="font-size:10px;padding:1px 6px;">Tự động tham chiếu</span>
+          <div class="fx-f1">
+            <div class="u-fs125 u-fw700 u-c-text fx fx-ac fx-g6 fx-wrap">
+              <span>🎯 Đã nhận diện nhân vật: <b class="u-c-accent">${esc(matchedChar.name)}</b></span>
+              <span class="pill running u-fs10 u-p-1-6">Tự động tham chiếu</span>
             </div>
-            <div style="font-size:11px;color:var(--muted);margin-top:2px;">
+            <div class="u-fs11 u-c-muted u-mt2">
               🎙️ Giọng: <b>${esc(matchedChar.voice || 'Mặc định')}</b> ${matchedChar.description ? `• Tạo hình: ${esc(matchedChar.description.slice(0, 50))}...` : ''}
             </div>
-            <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:5px;">
-              <span style="font-size:11px;color:var(--muted);font-weight:600;">Góc quay Bible:</span>
+            <div class="fx fx-ac fx-g5 fx-wrap u-mt5">
+              <span class="u-fs11 u-c-muted u-fw600">Góc quay Bible:</span>
               ${angleButtonsHtml}
             </div>
           </div>
-          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+          <div class="fx fx-g5 fx-ac fx-wrap">
             ${matchedChar.avatar ? `
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 7px;color:var(--accent);" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'image')" title="Khóa ảnh tham chiếu này cho cảnh">🔒 Khóa ảnh</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-7 u-c-accent" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'image')" title="Khóa ảnh tham chiếu này cho cảnh">🔒 Khóa ảnh</button>
             ` : ''}
             ${matchedChar.description ? `
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 7px;color:var(--green);" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'desc')" title="Chèn mô tả tạo hình vào Prompt">➕ Thêm mô tả</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-7 u-c-green" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'desc')" title="Chèn mô tả tạo hình vào Prompt">➕ Thêm mô tả</button>
             ` : ''}
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 7px;" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'all')" title="Đồng bộ ảnh, giọng nói và mô tả">⚡ Áp dụng tất cả</button>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-7" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'all')" title="Đồng bộ ảnh, giọng nói và mô tả">⚡ Áp dụng tất cả</button>
           </div>
         </div>`;
     } else {
@@ -635,7 +616,7 @@ function renderSceneItemHtml(s, i) {
     const chainBarHtml = i > 0 ? `
       <div class="scene-chain-bar">
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--yellow);cursor:pointer;margin-bottom:0;" title="Dùng khung hình cuối cùng (last frame) của cảnh trước làm khung hình đầu (first frame) của cảnh này">
-          <input type="checkbox" class="scene-chain-chk" ${s.chain_from_previous ? 'checked' : ''} onchange="toggleSceneChaining(${s.id}, this.checked)" style="accent-color:var(--yellow);">
+          <input type="checkbox" class="scene-chain-chk u-ac-yellow" ${s.chain_from_previous ? 'checked' : ''} onchange="toggleSceneChaining(${s.id}, this.checked)">
           <span>🔗 Nối tiếp khung hình từ Cảnh ${i} (First/Last Frame Chaining)</span>
         </label>
         <span class="scene-chain-badge">Khóa chuyển động liền mạch</span>
@@ -652,7 +633,7 @@ function renderSceneItemHtml(s, i) {
           ${i > 0 ? `<button class="btn btn-ghost btn-sm" onclick="moveScene(${s.id},-1)">^</button>` : ''}
           ${i < scenes.length - 1 ? `<button class="btn btn-ghost btn-sm" onclick="moveScene(${s.id},1)">v</button>` : ''}
           ${window.TimelineEditor ? window.TimelineEditor.headerButtonsHtml(s, i) : ''}
-          <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="removeScene(${s.id})">x</button>
+          <button class="btn btn-ghost btn-sm u-c-red" onclick="removeScene(${s.id})">x</button>
         </div>
       </div>
 
@@ -666,32 +647,32 @@ function renderSceneItemHtml(s, i) {
         ${s.keyframe_url ? `
           <div class="keyframe-preview-card">
             <img loading="lazy" decoding="async" src="${esc(s.keyframe_url)}" class="keyframe-preview-thumb" alt="Keyframe Preview" onclick="window.open('${esc(s.keyframe_url)}')">
-            <div style="flex:1;min-width:0;">
-              <div style="font-size:12px;font-weight:700;color:var(--accent);">🖼️ Keyframe xem trước (Đã tạo bằng Muse Image)</div>
-              <div style="font-size:11px;color:var(--muted);margin-top:2px;">Xem trước góc máy và tạo hình trước khi render video</div>
+            <div class="fx-f1">
+              <div class="u-fs12 u-fw700 u-c-accent">🖼️ Keyframe xem trước (Đã tạo bằng Muse Image)</div>
+              <div class="u-fs11 u-c-muted u-mt2">Xem trước góc máy và tạo hình trước khi render video</div>
             </div>
-            <div style="display:flex;gap:6px;">
-              <button type="button" class="btn btn-primary btn-sm" style="font-size:11px;" onclick="applyKeyframeAsRef(${s.id}, '${esc(s.keyframe_url)}')">🔒 Dùng làm ảnh tham chiếu</button>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="closeSceneKeyframeBox(${s.id})">✕</button>
+            <div class="fx fx-g6">
+              <button type="button" class="btn btn-primary btn-sm u-fs11" onclick="applyKeyframeAsRef(${s.id}, '${esc(s.keyframe_url)}')">🔒 Dùng làm ảnh tham chiếu</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11" onclick="closeSceneKeyframeBox(${s.id})">✕</button>
             </div>
           </div>
         ` : ''}
       </div>
 
-      <div class="form-row" style="margin-bottom:8px;">
+      <div class="form-row u-mb8">
         <div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px;">
-            <label style="margin-bottom:0;font-weight:600;color:var(--text);">🎬 Prompt mô tả cảnh quay</label>
-            <div style="display:flex;gap:4px;flex-wrap:wrap;">
+          <div class="fx fx-jc-sb fx-ac u-mb4 fx-wrap fx-g6">
+            <label class="u-mb0 u-fw600 u-c-text">🎬 Prompt mô tả cảnh quay</label>
+            <div class="fx fx-g4 fx-wrap">
               <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;color:var(--accent2);border:1px solid rgba(129,140,248,0.35);" onclick="previewSceneKeyframe(${s.id})" title="Sinh ảnh mẫu (Keyframe) bằng Muse Image trước khi tốn lượt render video">🖼️ Xem Keyframe</button>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;color:var(--yellow);" onclick="sanitizePromptDirect(${s.id})" title="Tự động loại bỏ các từ khóa bạo lực, máu me có nguy cơ bị Muse AI từ chối">🛡️ Làm sạch từ cấm</button>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;color:var(--accent);" onclick="autoEnhancePrompt(${s.id})">✨ Chuẩn hóa Điện ảnh</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-8 u-c-yellow" onclick="sanitizePromptDirect(${s.id})" title="Tự động loại bỏ các từ khóa bạo lực, máu me có nguy cơ bị Muse AI từ chối">🛡️ Làm sạch từ cấm</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-8 u-c-accent" onclick="autoEnhancePrompt(${s.id})">✨ Chuẩn hóa Điện ảnh</button>
             </div>
           </div>
           
           <!-- Thanh chọn nhanh các thông số đạo diễn -->
           <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px;background:rgba(0,0,0,0.25);padding:6px;border-radius:6px;border:1px solid var(--border);">
-            <select style="font-size:11px;padding:2px 6px;width:auto;" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
+            <select class="u-fs11 u-p-2-6 u-w-auto" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
               <option value="">🎥 Góc máy (Shot & Angle)...</option>
               <option value="Cinematic wide drone shot,">Flycam / Toàn cảnh (Wide Drone)</option>
               <option value="Cinematic close-up shot, 85mm lens,">Cận cảnh (Close-up 85mm)</option>
@@ -701,7 +682,7 @@ function renderSceneItemHtml(s, i) {
               <option value="Dutch angle tilted shot, dynamic,">Góc nghiêng kịch tính (Dutch Angle)</option>
             </select>
 
-            <select style="font-size:11px;padding:2px 6px;width:auto;" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
+            <select class="u-fs11 u-p-2-6 u-w-auto" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
               <option value="">💡 Ánh sáng (Lighting)...</option>
               <option value="Golden hour sunset sunlight, warm glow,">Hoàng hôn vàng (Golden Hour)</option>
               <option value="Volumetric lighting with fog and god rays,">Tia sáng xuyên sương mù (God Rays)</option>
@@ -711,7 +692,7 @@ function renderSceneItemHtml(s, i) {
               <option value="Eerie candle light flickering, dark atmosphere,">Ánh nến lung linh mờ ảo</option>
             </select>
 
-            <select style="font-size:11px;padding:2px 6px;width:auto;" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
+            <select class="u-fs11 u-p-2-6 u-w-auto" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
               <option value="">🔄 Chuyển động (Movement)...</option>
               <option value="camera slowly zooming in,">Camera zoom từ từ vào chủ thể</option>
               <option value="camera slowly panning right,">Camera lia ngang sang phải</option>
@@ -721,7 +702,7 @@ function renderSceneItemHtml(s, i) {
               <option value="fpv drone fast fly through,">FPV bay lướt tốc độ cao</option>
             </select>
 
-            <select style="font-size:11px;padding:2px 6px;width:auto;" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
+            <select class="u-fs11 u-p-2-6 u-w-auto" onchange="insertTag(${s.id}, this.value); this.selectedIndex=0;">
               <option value="">🎞️ Chất lượng (Cinema Look)...</option>
               <option value="photorealistic 8k, 35mm film grain, masterpiece.">35mm Film Grain chuẩn điện ảnh</option>
               <option value="anamorphic lens, cinematic bokeh, 4k.">Ống kính Anamorphic xóa phông</option>
@@ -734,7 +715,7 @@ function renderSceneItemHtml(s, i) {
         </div>
       </div>
 
-      <div class="form-row cols-2" style="margin-bottom:10px;">
+      <div class="form-row cols-2 u-mb10">
         <div>
           <label>Thoi luong video (giay)</label>
           <select class="scene-duration">
@@ -750,11 +731,11 @@ function renderSceneItemHtml(s, i) {
       </div>
 
       <!-- Reference Image for Character Lock -->
-      <div class="form-row" style="margin-bottom:10px;">
-        <div style="width:100%;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="margin-bottom:0;font-weight:600;color:var(--text);">🖼️ Ảnh tham chiếu nhân vật (Character Lock / First Frame)</label>
-            <span style="font-size:11px;color:var(--muted);">Tùy chọn: Để trống nếu là cảnh phong cảnh hoặc nhân vật phụ không cần khóa mặt</span>
+      <div class="form-row u-mb10">
+        <div class="u-w100">
+          <div class="fx fx-jc-sb fx-ac u-mb4">
+            <label class="u-mb0 u-fw600 u-c-text">🖼️ Ảnh tham chiếu nhân vật (Character Lock / First Frame)</label>
+            <span class="u-fs11 u-c-muted">Tùy chọn: Để trống nếu là cảnh phong cảnh hoặc nhân vật phụ không cần khóa mặt</span>
           </div>
           ${refImgHtml}
         </div>
@@ -768,17 +749,17 @@ function renderSceneItemHtml(s, i) {
       </div>
 
       ${vm === 'single' ? `
-        <div class="form-row cols-2" style="margin-bottom:0;">
+        <div class="form-row cols-2 u-mb0">
           <div>
             <label>Lời thuyết minh</label>
             <input class="scene-voice" type="text" value="${esc(s.voiceover)}" placeholder="Nội dung đọc..." oninput="onSceneContentInput(${s.id})">
           </div>
           <div>
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-              <label style="margin-bottom:0;">Giọng đọc riêng cảnh này</label>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 6px;color:var(--accent);" onclick="testPlayVoice(document.querySelector('#scene-${s.id} .scene-voice-sel').value || document.getElementById('voiceSelect').value)">🔊 Nghe thử</button>
+            <div class="fx fx-jc-sb fx-ac">
+              <label class="u-mb0">Giọng đọc riêng cảnh này</label>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="testPlayVoice(document.querySelector('#scene-${s.id} .scene-voice-sel').value || document.getElementById('voiceSelect').value)">🔊 Nghe thử</button>
             </div>
-            <select class="scene-voice-sel" style="margin-top:4px;">
+            <select class="scene-voice-sel u-mt4">
               <option value="">-- Dùng giọng mặc định toàn phim --</option>
               ${voiceSelectHtml(s.voice)}
             </select>
@@ -788,7 +769,7 @@ function renderSceneItemHtml(s, i) {
         <input class="scene-voice" type="hidden" value="">
         <select class="scene-voice-sel" style="display:none;"></select>
         <div class="char-seg-list">${segsHtml}</div>
-        <button class="btn btn-ghost btn-sm" style="margin-top:8px;width:100%;" onclick="addCharSegment(${s.id})">＋ Thêm nhân vật</button>
+        <button class="btn btn-ghost btn-sm u-mt8 u-w100" onclick="addCharSegment(${s.id})">＋ Thêm nhân vật</button>
       `}
     </div>`;
   }
@@ -1666,8 +1647,8 @@ function startMonitoring(jobId, title, totalScenes) {
           <div class="cell-prompt-label">
             <span>📝 Prompt:</span>
           </div>
-          <div class="cell-prompt-text" style="color:var(--muted);">${esc(defaultPrompt || 'Đang chuẩn bị...')}</div>
-          ${defaultVoice ? `<div class="cell-voiceover" style="color:var(--muted);">🎙️ Lời thoại: ${esc(defaultVoice)}</div>` : ''}
+          <div class="cell-prompt-text u-c-muted">${esc(defaultPrompt || 'Đang chuẩn bị...')}</div>
+          ${defaultVoice ? `<div class="cell-voiceover u-c-muted">🎙️ Lời thoại: ${esc(defaultVoice)}</div>` : ''}
         </div>
       </div>`;
   }
@@ -1836,7 +1817,7 @@ function updateMonitor(data, jobId) {
         <div class="clip-card">
           <video src="${url}" controls muted></video>
           <div class="clip-card-footer">
-            <span style="font-size:12px;color:var(--muted);">Clip ${i+1}</span>
+            <span class="u-fs12 u-c-muted">Clip ${i+1}</span>
             <a class="btn btn-ghost btn-sm" href="${url.replace('/clips/', '/clips/')}" download>⬇️</a>
           </div>
         </div>`).join('');
@@ -1905,7 +1886,7 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
         <video src="${videoUrl}" controls playsinline preload="metadata"></video>
         ${lf ? `
           <div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);padding:3px 8px;border-radius:4px;display:flex;align-items:center;gap:4px;border:1px solid rgba(251,191,36,0.6);cursor:pointer;" onclick="window.open('${esc(lf)}')">
-            <span style="font-size:10.5px;color:var(--yellow);font-weight:600;">🔗 Last Frame</span>
+            <span class="u-fs105 u-c-yellow u-fw600">🔗 Last Frame</span>
           </div>
         ` : ''}
       </div>
@@ -1923,7 +1904,7 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
   } else if (currentStatus === 'error') {
     mediaHtml = `
       <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px;">
-        <div style="color:var(--red);font-size:12px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:6px;">
+        <div class="u-c-red u-fs12 u-fw700 u-mb4 fx fx-ac fx-g6">
           <span>⚠️ Chi tiết lỗi:</span>
         </div>
         <div style="font-size:11.5px;color:var(--text);word-break:break-word;max-height:60px;overflow-y:auto;line-height:1.4;background:rgba(0,0,0,0.3);padding:6px 8px;border-radius:4px;">
@@ -1943,14 +1924,14 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
   let promptAndActionsHtml = '';
   if (currentStatus === 'error') {
     promptAndActionsHtml = `
-      <div style="display:flex;flex-direction:column;gap:6px;margin-top:2px;">
-        <label style="font-size:11.5px;font-weight:700;color:var(--yellow);margin-bottom:0;">✏️ Chỉnh sửa Prompt cho Cảnh ${idx}:</label>
+      <div class="fx fx-col fx-g6 u-mt2">
+        <label class="u-fs115 u-fw700 u-c-yellow u-mb0">✏️ Chỉnh sửa Prompt cho Cảnh ${idx}:</label>
         <textarea id="edit-prompt-${idx}" rows="3" style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;background:var(--bg1);border:1px solid var(--border);color:var(--text);resize:vertical;font-family:inherit;" placeholder="Nhập prompt thay thế an toàn hơn...">${esc(promptText)}</textarea>
-        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:2px;">
+        <div class="fx fx-g8 fx-jc-fe u-mt2">
           <button class="btn btn-ghost btn-sm" style="font-size:11px;color:var(--yellow);border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.08);" onclick="aiFixScenePromptDirect(${idx}, event)" title="Dùng AI phân tích lý do từ chối và tự động viết lại prompt an toàn chuẩn Hollywood">
             🪄 AI Sửa Prompt
           </button>
-          <button class="btn btn-primary btn-sm" style="font-size:11px;" onclick="retrySingleSceneDirect(${idx}, event)">
+          <button class="btn btn-primary btn-sm u-fs11" onclick="retrySingleSceneDirect(${idx}, event)">
             🔄 Tạo lại cảnh này
           </button>
         </div>
@@ -1961,16 +1942,16 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
       <div class="cell-prompt-box">
         <div class="cell-prompt-label">
           <span>📝 Prompt thị giác:</span>
-          <button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:1px 6px;color:var(--muted);" onclick="toggleScenePromptEdit(${idx})">✏️ Sửa & Tạo lại</button>
+          <button class="btn btn-ghost btn-sm u-fs105 u-p-1-6 u-c-muted" onclick="toggleScenePromptEdit(${idx})">✏️ Sửa & Tạo lại</button>
         </div>
         <div id="scene-prompt-view-${idx}" class="cell-prompt-text">
           ${esc(promptText || 'Không có mô tả prompt')}
         </div>
         <div id="scene-prompt-edit-box-${idx}" style="display:none;flex-direction:column;gap:6px;margin-top:6px;">
           <textarea id="edit-prompt-${idx}" rows="2" style="width:100%;font-size:11.5px;padding:6px;border-radius:6px;background:var(--bg1);border:1px solid var(--border);color:var(--text);font-family:inherit;">${esc(promptText)}</textarea>
-          <div style="display:flex;gap:6px;justify-content:flex-end;">
-            <button class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:2px 8px;" onclick="toggleScenePromptEdit(${idx})">Đóng</button>
-            <button class="btn btn-primary btn-sm" style="font-size:10.5px;padding:2px 8px;" onclick="retrySingleSceneDirect(${idx}, event)">🔄 Tạo lại cảnh này</button>
+          <div class="fx fx-g6 fx-jc-fe">
+            <button class="btn btn-ghost btn-sm u-fs105 u-p-2-8" onclick="toggleScenePromptEdit(${idx})">Đóng</button>
+            <button class="btn btn-primary btn-sm u-fs105 u-p-2-8" onclick="retrySingleSceneDirect(${idx}, event)">🔄 Tạo lại cảnh này</button>
           </div>
         </div>
         ${voiceoverText ? `<div class="cell-voiceover">🎙️ Lời thoại: ${esc(voiceoverText)}</div>` : ''}
@@ -1981,12 +1962,12 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
       <div class="cell-prompt-box">
         <div class="cell-prompt-label">
           <span>📝 Prompt:</span>
-          <span style="font-size:10.5px;color:var(--muted);">${info.msg || ''}</span>
+          <span class="u-fs105 u-c-muted">${info.msg || ''}</span>
         </div>
-        <div class="cell-prompt-text" style="color:var(--muted);">
+        <div class="cell-prompt-text u-c-muted">
           ${esc(promptText || 'Đang chờ xử lý...')}
         </div>
-        ${voiceoverText ? `<div class="cell-voiceover" style="color:var(--muted);">🎙️ Lời thoại: ${esc(voiceoverText)}</div>` : ''}
+        ${voiceoverText ? `<div class="cell-voiceover u-c-muted">🎙️ Lời thoại: ${esc(voiceoverText)}</div>` : ''}
       </div>
     `;
   }
@@ -2041,7 +2022,7 @@ async function retrySingleSceneDirect(idx, event) {
       </div>
       <div class="cell-media" style="background:rgba(251,191,36,0.05);border:1px dashed rgba(251,191,36,0.3);flex-direction:column;gap:8px;">
         <div style="font-size:26px;animation:spin 2s linear infinite;">⚙️</div>
-        <div style="font-size:12px;color:var(--yellow);font-weight:600;">Đang khởi chạy render lại...</div>
+        <div class="u-fs12 u-c-yellow u-fw600">Đang khởi chạy render lại...</div>
       </div>
     `;
   }
@@ -2297,26 +2278,26 @@ async function loadLibrary() {
     const jobs = await res.json();
     const tbody = document.getElementById('jobsBody');
     if (!jobs.length) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Chưa có job nào</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Chưa có job nào — tạo phim mới để bắt đầu.</td></tr>';
       return;
     }
     tbody.innerHTML = jobs.map(j => `
       <tr>
-        <td style="font-family:monospace;font-size:12px;">${j.id}</td>
+        <td class="job-id">${j.id}</td>
         <td><span class="pill ${j.status}">${statusIcon(j.status)} ${j.status}</span></td>
-        <td>
-          <div class="prog-wrap" style="width:100px;">
+        <td class="job-prog">
+          <div class="prog-wrap">
             <div class="prog-bar" style="width:${j.progress}%"></div>
           </div>
-          <span style="font-size:11px;color:var(--muted);">${j.progress}%</span>
+          <span class="job-meta">${j.progress}%</span>
         </td>
         <td>${j.total} cảnh</td>
-        <td style="font-size:12px;color:var(--muted);">${timeAgo(j.created_at)}</td>
+        <td class="job-meta">${timeAgo(j.created_at)}</td>
         <td>
-          <div style="display:flex;gap:6px;">
+          <div class="job-actions">
             ${j.final_video ? `<a class="btn btn-ghost btn-sm" href="${j.final_video.replace('/video/','/download/')}">⬇️</a>
               <button class="btn btn-ghost btn-sm" onclick="watchJob('${j.id}')">▶️</button>` : ''}
-            <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="deleteJob('${j.id}')">🗑️</button>
+            <button class="btn btn-ghost btn-sm u-c-red" onclick="deleteJob('${j.id}')">🗑️</button>
           </div>
         </td>
       </tr>
@@ -2530,8 +2511,8 @@ function renderCharacterGrid() {
     grid.innerHTML = `
       <div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--muted);background:var(--bg0);border-radius:8px;border:1px dashed var(--border);">
         <div style="font-size:36px;margin-bottom:8px;">👥</div>
-        <div style="font-size:14px;font-weight:600;color:var(--text);">Chưa có hồ sơ nhân vật nào</div>
-        <div style="font-size:12px;margin-top:4px;">Bấm "➕ Thêm nhân vật mới" phía trên để tạo nhân vật đầu tiên!</div>
+        <div class="u-fs14 u-fw600 u-c-text">Chưa có hồ sơ nhân vật nào</div>
+        <div class="u-fs12 u-mt4">Bấm "➕ Thêm nhân vật mới" phía trên để tạo nhân vật đầu tiên!</div>
       </div>`;
     return;
   }
@@ -2547,11 +2528,11 @@ function renderCharacterGrid() {
           ${c.avatar ? `
             <img loading="lazy" decoding="async" src="${esc(c.avatar)}" class="char-card-avatar" alt="${esc(c.name)}">
           ` : `
-            <div class="char-card-avatar" style="display:flex;align-items:center;justify-content:center;font-size:24px;">👤</div>
+            <div class="char-card-avatar fx fx-ac fx-jc-c u-fs24">👤</div>
           `}
           <div class="char-card-info">
             <div class="char-card-name">${esc(c.name)}</div>
-            <div class="char-card-voice" style="display:flex;align-items:center;gap:6px;">
+            <div class="char-card-voice fx fx-ac fx-g6">
               <span>🎙️ ${esc(voiceLabel)}</span>
               <button type="button" class="btn btn-ghost btn-sm" style="font-size:10px;padding:1px 5px;" onclick="testPlayVoice('${esc(c.voice)}')">🔊</button>
             </div>
@@ -2615,9 +2596,9 @@ function renderCharacterGrid() {
         </div>
 
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:auto;padding-top:10px;border-top:1px solid var(--border);">
-          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="linkCharacterToAllMatchingScenes('${c.id}')" title="Quét và đồng bộ cho các cảnh có tên này">🎯 Đồng bộ vào cảnh</button>
-          <button class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="editCharacter('${c.id}')">✏️ Sửa</button>
-          <button class="btn btn-ghost btn-sm" style="font-size:11px;color:var(--red);" onclick="deleteCharacter('${c.id}')">🗑️ Xóa</button>
+          <button class="btn btn-ghost btn-sm u-fs11" onclick="linkCharacterToAllMatchingScenes('${c.id}')" title="Quét và đồng bộ cho các cảnh có tên này">🎯 Đồng bộ vào cảnh</button>
+          <button class="btn btn-ghost btn-sm u-fs11" onclick="editCharacter('${c.id}')">✏️ Sửa</button>
+          <button class="btn btn-ghost btn-sm u-fs11 u-c-red" onclick="deleteCharacter('${c.id}')">🗑️ Xóa</button>
         </div>
       </div>
     `;
@@ -2900,7 +2881,7 @@ function onSceneContentInput(sceneId) {
         const isSel = curAngle === ang.key;
         return `
           <button type="button" class="btn btn-ghost btn-sm"
-            style="font-size:10.5px;padding:2px 7px;${isSel ? 'border-color:var(--accent);color:var(--accent);background:rgba(56,189,248,0.14);font-weight:700;' : ''}${!hasImg ? 'opacity:0.6;' : ''}"
+            style="font-size:10.5px;padding:2px 7px;${isSel ? 'border-color:var(--accent);color:var(--accent);background:rgba(99,102,241,0.14);font-weight:700;' : ''}${!hasImg ? 'opacity:0.6;' : ''}"
             onclick="applyCharSheetAngle(${s.id}, '${matchedChar.id}', '${ang.key}')"
             title="${hasImg ? `Khóa góc ${ang.label} từ Character Sheet` : `Góc này chưa có ảnh trong Sheet - bấm để tạo hoặc dùng ảnh avatar`}">
             ${ang.label} ${hasImg ? '✓' : ''}
@@ -2910,29 +2891,29 @@ function onSceneContentInput(sceneId) {
       container.outerHTML = `
         <div class="char-match-banner" id="scene-char-match-${s.id}">
           <div style="width:36px;height:36px;border-radius:50%;overflow:hidden;background:var(--bg2);flex-shrink:0;border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;">
-            ${matchedChar.avatar ? `<img loading="lazy" decoding="async" src="${esc(matchedChar.avatar)}" style="width:100%;height:100%;object-fit:cover;">` : `<span style="font-size:18px;">👤</span>`}
+            ${matchedChar.avatar ? `<img loading="lazy" decoding="async" src="${esc(matchedChar.avatar)}" style="width:100%;height:100%;object-fit:cover;">` : `<span class="u-fs18">👤</span>`}
           </div>
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:12.5px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-              <span>🎯 Đã nhận diện nhân vật: <b style="color:var(--accent);">${esc(matchedChar.name)}</b></span>
-              <span class="pill running" style="font-size:10px;padding:1px 6px;">Tự động tham chiếu</span>
+          <div class="fx-f1">
+            <div class="u-fs125 u-fw700 u-c-text fx fx-ac fx-g6 fx-wrap">
+              <span>🎯 Đã nhận diện nhân vật: <b class="u-c-accent">${esc(matchedChar.name)}</b></span>
+              <span class="pill running u-fs10 u-p-1-6">Tự động tham chiếu</span>
             </div>
-            <div style="font-size:11px;color:var(--muted);margin-top:2px;">
+            <div class="u-fs11 u-c-muted u-mt2">
               🎙️ Giọng: <b>${esc(matchedChar.voice || 'Mặc định')}</b> ${matchedChar.description ? `• Tạo hình: ${esc(matchedChar.description.slice(0, 50))}...` : ''}
             </div>
-            <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:5px;">
-              <span style="font-size:11px;color:var(--muted);font-weight:600;">Góc quay Bible:</span>
+            <div class="fx fx-ac fx-g5 fx-wrap u-mt5">
+              <span class="u-fs11 u-c-muted u-fw600">Góc quay Bible:</span>
               ${angleButtonsHtml}
             </div>
           </div>
-          <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+          <div class="fx fx-g5 fx-ac fx-wrap">
             ${matchedChar.avatar ? `
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 7px;color:var(--accent);" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'image')" title="Khóa ảnh tham chiếu này cho cảnh">🔒 Khóa ảnh</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-7 u-c-accent" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'image')" title="Khóa ảnh tham chiếu này cho cảnh">🔒 Khóa ảnh</button>
             ` : ''}
             ${matchedChar.description ? `
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 7px;color:var(--green);" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'desc')" title="Chèn mô tả tạo hình vào Prompt">➕ Thêm mô tả</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-7 u-c-green" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'desc')" title="Chèn mô tả tạo hình vào Prompt">➕ Thêm mô tả</button>
             ` : ''}
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 7px;" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'all')" title="Đồng bộ ảnh, giọng nói và mô tả">⚡ Áp dụng tất cả</button>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-2-7" onclick="applyCharToScene(${s.id}, '${matchedChar.id}', 'all')" title="Đồng bộ ảnh, giọng nói và mô tả">⚡ Áp dụng tất cả</button>
           </div>
         </div>`;
     } else {
@@ -3312,9 +3293,9 @@ function _renderQvHistory() {
         onmouseenter="this.play()" onmouseleave="this.pause()"></video>
       <div style="font-size:11px;color:var(--text-muted);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
         title="${h.prompt}">${h.prompt}</div>
-      <div style="display:flex;gap:5px;margin-top:5px;">
-        <a href="${h.videoUrl}" download="quick_video_${i+1}.mp4" class="btn btn-ghost btn-sm" style="font-size:11px;">⬇️</a>
-        <button class="btn btn-ghost btn-sm" style="font-size:11px;"
+      <div class="fx fx-g5 u-mt5">
+        <a href="${h.videoUrl}" download="quick_video_${i+1}.mp4" class="btn btn-ghost btn-sm u-fs11">⬇️</a>
+        <button class="btn btn-ghost btn-sm u-fs11"
           onclick="document.getElementById('qvPrompt').value=${JSON.stringify(h.prompt)}">📋</button>
       </div>
     </div>
@@ -3447,7 +3428,7 @@ async function previewSceneKeyframe(sceneId) {
     box.innerHTML = `
       <div class="keyframe-preview-card" style="border:1px dashed var(--accent);">
         <div style="font-size:24px;animation:spin 2s linear infinite;">⏳</div>
-        <div style="font-size:12px;color:var(--accent);font-weight:600;">
+        <div class="u-fs12 u-c-accent u-fw600">
           Đang sinh ảnh Keyframe mẫu qua Muse Image... Vui lòng đợi trong giây lát!
         </div>
       </div>`;
@@ -3472,14 +3453,14 @@ async function previewSceneKeyframe(sceneId) {
       box.innerHTML = `
         <div class="keyframe-preview-card">
           <img loading="lazy" decoding="async" src="${esc(data.url)}" class="keyframe-preview-thumb" alt="Keyframe Preview" onclick="window.open('${esc(data.url)}')">
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:12px;font-weight:700;color:var(--green);">✅ Đã sinh ảnh Keyframe thành công!</div>
+          <div class="fx-f1">
+            <div class="u-fs12 u-fw700 u-c-green">✅ Đã sinh ảnh Keyframe thành công!</div>
             <div style="font-size:11px;color:var(--muted);margin-top:2px;max-height:36px;overflow:hidden;text-overflow:ellipsis;">${esc(data.prompt)}</div>
           </div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button type="button" class="btn btn-primary btn-sm" style="font-size:11px;" onclick="applyKeyframeAsRef(${sceneId}, '${esc(data.url)}')">🔒 Khóa ảnh này cho Cảnh</button>
-            <a href="${esc(data.url)}" download="keyframe_scene_${sceneId}.png" class="btn btn-ghost btn-sm" style="font-size:11px;">⬇️ Tải</a>
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;" onclick="closeSceneKeyframeBox(${sceneId})">✕</button>
+          <div class="fx fx-g6 fx-wrap">
+            <button type="button" class="btn btn-primary btn-sm u-fs11" onclick="applyKeyframeAsRef(${sceneId}, '${esc(data.url)}')">🔒 Khóa ảnh này cho Cảnh</button>
+            <a href="${esc(data.url)}" download="keyframe_scene_${sceneId}.png" class="btn btn-ghost btn-sm u-fs11">⬇️ Tải</a>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11" onclick="closeSceneKeyframeBox(${sceneId})">✕</button>
           </div>
         </div>`;
     }
@@ -3562,18 +3543,18 @@ function renderSceneAuditCard(audit, data, jobId) {
       badge.className = 'pill done';
       badge.textContent = `✅ 100% Hoàn tất (${audit.done_count}/${audit.total})`;
       noticeBox.innerHTML = `
-        <span style="color:var(--green);font-weight:700;">🎉 Tất cả ${audit.total} cảnh đã render thành công và sẵn sàng xuất phim hoàn chỉnh!</span>
+        <span class="u-c-green u-fw700">🎉 Tất cả ${audit.total} cảnh đã render thành công và sẵn sàng xuất phim hoàn chỉnh!</span>
       `;
     } else {
       badge.className = 'pill error';
       badge.textContent = `⚠️ Thiếu ${audit.failed_count + audit.pending_count}/${audit.total} cảnh`;
       noticeBox.innerHTML = `
-        <div style="color:var(--yellow);font-weight:700;margin-bottom:4px;">
+        <div class="u-c-yellow u-fw700 u-mb4">
           ⚠️ CẢNH BÁO KIỂM ĐỊNH TÍNH TOÀN VẸN:
         </div>
-        <div style="color:var(--text);font-size:12px;">
+        <div class="u-c-text u-fs12">
           Chỉ có <b>${audit.done_count}/${audit.total}</b> cảnh hoàn thành. Phát hiện <b>${audit.failed_count}</b> cảnh bị lỗi và <b>${audit.pending_count}</b> cảnh chưa sẵn sàng.<br>
-          <span style="color:var(--accent);">Hệ thống đã dừng xuất phim tự động để tránh xuất phim thiếu cảnh ngoài ý muốn của bạn.</span>
+          <span class="u-c-accent">Hệ thống đã dừng xuất phim tự động để tránh xuất phim thiếu cảnh ngoài ý muốn của bạn.</span>
         </div>
       `;
     }
@@ -3586,7 +3567,7 @@ function renderSceneAuditCard(audit, data, jobId) {
 
         return `
           <tr>
-            <td style="font-weight:700;">Cảnh ${d.index}</td>
+            <td class="u-fw700">Cảnh ${d.index}</td>
             <td>${stBadge}</td>
             <td>
               <div style="max-height:48px;overflow-y:auto;font-size:11.5px;color:var(--text);line-height:1.4;">
@@ -3600,11 +3581,11 @@ function renderSceneAuditCard(audit, data, jobId) {
             </td>
             <td>
               ${d.status !== 'done' ? `
-                <button class="btn btn-ghost btn-sm" style="font-size:11px;color:var(--accent);" onclick="retrySingleSceneDirect(${d.index}, event)">
+                <button class="btn btn-ghost btn-sm u-fs11 u-c-accent" onclick="retrySingleSceneDirect(${d.index}, event)">
                   🔄 Thử lại
                 </button>
               ` : `
-                <button class="btn btn-ghost btn-sm" style="font-size:11px;color:var(--green);" onclick="window.open('/api/jobs/${jobId}/scenes/${d.index}/video')">
+                <button class="btn btn-ghost btn-sm u-fs11 u-c-green" onclick="window.open('/api/jobs/${jobId}/scenes/${d.index}/video')">
                   ▶️ Xem clip
                 </button>
               `}
@@ -3653,12 +3634,12 @@ function showSceneAuditModalDirect() {
   modal.innerHTML = `
     <div class="modal-window">
       <div class="modal-header">
-        <div style="font-weight:700;font-size:16px;color:var(--accent);">📋 BÁO CÁO KIỂM ĐỊNH TÍNH TOÀN VẸN PHIM</div>
+        <div class="u-fw700 u-fs16 u-c-accent">📋 BÁO CÁO KIỂM ĐỊNH TÍNH TOÀN VẸN PHIM</div>
         <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
       </div>
       <div class="modal-body">
-        <div style="font-size:13px;margin-bottom:12px;">
-          Tổng số cảnh: <b>${lastAuditData.total}</b> • Thành công: <b style="color:var(--green);">${lastAuditData.done_count}</b> • Thất bại: <b style="color:var(--red);">${lastAuditData.failed_count}</b>
+        <div class="u-fs13 u-mb12">
+          Tổng số cảnh: <b>${lastAuditData.total}</b> • Thành công: <b class="u-c-green">${lastAuditData.done_count}</b> • Thất bại: <b class="u-c-red">${lastAuditData.failed_count}</b>
         </div>
         <table class="audit-table">
           <thead>
@@ -3770,7 +3751,7 @@ async function openProjectsModal() {
     modal.innerHTML = `
       <div class="modal-window">
         <div class="modal-header">
-          <div style="font-weight:700;font-size:16px;color:var(--accent);">📂 DANH SÁCH DỰ ÁN ĐÃ LƯU</div>
+          <div class="u-fw700 u-fs16 u-c-accent">📂 DANH SÁCH DỰ ÁN ĐÃ LƯU</div>
           <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
         </div>
         <div class="modal-body">
@@ -3790,13 +3771,13 @@ async function openProjectsModal() {
               <tbody>
                 ${list.map(p => `
                   <tr>
-                    <td style="font-weight:700;color:var(--accent);">${esc(p.name)}</td>
+                    <td class="u-fw700 u-c-accent">${esc(p.name)}</td>
                     <td>${esc(p.title || p.name)}</td>
                     <td><span class="pill running">${p.scenes_count} cảnh</span></td>
-                    <td style="font-size:11px;color:var(--muted);">${new Date(p.saved_at * 1000).toLocaleString('vi-VN')}</td>
+                    <td class="u-fs11 u-c-muted">${new Date(p.saved_at * 1000).toLocaleString('vi-VN')}</td>
                     <td>
                       <button class="btn btn-primary btn-sm" onclick="loadProjectByName('${esc(p.name)}'); this.closest('.modal-backdrop').remove();">📂 Mở</button>
-                      <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="deleteProjectByName('${esc(p.name)}', this)">🗑️</button>
+                      <button class="btn btn-ghost btn-sm u-c-red" onclick="deleteProjectByName('${esc(p.name)}', this)">🗑️</button>
                     </td>
                   </tr>
                 `).join('')}
@@ -4010,12 +3991,12 @@ async function openPromptSheetModal(initialTab = 'chatgpt') {
     modal.innerHTML = `
       <div class="modal-window" style="max-width:920px;">
         <div class="modal-header">
-          <div style="font-weight:700;font-size:16px;color:var(--accent);">💡 THƯ VIỆN PROMPT MẪU & CÚ PHÁP KỊCH BẢN CHUẨN</div>
+          <div class="u-fw700 u-fs16 u-c-accent">💡 THƯ VIỆN PROMPT MẪU & CÚ PHÁP KỊCH BẢN CHUẨN</div>
           <button class="btn btn-ghost btn-sm" onclick="closePromptSheetModal()">✕</button>
         </div>
         <div class="modal-body" style="text-align:center;padding:40px;">
-          <div style="font-size:24px;margin-bottom:10px;">⏳</div>
-          <div style="color:var(--muted);font-size:13px;">Đang tải Thư viện Prompt Mẫu & Cẩm nang Kịch bản Studio...</div>
+          <div class="u-fs24 u-mb10">⏳</div>
+          <div class="u-c-muted u-fs13">Đang tải Thư viện Prompt Mẫu & Cẩm nang Kịch bản Studio...</div>
         </div>
       </div>
     `;
@@ -4026,10 +4007,10 @@ async function openPromptSheetModal(initialTab = 'chatgpt') {
       modal.innerHTML = `
         <div class="modal-window">
           <div class="modal-header">
-            <div style="font-weight:700;color:var(--red);">Lỗi tải Thư viện Prompt</div>
+            <div class="u-fw700 u-c-red">Lỗi tải Thư viện Prompt</div>
             <button class="btn btn-ghost btn-sm" onclick="closePromptSheetModal()">✕</button>
           </div>
-          <div class="modal-body" style="color:var(--red);">${e.message}</div>
+          <div class="modal-body u-c-red">${e.message}</div>
         </div>
       `;
       return;
@@ -4056,11 +4037,11 @@ function renderPromptSheetContent(activeTab = 'chatgpt') {
   modal.innerHTML = `
     <div class="modal-window" style="max-width:960px;">
       <div class="modal-header">
-        <div style="display:flex;align-items:center;gap:8px;">
-          <span style="font-size:18px;">💡</span>
+        <div class="fx fx-ac fx-g8">
+          <span class="u-fs18">💡</span>
           <div>
-            <div style="font-weight:700;font-size:16px;color:var(--accent);">THƯ VIỆN PROMPT MẪU & CÚ PHÁP CHUẨN CHO AI</div>
-            <div style="font-size:11.5px;color:var(--muted);margin-top:2px;">Dành cho người mới: Copy kịch bản từ ChatGPT hoặc tự viết chuẩn 100% không lỗi</div>
+            <div class="u-fw700 u-fs16 u-c-accent">THƯ VIỆN PROMPT MẪU & CÚ PHÁP CHUẨN CHO AI</div>
+            <div class="u-fs115 u-c-muted u-mt2">Dành cho người mới: Copy kịch bản từ ChatGPT hoặc tự viết chuẩn 100% không lỗi</div>
           </div>
         </div>
         <button class="btn btn-ghost btn-sm" onclick="closePromptSheetModal()">✕</button>
@@ -4078,18 +4059,18 @@ function renderPromptSheetContent(activeTab = 'chatgpt') {
 
         <!-- TAB 1: ChatGPT Master Prompt -->
         <div id="psTab-chatgpt" class="ps-tab-content ${activeTab === 'chatgpt' ? 'active' : ''}">
-          <div style="background:linear-gradient(135deg,rgba(56,189,248,0.08),rgba(168,85,247,0.08));border:1px solid rgba(56,189,248,0.3);border-radius:8px;padding:12px;margin-bottom:14px;">
-            <div style="font-weight:700;color:var(--accent);font-size:13px;display:flex;align-items:center;gap:6px;">
+          <div style="background:linear-gradient(135deg,rgba(99,102,241,0.08),rgba(99,102,241,0.08));border:1px solid rgba(99,102,241,0.3);border-radius:8px;padding:12px;margin-bottom:14px;">
+            <div class="u-fw700 u-c-accent u-fs13 fx fx-ac fx-g6">
               <span>⭐ BÍ QUYẾT CHO NGƯỜI MỚI: DÙNG CHATGPT VIẾT HỘ KỊCH BẢN CHUẨN 100%</span>
             </div>
-            <div style="font-size:12px;color:var(--text);margin-top:6px;line-height:1.5;">
+            <div class="u-fs12 u-c-text u-mt6 u-lh15">
               Người mới thường copy văn xuôi hoặc bảng biểu từ ChatGPT vào Studio, khiến tool khó nhận diện đâu là góc máy và đâu là lời thoại.<br>
               👉 <b>Cách làm đúng:</b> Chỉ cần bấm nút <b>"📋 Sao chép Prompt cho ChatGPT"</b> dưới đây, dán vào ChatGPT / Claude / DeepSeek và thêm yêu cầu của bạn. ChatGPT sẽ tự động trả về kịch bản theo đúng định dạng Studio nhận diện ngay lập tức!
             </div>
           </div>
 
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <span style="font-size:12px;font-weight:600;color:var(--muted);">CÂU LỆNH SYSTEM PROMPT CHO CHATGPT (BẤM ĐỂ SAO CHÉP):</span>
+          <div class="fx fx-jc-sb fx-ac u-mb6">
+            <span class="u-fs12 u-fw600 u-c-muted">CÂU LỆNH SYSTEM PROMPT CHO CHATGPT (BẤM ĐỂ SAO CHÉP):</span>
             <button class="btn btn-primary btn-sm" onclick="copyPromptSheetContent(promptSheetDataCache.chatgpt_master_prompt, this)">
               📋 Sao chép Prompt cho ChatGPT
             </button>
@@ -4104,22 +4085,22 @@ function renderPromptSheetContent(activeTab = 'chatgpt') {
 
         <!-- TAB 2: Ready-to-use Sample Scripts -->
         <div id="psTab-samples" class="ps-tab-content ${activeTab === 'samples' ? 'active' : ''}">
-          <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+          <div class="u-fs12 u-c-muted u-mb14">
             Dưới đây là 4 kịch bản mẫu hoàn chỉnh đã được tinh chỉnh chuẩn Hollywood. Bạn có thể bấm <b>[📥 Nạp vào Dự án]</b> để Studio tự động tạo toàn bộ cảnh, prompt và phân vai ngay lập tức!
           </div>
 
-          <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="fx fx-col fx-g14">
             ${Object.values(samples).map(s => `
               <div class="ps-card">
-                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+                <div class="fx fx-jc-sb fx-as u-mb8 fx-wrap fx-g8">
                   <div>
-                    <div style="font-weight:700;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px;">
+                    <div class="u-fw700 u-fs14 u-c-text fx fx-ac fx-g8">
                       <span>${esc(s.title)}</span>
                       <span class="ps-badge">${esc(s.badge)}</span>
                     </div>
-                    <div style="font-size:12px;color:var(--muted);margin-top:3px;">${esc(s.description)}</div>
+                    <div class="u-fs12 u-c-muted u-mt3">${esc(s.description)}</div>
                   </div>
-                  <div style="display:flex;gap:6px;">
+                  <div class="fx fx-g6">
                     <button class="btn btn-ghost btn-sm" onclick="copyPromptSheetContent(promptSheetDataCache.sample_scripts['${s.id}'].text, this)">📋 Sao chép</button>
                     <button class="btn btn-primary btn-sm" onclick="applySampleScriptToStudio('${s.id}')">📥 Nạp vào Dự án</button>
                   </div>
@@ -4132,15 +4113,15 @@ function renderPromptSheetContent(activeTab = 'chatgpt') {
 
         <!-- TAB 3: Format Rules -->
         <div id="psTab-rules" class="ps-tab-content ${activeTab === 'rules' ? 'active' : ''}">
-          <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+          <div class="u-fs12 u-c-muted u-mb14">
             AI Movie Studio tích hợp bộ nhận diện ngôn ngữ thông minh, hỗ trợ 3 cấu trúc kịch bản chính sau:
           </div>
 
-          <div style="display:flex;flex-direction:column;gap:14px;">
+          <div class="fx fx-col fx-g14">
             ${rules.map(r => `
               <div class="ps-card">
                 <div style="font-weight:700;font-size:13.5px;color:var(--accent);margin-bottom:6px;">${esc(r.name)}</div>
-                <div style="font-size:11.5px;color:var(--green);margin-bottom:8px;">✨ Ưu điểm: ${esc(r.benefit)}</div>
+                <div class="u-fs115 u-c-green u-mb8">✨ Ưu điểm: ${esc(r.benefit)}</div>
                 <div class="ps-code-box" style="max-height:150px;color:#a5f3fc;">${esc(r.syntax.trim())}</div>
               </div>
             `).join('')}
@@ -4149,45 +4130,45 @@ function renderPromptSheetContent(activeTab = 'chatgpt') {
 
         <!-- TAB 4: Cinematic Prompt Dictionary -->
         <div id="psTab-dictionary" class="ps-tab-content ${activeTab === 'dictionary' ? 'active' : ''}">
-          <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+          <div class="u-fs12 u-c-muted u-mb14">
             Tra cứu nhanh các từ khóa điện ảnh thông dụng. Bấm <b>[📋 Copy]</b> để chép và ghép vào prompt của bạn:
           </div>
 
-          <div style="margin-bottom:16px;">
-            <div style="font-weight:700;color:var(--accent);font-size:13px;margin-bottom:8px;">🎥 1. Góc Máy & Chuyển Động Camera (Camera Angles)</div>
+          <div class="u-mb16">
+            <div class="u-fw700 u-c-accent u-fs13 u-mb8">🎥 1. Góc Máy & Chuyển Động Camera (Camera Angles)</div>
             ${(dict.camera_angles || []).map(item => `
               <div class="ps-dict-item">
-                <div style="flex:1;min-width:0;">
+                <div class="fx-f1">
                   <div style="font-weight:600;font-size:12px;color:var(--text);font-family:monospace;">${esc(item.keyword)}</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:2px;"><b>${esc(item.vn)}</b>: ${esc(item.desc)}</div>
+                  <div class="u-fs11 u-c-muted u-mt2"><b>${esc(item.vn)}</b>: ${esc(item.desc)}</div>
                 </div>
-                <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;" onclick="copyPromptSheetContent('${esc(item.keyword)}', this)">📋 Copy</button>
+                <button class="btn btn-ghost btn-sm u-fs11 u-p-2-8" onclick="copyPromptSheetContent('${esc(item.keyword)}', this)">📋 Copy</button>
               </div>
             `).join('')}
           </div>
 
-          <div style="margin-bottom:16px;">
-            <div style="font-weight:700;color:var(--accent);font-size:13px;margin-bottom:8px;">💡 2. Ánh Sáng Điện Ảnh (Lighting & Atmosphere)</div>
+          <div class="u-mb16">
+            <div class="u-fw700 u-c-accent u-fs13 u-mb8">💡 2. Ánh Sáng Điện Ảnh (Lighting & Atmosphere)</div>
             ${(dict.lighting || []).map(item => `
               <div class="ps-dict-item">
-                <div style="flex:1;min-width:0;">
+                <div class="fx-f1">
                   <div style="font-weight:600;font-size:12px;color:var(--text);font-family:monospace;">${esc(item.keyword)}</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:2px;"><b>${esc(item.vn)}</b>: ${esc(item.desc)}</div>
+                  <div class="u-fs11 u-c-muted u-mt2"><b>${esc(item.vn)}</b>: ${esc(item.desc)}</div>
                 </div>
-                <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;" onclick="copyPromptSheetContent('${esc(item.keyword)}', this)">📋 Copy</button>
+                <button class="btn btn-ghost btn-sm u-fs11 u-p-2-8" onclick="copyPromptSheetContent('${esc(item.keyword)}', this)">📋 Copy</button>
               </div>
             `).join('')}
           </div>
 
-          <div style="margin-bottom:16px;">
-            <div style="font-weight:700;color:var(--accent);font-size:13px;margin-bottom:8px;">🎬 3. Máy Quay & Ống Kính (Cameras & Lenses)</div>
+          <div class="u-mb16">
+            <div class="u-fw700 u-c-accent u-fs13 u-mb8">🎬 3. Máy Quay & Ống Kính (Cameras & Lenses)</div>
             ${(dict.cameras_lenses || []).map(item => `
               <div class="ps-dict-item">
-                <div style="flex:1;min-width:0;">
+                <div class="fx-f1">
                   <div style="font-weight:600;font-size:12px;color:var(--text);font-family:monospace;">${esc(item.keyword)}</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:2px;"><b>${esc(item.vn)}</b>: ${esc(item.desc)}</div>
+                  <div class="u-fs11 u-c-muted u-mt2"><b>${esc(item.vn)}</b>: ${esc(item.desc)}</div>
                 </div>
-                <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;" onclick="copyPromptSheetContent('${esc(item.keyword)}', this)">📋 Copy</button>
+                <button class="btn btn-ghost btn-sm u-fs11 u-p-2-8" onclick="copyPromptSheetContent('${esc(item.keyword)}', this)">📋 Copy</button>
               </div>
             `).join('')}
           </div>
@@ -4196,7 +4177,7 @@ function renderPromptSheetContent(activeTab = 'chatgpt') {
         <!-- TAB 5: Safety & Anti-Rejection Tips -->
         <div id="psTab-safety" class="ps-tab-content ${activeTab === 'safety' ? 'active' : ''}">
           <div style="background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.25);border-radius:8px;padding:12px;margin-bottom:14px;">
-            <div style="font-weight:700;color:var(--yellow);font-size:13px;">🛡️ TẠI SAO CẦN DÙNG TỪ KHÓA HÀNH ĐỘNG AN TOÀN?</div>
+            <div class="u-fw700 u-c-yellow u-fs13">🛡️ TẠI SAO CẦN DÙNG TỪ KHÓA HÀNH ĐỘNG AN TOÀN?</div>
             <div style="font-size:12px;color:var(--text);margin-top:4px;line-height:1.45;">
               Mô hình tạo video (Muse AI / Sora) có bộ lọc an toàn rất nghiêm ngặt. Khi gặp các từ bạo lực trực diện như đâm, chém, máu me, súng ống, mô hình sẽ từ chối render và làm hỏng cảnh phim của bạn.<br>
               Hãy dùng các từ vựng điện ảnh Hollywood dưới đây để vừa giữ được cảnh hành động mãn nhãn, vừa an toàn 100%:
@@ -4214,9 +4195,9 @@ function renderPromptSheetContent(activeTab = 'chatgpt') {
             <tbody>
               ${(dict.safe_action_replacements || []).map(item => `
                 <tr>
-                  <td><code style="color:var(--red);">${esc(item.bad)}</code></td>
-                  <td><code style="color:var(--green);">${esc(item.good)}</code></td>
-                  <td style="font-size:11.5px;color:var(--muted);">${esc(item.reason)}</td>
+                  <td><code class="u-c-red">${esc(item.bad)}</code></td>
+                  <td><code class="u-c-green">${esc(item.good)}</code></td>
+                  <td class="u-fs115 u-c-muted">${esc(item.reason)}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -4499,39 +4480,39 @@ function renderShotDeskOverview() {
       ${c.reference_image ? `
         <img loading="lazy" decoding="async" src="/api/shot-desk/projects/${p.id}/assets/${c.reference_image}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid var(--accent);cursor:pointer;" onclick="openShotDeskImageModal(this.src, '${esc(c.name)}')">
       ` : `
-        <div style="width:40px;height:40px;border-radius:50%;background:rgba(56,189,248,0.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;">${(c.name||'C')[0]}</div>
+        <div style="width:40px;height:40px;border-radius:50%;background:rgba(99,102,241,0.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;">${(c.name||'C')[0]}</div>
       `}
-      <div style="flex:1;min-width:0;">
-        <div style="font-weight:700;font-size:12.5px;color:var(--text);">${esc(c.name)}</div>
-        <div style="font-size:10.5px;color:var(--muted);">${esc(c.voice || 'Giọng mặc định')}</div>
+      <div class="fx-f1">
+        <div class="u-fw700 u-fs125 u-c-text">${esc(c.name)}</div>
+        <div class="u-fs105 u-c-muted">${esc(c.voice || 'Giọng mặc định')}</div>
         <div style="font-size:10px;color:var(--accent);cursor:pointer;margin-top:2px;" onclick="openCharacterBlockModal('${esc(c.name)}', '${esc(c.character_block || '')}')">👁️ Xem Character Block</div>
       </div>
     </div>
   `).join('');
 
   card.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:12px;">
+    <div class="fx fx-jc-sb fx-as fx-wrap fx-g12 u-mb12">
       <div>
         <div style="font-size:17px;font-weight:800;color:var(--text);display:flex;align-items:center;gap:8px;">
           <span>🎞️</span> ${esc(p.title)}
-          <span class="badge" style="background:rgba(56,189,248,0.15);color:var(--accent);font-size:11px;">Tỉ lệ ${esc(p.aspect_ratio || '9:16')}</span>
-          <span class="badge" style="background:rgba(168,85,247,0.15);color:#c084fc;font-size:11px;">${esc(p.genre || 'Phim ngắn')}</span>
+          <span class="badge" style="background:rgba(99,102,241,0.15);color:var(--accent);font-size:11px;">Tỉ lệ ${esc(p.aspect_ratio || '9:16')}</span>
+          <span class="badge" style="background:rgba(99,102,241,0.15);color:#a5b4fc;font-size:11px;">${esc(p.genre || 'Phim ngắn')}</span>
         </div>
-        ${p.logline ? `<div style="font-size:12.5px;color:var(--muted);margin-top:4px;font-style:italic;">"${esc(p.logline)}"</div>` : ''}
+        ${p.logline ? `<div class="u-fs125 u-c-muted u-mt4 u-fs-it">"${esc(p.logline)}"</div>` : ''}
       </div>
 
       <div style="font-size:12px;color:var(--muted);text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
-        <div>Tổng cảnh: <b style="color:var(--text);">${p.shots?.length || 0}</b> | Dự kiến: <b style="color:var(--text);">${p.total_duration || (p.shots?.length || 0)*10}s</b></div>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
-          <span>Giọng đọc: <code style="color:var(--accent);">${(() => {
+        <div>Tổng cảnh: <b class="u-c-text">${p.shots?.length || 0}</b> | Dự kiến: <b class="u-c-text">${p.total_duration || (p.shots?.length || 0)*10}s</b></div>
+        <div class="fx fx-ac fx-g6 fx-wrap fx-jc-fe">
+          <span>Giọng đọc: <code class="u-c-accent">${(() => {
             const found = VOICES.find(v => v.id === p.default_voice);
             return found ? (found.label.length > 28 ? found.label.slice(0,28)+'...' : found.label) : (p.default_voice || 'Hoài My');
           })()}</code></span>
-          <span class="badge" style="background:${p.default_voice_mode === 'ai_voice' ? 'rgba(245,158,11,0.15)' : 'rgba(56,189,248,0.12)'};color:${p.default_voice_mode === 'ai_voice' ? 'var(--yellow)' : 'var(--accent)'};">${
+          <span class="badge" style="background:${p.default_voice_mode === 'ai_voice' ? 'rgba(245,158,11,0.15)' : 'rgba(99,102,241,0.12)'};color:${p.default_voice_mode === 'ai_voice' ? 'var(--yellow)' : 'var(--accent)'};">${
             p.default_voice_mode === 'ai_voice' ? '🤖 Giọng gốc AI (Không lồng)' :
             p.default_voice_mode === 'dialogue' ? '🗣️ Khớp môi' : '🎙️ Thuyết minh'
           }</span>
-          <button class="btn btn-ghost btn-sm" style="padding:2px 8px;font-size:11px;" onclick="openShotDeskProjectVoiceModal()" title="Cấu hình giọng đọc & phong cách thoại cho toàn dự án">⚙️ Đổi Giọng Dự Án</button>
+          <button class="btn btn-ghost btn-sm u-p-2-8 u-fs11" onclick="openShotDeskProjectVoiceModal()" title="Cấu hình giọng đọc & phong cách thoại cho toàn dự án">⚙️ Đổi Giọng Dự Án</button>
         </div>
       </div>
     </div>
@@ -4542,7 +4523,7 @@ function renderShotDeskOverview() {
         👥 Thư viện Nhân vật (Character Bible & Character Blocks chuẩn hoá)
       </div>
       <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;">
-        ${charCardsHtml || '<div style="color:var(--muted);font-size:12px;">Không có nhân vật nào trong bible.</div>'}
+        ${charCardsHtml || '<div class="u-c-muted u-fs12">Không có nhân vật nào trong bible.</div>'}
       </div>
     </div>
   `;
@@ -4601,14 +4582,14 @@ function updateShotDeskStats() {
 
   if (statsEl) {
     statsEl.innerHTML = `
-      <span class="sd-stat-clickable" onclick="setShotDeskFilter('ready')" title="Bấm để lọc các cảnh chờ render">Chờ render: <b style="color:var(--accent);">${readyCnt}</b></span>
-      <span class="sd-stat-clickable" onclick="setShotDeskFilter('rendering')" title="Bấm để lọc các cảnh đang render">Đang render: <b style="color:var(--yellow);">${renderingCnt}</b></span>
-      <span class="sd-stat-clickable" onclick="setShotDeskFilter('review')" title="Bấm để lọc các cảnh đã có video chờ duyệt">Chờ Review: <b style="color:#c084fc;">${reviewCnt}</b></span>
-      <span class="sd-stat-clickable" onclick="setShotDeskFilter('approved')" title="Bấm để lọc các cảnh đã duyệt">Đã Approved: <b style="color:var(--green);">${approvedCnt}/${shots.length}</b></span>
+      <span class="sd-stat-clickable" onclick="setShotDeskFilter('ready')" title="Bấm để lọc các cảnh chờ render">Chờ render: <b class="u-c-accent">${readyCnt}</b></span>
+      <span class="sd-stat-clickable" onclick="setShotDeskFilter('rendering')" title="Bấm để lọc các cảnh đang render">Đang render: <b class="u-c-yellow">${renderingCnt}</b></span>
+      <span class="sd-stat-clickable" onclick="setShotDeskFilter('review')" title="Bấm để lọc các cảnh đã có video chờ duyệt">Chờ Review: <b style="color:#a5b4fc;">${reviewCnt}</b></span>
+      <span class="sd-stat-clickable" onclick="setShotDeskFilter('approved')" title="Bấm để lọc các cảnh đã duyệt">Đã Approved: <b class="u-c-green">${approvedCnt}/${shots.length}</b></span>
       <span class="sd-stat-clickable" onclick="setShotDeskFilter('unapproved')" title="Bấm để lọc toàn bộ các cảnh CHƯA duyệt" style="color:#f59e0b;">Chưa duyệt: <b>${unapprovedCnt}</b></span>
       ${failedCnt > 0 ? `
-        <span class="sd-stat-clickable" onclick="setShotDeskFilter('error')" style="color:var(--red);">Bị lỗi: <b>${failedCnt}</b></span>
-        <button class="btn btn-warning btn-sm" style="padding:2px 10px;font-size:11px;font-weight:700;" onclick="autoHealAllFailedShots()" title="Tự động sửa toàn bộ các shot đang bị lỗi và render lại">
+        <span class="sd-stat-clickable u-c-red" onclick="setShotDeskFilter('error')">Bị lỗi: <b>${failedCnt}</b></span>
+        <button class="btn btn-warning btn-sm u-p-2-10 u-fs11 u-fw700" onclick="autoHealAllFailedShots()" title="Tự động sửa toàn bộ các shot đang bị lỗi và render lại">
           ⚡ AI Sửa & Render Lại ${failedCnt} Shot Lỗi
         </button>
       ` : ''}
@@ -4707,14 +4688,14 @@ function applyShotDeskFilter() {
     if (!emptyMsg) {
       emptyMsg = document.createElement('div');
       emptyMsg.id = 'sdFilterEmptyMsg';
-      emptyMsg.style.cssText = 'text-align:center;padding:36px 20px;color:var(--muted);background:var(--bg0);border-radius:8px;border:1px dashed var(--border);margin-top:12px;';
+      emptyMsg.className = 'sd-empty-msg'; // style o css/ui.css (.sd-empty-msg)
       const container = document.getElementById('sdShotsListContainer');
       if (container) container.appendChild(emptyMsg);
     }
     emptyMsg.innerHTML = `
-      <div style="font-size:24px;margin-bottom:6px;">🔍</div>
-      <div style="font-weight:600;font-size:13px;color:var(--text);">Không tìm thấy shot nào phù hợp với bộ lọc</div>
-      <div style="font-size:12px;margin:6px 0 12px;color:var(--muted);">Bộ lọc: "<b>${filterKey}</b>"${query ? ` | Từ khóa: "<b>${esc(query)}</b>"` : ''}</div>
+      <div class="empty-icon">🔍</div>
+      <div class="empty-title">Không tìm thấy shot nào phù hợp với bộ lọc</div>
+      <div class="empty-text">Bộ lọc: "<b>${filterKey}</b>"${query ? ` | Từ khóa: "<b>${esc(query)}</b>"` : ''}</div>
       <button class="btn btn-ghost btn-sm" onclick="setShotDeskFilter('all'); clearShotDeskSearch();">✕ Bỏ Lọc & Hiện Tất Cả</button>
     `;
     emptyMsg.style.display = 'block';
@@ -4747,7 +4728,7 @@ function jumpToShotDeskShot(shotIndex) {
     highlightCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
     highlightCard.style.transition = 'box-shadow 0.3s, border-color 0.3s, transform 0.3s';
     highlightCard.style.borderColor = 'var(--accent)';
-    highlightCard.style.boxShadow = '0 0 24px rgba(56, 189, 248, 0.6)';
+    highlightCard.style.boxShadow = '0 0 24px rgba(99, 102, 241, 0.6)';
     highlightCard.style.transform = 'scale(1.02)';
     setTimeout(() => {
       highlightCard.style.borderColor = '';
@@ -4761,8 +4742,8 @@ function renderShotErrorHtml(s) {
   if (!s.error) return '';
   return `
     <div style="background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.3);border-radius:6px;padding:8px 12px;color:var(--red);font-size:12px;">
-      <div style="margin-bottom:6px;"><b>❌ Lỗi render:</b> ${esc(s.error)}</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <div class="u-mb6"><b>❌ Lỗi render:</b> ${esc(s.error)}</div>
+      <div class="fx fx-g8 fx-wrap">
         <button class="btn btn-warning btn-sm" onclick="autoHealAndRetryShotDesk(${s.index})" title="Tự động loại bỏ từ khóa cấm/nhạy cảm và render lại ngay">
           ⚡ AI Sửa Prompt & Thử Lại
         </button>
@@ -4783,17 +4764,17 @@ function renderShotMediaHtml(s) {
       <div style="background:#000;border-radius:6px;overflow:hidden;">
         <video src="${s.video_url}" data-src="${s.video_url}" controls preload="none" playsinline style="width:100%;max-height:220px;display:block;"></video>
       </div>
-      <div style="display:flex;flex-direction:column;justify-content:center;gap:8px;font-size:12px;">
-        <div style="font-weight:700;color:var(--green);">✅ Clip đã render thành công</div>
+      <div class="fx fx-col fx-jc-c fx-g8 u-fs12">
+        <div class="u-fw700 u-c-green">✅ Clip đã render thành công</div>
         <div><b>Audit:</b> <span class="badge" style="background:rgba(52,211,153,0.15);color:var(--green);">${esc(s.audit?.character_check || 'Đạt chuẩn')}</span></div>
-        <div><b>Âm thanh / Thoại:</b> <span class="badge" style="background:${isAiVoice ? 'rgba(245,158,11,0.15)' : isDialogue ? 'rgba(52,211,153,0.15)' : 'rgba(56,189,248,0.15)'};color:${isAiVoice ? 'var(--yellow)' : isDialogue ? 'var(--green)' : 'var(--accent)'};">${
+        <div><b>Âm thanh / Thoại:</b> <span class="badge" style="background:${isAiVoice ? 'rgba(245,158,11,0.15)' : isDialogue ? 'rgba(52,211,153,0.15)' : 'rgba(99,102,241,0.15)'};color:${isAiVoice ? 'var(--yellow)' : isDialogue ? 'var(--green)' : 'var(--accent)'};">${
           isAiVoice ? '🤖 Không lồng tiếng (Giọng gốc AI)' :
           isDialogue ? '👄 Nhân vật tự nói (Khớp môi)' : '🎙️ Thuyết minh'
         }</span></div>
         ${s.audio_url ? `
-          <div style="margin-top:4px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">
-              <label style="font-size:11px;margin-bottom:0;">${isAiVoice ? 'Âm thanh gốc AI:' : 'Giọng đọc thoại:'}</label>
+          <div class="u-mt4">
+            <div class="fx fx-jc-sb fx-ac u-mb2">
+              <label class="u-fs11 u-mb0">${isAiVoice ? 'Âm thanh gốc AI:' : 'Giọng đọc thoại:'}</label>
               <span style="font-size:10px;color:${isAiVoice ? 'var(--yellow)' : 'var(--accent)'};">${isAiVoice ? '🤖 AI Native Sound' : (s.voice || '').includes('NamMinh') ? '👨 Nam Minh' : '👩 Hoài My'}</span>
             </div>
             <audio src="${s.audio_url}" controls preload="none" style="width:100%;height:32px;"></audio>
@@ -4808,7 +4789,7 @@ function renderShotActionsHtml(s) {
   const isRendering = s.status === 'rendering';
   const isApproved = s.status === 'approved' || s.status === 'done';
   return `
-    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+    <div class="fx fx-g6 fx-wrap">
       <button class="btn btn-primary btn-sm" onclick="renderSingleShotDeskShot(${s.index}, false)" ${isRendering ? 'disabled' : ''}>
         ${isRendering ? '⏳ Đang Render...' : (s.video_url ? '🔄 Render Lại (Retry)' : '🎬 Render Shot')}
       </button>
@@ -4820,8 +4801,8 @@ function renderShotActionsHtml(s) {
       ` : ''}
     </div>
 
-    <div style="display:flex;gap:6px;flex-wrap:wrap;">
-      <button class="btn btn-ghost btn-sm" style="color:#c084fc;border-color:rgba(168,85,247,0.4);" onclick="openReviewDeskForShot(${s.index})" title="Mở phòng duyệt Director Review Desk cho shot này">
+    <div class="fx fx-g6 fx-wrap">
+      <button class="btn btn-ghost btn-sm" style="color:#a5b4fc;border-color:rgba(99,102,241,0.4);" onclick="openReviewDeskForShot(${s.index})" title="Mở phòng duyệt Director Review Desk cho shot này">
         👁️ Mở Review Desk
       </button>
 
@@ -4854,20 +4835,20 @@ function renderSingleShotCardHtml(s) {
 
   return `
     <div class="sd-shot-card ${isReview ? 'is-review' : ''} ${isApproved ? 'is-approved' : ''}" id="sdShotCard-${s.index}" data-status="${s.status}" data-video-url="${s.video_url || ''}" data-error="${s.error || ''}">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-        <div style="display:flex;align-items:center;gap:10px;">
+      <div class="fx fx-jc-sb fx-ac fx-wrap fx-g8">
+        <div class="fx fx-ac fx-g10">
           <input type="checkbox" class="sd-card-check" id="sdDetCheck-${s.index}" ${selectedShotIndices.has(s.index) ? 'checked' : ''} onchange="onToggleShotSelect(${s.index}, this.checked)" title="Chọn cảnh này">
           <div style="background:var(--accent2);color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;">
             ${s.index}
           </div>
           <div>
-            <span style="font-weight:700;font-size:14px;color:var(--text);">${esc(s.title || `Shot ${s.index}`)}</span>
-            <span style="font-size:12px;color:var(--muted);margin-left:6px;">⏱️ ${s.duration}s</span>
-            ${s.transition_note ? `<span class="sd-transition-pill" style="margin-left:8px;">${esc(s.transition_note)}</span>` : ''}
+            <span class="u-fw700 u-fs14 u-c-text">${esc(s.title || `Shot ${s.index}`)}</span>
+            <span class="u-fs12 u-c-muted u-ml6">⏱️ ${s.duration}s</span>
+            ${s.transition_note ? `<span class="sd-transition-pill u-ml8">${esc(s.transition_note)}</span>` : ''}
           </div>
         </div>
 
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div class="fx fx-ac fx-g8">
           <span id="sdShotBadge-${s.index}" class="sd-status-badge ${statusBadgeClass}">${statusLabel}</span>
           <button class="btn btn-ghost btn-sm" onclick="openShotDeskEditModal(${s.index})" title="Chỉnh sửa prompt, lời thoại, thời lượng">✏️ Sửa</button>
         </div>
@@ -4909,31 +4890,31 @@ function renderSingleShotCardHtml(s) {
       </div>
 
       <div style="background:var(--bg0);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:12px;line-height:1.5;margin-top:8px;">
-        <div style="font-weight:600;color:var(--accent);margin-bottom:2px;display:flex;justify-content:space-between;">
+        <div class="u-fw600 u-c-accent u-mb2 fx fx-jc-sb">
           <span>PROMPT ĐIỆN ẢNH:</span>
-          ${s.used_compliance ? '<span style="color:var(--green);font-size:11px;">🛡️ Đã tự kích hoạt Compliance Prompt</span>' : ''}
+          ${s.used_compliance ? '<span class="u-c-green u-fs11">🛡️ Đã tự kích hoạt Compliance Prompt</span>' : ''}
         </div>
         <div style="color:var(--text);font-family:monospace;font-size:11.5px;max-height:60px;overflow-y:auto;white-space:pre-wrap;">${esc(s.prompt)}</div>
 
         ${s.compliance_prompt ? `
           <div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:11px;">
-            <span style="color:var(--yellow);font-weight:600;">🛡️ Compliance Prompt (Dự phòng chống vi phạm):</span>
+            <span class="u-c-yellow u-fw600">🛡️ Compliance Prompt (Dự phòng chống vi phạm):</span>
             <div style="color:var(--muted);font-family:monospace;margin-top:2px;">${esc(s.compliance_prompt)}</div>
           </div>
         ` : ''}
 
         ${s.voiceover ? `
           <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
-            <div style="color:#c084fc;font-size:12px;">
+            <div style="color:#a5b4fc;font-size:12px;">
               <b>${s.voice_mode === 'ai_voice' ? '🤖 Thoại gốc AI (Subtitles):' : (s.voice_mode === 'dialogue' || s.lip_sync) ? '🗣️ Thoại nhân vật:' : '🎙️ Thuyết minh:'}</b> <i>"${esc(s.voiceover)}"</i>
             </div>
-            <div style="display:flex;gap:6px;align-items:center;font-size:11px;">
-              ${s.speaker ? `<span class="badge" style="background:rgba(168,85,247,0.15);color:#c084fc;padding:2px 6px;border-radius:4px;">👤 ${esc(s.speaker)}</span>` : ''}
+            <div class="fx fx-g6 fx-ac u-fs11">
+              ${s.speaker ? `<span class="badge" style="background:rgba(99,102,241,0.15);color:#a5b4fc;padding:2px 6px;border-radius:4px;">👤 ${esc(s.speaker)}</span>` : ''}
               ${s.voice_mode === 'ai_voice' ? `
                 <span class="badge" style="background:rgba(245,158,11,0.15);color:var(--yellow);padding:2px 6px;border-radius:4px;" title="Phụ thuộc hoàn toàn vào giọng & âm thanh do AI video sinh ra">🤖 Giọng gốc AI</span>
                 <span class="badge" style="background:rgba(148,163,184,0.15);color:var(--muted);padding:2px 6px;border-radius:4px;">Không lồng tiếng</span>
               ` : `
-                <span class="badge" style="background:rgba(56,189,248,0.15);color:var(--accent);padding:2px 6px;border-radius:4px;">
+                <span class="badge" style="background:rgba(99,102,241,0.15);color:var(--accent);padding:2px 6px;border-radius:4px;">
                   ${(s.voice || '').includes('NamMinh') ? '👨 Nam Minh' : '👩 Hoài My'}
                 </span>
                 ${(s.voice_mode === 'dialogue' || s.lip_sync) ?
@@ -4949,7 +4930,7 @@ function renderSingleShotCardHtml(s) {
         ` : '')}
       </div>
 
-      <div id="sdShotError-${s.index}" style="margin-top:8px;">
+      <div class="u-mt8" id="sdShotError-${s.index}">
         ${renderShotErrorHtml(s)}
       </div>
 
@@ -5039,7 +5020,7 @@ function renderSingleShotStoryboardCardHtml(s) {
         <div class="sd-sb-overlay">
           <div class="sd-sb-badges-top" style="padding-left:24px;">
             <span class="sd-sb-shot-num">#${s.index}</span>
-            <span id="sdSbBadge-${s.index}" class="sd-status-badge ${statusBadgeClass}" style="font-size:10px;padding:2px 7px;">${statusShortLabel}</span>
+            <span id="sdSbBadge-${s.index}" class="sd-status-badge ${statusBadgeClass} u-fs10 u-p-2-7">${statusShortLabel}</span>
           </div>
 
           <div class="sd-sb-bottom-info">
@@ -5059,7 +5040,7 @@ function renderSingleShotStoryboardCardHtml(s) {
               ✅ Phê Duyệt
             </button>
           ` : ''}
-          <div style="display:flex;gap:4px;width:100%;">
+          <div class="fx fx-g4 u-w100">
             <button class="btn btn-ghost btn-sm" style="flex:1;font-size:11px;padding:4px;background:rgba(255,255,255,0.1);color:#fff;" onclick="openShotDeskEditModal(${s.index})" title="Sửa Prompt">
               ✏️ Sửa
             </button>
@@ -5079,7 +5060,7 @@ function renderSingleShotStoryboardCardHtml(s) {
         </div>
         <div class="sd-sb-voice-badge">
           <span>${s.speaker ? `👤 ${esc(s.speaker)}` : (s.voice_mode === 'ai_voice' ? '🤖 Native AI' : '🎙️ Thuyết minh')}</span>
-          <div style="display:flex;align-items:center;gap:6px;">
+          <div class="fx fx-ac fx-g6">
             ${s.audio_url ? `
               <div class="sd-wave-widget" id="sdWave-${s.index}" onclick="event.stopPropagation(); playQuickCardAudio('${s.audio_url}', this, ${s.index})" title="Nghe thử giọng đọc">
                 <span class="sd-wave-icon" id="sdWaveIcon-${s.index}" style="font-size:9.5px;color:var(--accent);">▶</span>
@@ -5095,7 +5076,7 @@ function renderSingleShotStoryboardCardHtml(s) {
                 </div>
               </div>
             ` : ''}
-            ${s.video_url ? '<span style="color:var(--green);font-weight:700;">▶ Sẵn sàng</span>' : '<span style="color:var(--muted);">Chưa có clip</span>'}
+            ${s.video_url ? '<span class="u-c-green u-fw700">▶ Sẵn sàng</span>' : '<span class="u-c-muted">Chưa có clip</span>'}
           </div>
         </div>
       </div>
@@ -5149,7 +5130,7 @@ function renderShotDeskMatrixScreen(fromPolling = false) {
     container.innerHTML = `
       <div style="text-align:center;padding:50px 20px;color:var(--muted);background:var(--bg0);border-radius:10px;border:1px dashed var(--border);">
         <div style="font-size:36px;margin-bottom:10px;">🎬</div>
-        <div style="font-weight:600;font-size:15px;color:var(--text);">Chưa có kịch bản Shot Desk nào được nạp</div>
+        <div class="u-fw600 u-fs15 u-c-text">Chưa có kịch bản Shot Desk nào được nạp</div>
         <div style="font-size:13px;margin:8px 0 16px;">Hãy bấm "Nhập File ZIP" hoặc bấm "Nạp Dự Án Mẫu" để bắt đầu làm phim theo chuẩn Shot Desk!</div>
         <button class="btn btn-primary btn-sm" onclick="loadShotDeskSampleProject()">⚡ Nạp Mẫu: Bức Thư Chưa Gửi</button>
       </div>
@@ -5288,8 +5269,8 @@ function renderShotDeskMatrixScreen(fromPolling = false) {
 function renderReviewDecisionButtons(shot, isApproved, isRendering) {
   const hasError = !!shot.error;
   return `
-    <div style="font-weight:700;font-size:13px;color:var(--text);">Quyết Định Của Đạo Diễn:</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <div class="u-fw700 u-fs13 u-c-text">Quyết Định Của Đạo Diễn:</div>
+    <div class="fx fx-g8 fx-wrap">
       ${isApproved ? `
         <button class="btn btn-success" style="flex:1;" disabled>
           ✅ ĐÃ PHÊ DUYỆT (APPROVED)
@@ -5372,8 +5353,8 @@ function renderShotDeskReviewScreen(fromPolling = false) {
       const charObj = (p.characters || []).find(c => c.name.toLowerCase() === cName.toLowerCase() || c.id === cName);
       if (charObj) {
         charBlocksHtml += `
-          <div style="background:rgba(56,189,248,0.06);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:8px 10px;margin-bottom:8px;">
-            <div style="font-weight:700;color:var(--accent);font-size:12px;">👤 ${esc(charObj.name)} - Character Block:</div>
+          <div style="background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.25);border-radius:6px;padding:8px 10px;margin-bottom:8px;">
+            <div class="u-fw700 u-c-accent u-fs12">👤 ${esc(charObj.name)} - Character Block:</div>
             <div style="font-size:11px;color:var(--text);font-family:monospace;white-space:pre-wrap;margin-top:4px;">${esc(charObj.character_block || 'N/A')}</div>
           </div>
         `;
@@ -5383,15 +5364,15 @@ function renderShotDeskReviewScreen(fromPolling = false) {
 
   card.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:12px;">
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span style="font-size:20px;">🎬</span>
+      <div class="fx fx-ac fx-g10">
+        <span class="u-fs20">🎬</span>
         <div>
-          <div style="font-weight:800;font-size:16px;color:var(--text);">MÀN HÌNH REVIEW DESK (ĐẠO DIỄN DUYỆT SHOT)</div>
-          <div style="font-size:12px;color:var(--muted);">Kiểm định chất lượng, khuôn mặt nhân vật, watermark và sự liền mạch trước khi ghép phim</div>
+          <div class="u-fw800 u-fs16 u-c-text">MÀN HÌNH REVIEW DESK (ĐẠO DIỄN DUYỆT SHOT)</div>
+          <div class="u-fs12 u-c-muted">Kiểm định chất lượng, khuôn mặt nhân vật, watermark và sự liền mạch trước khi ghép phim</div>
         </div>
       </div>
 
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div class="fx fx-ac fx-g8 fx-wrap">
         <span class="sd-hotkeys-pill" onclick="openHotkeysCheatSheetModal()" style="cursor:pointer;" title="Bấm xem bảng phím tắt">
           ⌨️ <span class="sd-kbd">Space</span> Play &nbsp; <span class="sd-kbd">V</span> Duyệt &nbsp; <span class="sd-kbd">?</span> Phím tắt
         </span>
@@ -5441,8 +5422,8 @@ function renderShotDeskReviewScreen(fromPolling = false) {
               </div>
               <!-- Playback Speed, Split Slider & Frame Stepping Controls -->
               <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(10,15,29,0.92);padding:6px 10px;border-top:1px solid rgba(255,255,255,0.1);font-size:11px;flex-wrap:wrap;gap:6px;">
-                <div style="display:flex;gap:4px;align-items:center;">
-                  <span style="color:var(--muted);font-size:10.5px;">Tốc độ:</span>
+                <div class="fx fx-g4 fx-ac">
+                  <span class="u-c-muted u-fs105">Tốc độ:</span>
                   <button class="sd-speed-pill" onclick="setReviewVideoSpeed(0.5, this)">0.5x</button>
                   <button class="sd-speed-pill is-active" onclick="setReviewVideoSpeed(1.0, this)">1.0x</button>
                   <button class="sd-speed-pill" onclick="setReviewVideoSpeed(1.25, this)">1.25x</button>
@@ -5456,7 +5437,7 @@ function renderShotDeskReviewScreen(fromPolling = false) {
                     <span style="font-size:10px;color:var(--muted);white-space:nowrap;">B (Clip)</span>
                   </div>
                 ` : ''}
-                <div style="display:flex;gap:4px;align-items:center;">
+                <div class="fx fx-g4 fx-ac">
                   <button class="btn btn-ghost btn-sm" onclick="stepReviewVideoFrame(-1)" style="font-size:10.5px;padding:2px 6px;height:22px;" title="Lùi 1 Frame (phím J)">⏮️ -1 Frame (<span class="sd-kbd" style="font-size:9px;padding:0 3px;">J</span>)</button>
                   <button class="btn btn-ghost btn-sm" onclick="stepReviewVideoFrame(1)" style="font-size:10.5px;padding:2px 6px;height:22px;" title="Tới 1 Frame (phím L)">+1 Frame (<span class="sd-kbd" style="font-size:9px;padding:0 3px;">L</span>) ⏭️</button>
                   <button class="btn btn-ghost btn-sm" onclick="toggleReviewTheaterMode()" style="font-size:11px;padding:2px 6px;height:22px;" title="Mở Rộng Rạp Chiếu (Theater Mode)">⛶ Rạp Chiếu</button>
@@ -5474,21 +5455,21 @@ function renderShotDeskReviewScreen(fromPolling = false) {
 
         ${shot.audio_url ? `
           <div style="background:var(--bg0);border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div class="fx fx-jc-sb fx-ac u-mb8">
               <div style="font-weight:600;font-size:12px;color:${shot.voice_mode === 'ai_voice' ? 'var(--yellow)' : 'var(--accent)'};">
                 ${shot.voice_mode === 'ai_voice' ? '🤖 Âm thanh & Giọng gốc của AI (Không lồng tiếng):' :
                   (shot.voice_mode === 'dialogue' || shot.lip_sync) ? '🗣️ Lời thoại nhân vật (Khớp môi):' :
                   '🎙️ Thuyết minh giọng đọc tiếng Việt:'}
               </div>
-              <div style="font-size:11px;display:flex;gap:6px;">
-                ${shot.speaker ? `<span class="badge" style="background:rgba(168,85,247,0.15);color:#c084fc;">👤 ${esc(shot.speaker)}</span>` : ''}
+              <div class="u-fs11 fx fx-g6">
+                ${shot.speaker ? `<span class="badge" style="background:rgba(99,102,241,0.15);color:#a5b4fc;">👤 ${esc(shot.speaker)}</span>` : ''}
                 ${shot.voice_mode === 'ai_voice' ?
                   `<span class="badge" style="background:rgba(245,158,11,0.15);color:var(--yellow);">🤖 Native AI Sound</span>` :
-                  `<span class="badge" style="background:rgba(56,189,248,0.15);color:var(--accent);">${(shot.voice || '').includes('NamMinh') ? '👨 Nam Minh' : '👩 Hoài My'}</span>
+                  `<span class="badge" style="background:rgba(99,102,241,0.15);color:var(--accent);">${(shot.voice || '').includes('NamMinh') ? '👨 Nam Minh' : '👩 Hoài My'}</span>
                    ${(shot.voice_mode === 'dialogue' || shot.lip_sync) ? '<span class="badge" style="background:rgba(52,211,153,0.15);color:var(--green);">👄 Khớp môi</span>' : ''}`}
               </div>
             </div>
-            <div style="display:flex;align-items:center;gap:10px;">
+            <div class="fx fx-ac fx-g10">
               <button class="sd-wave-widget" id="sdReviewWaveWidget" onclick="playReviewDeskAudio('${shot.audio_url}', this)" title="Nghe thoại kèm visualizer sóng âm sống động" style="padding:6px 12px;border-radius:6px;background:rgba(255,255,255,0.05);border:1px solid var(--border);cursor:pointer;color:var(--text);">
                 <span class="sd-wave-icon" style="font-size:11px;margin-right:2px;">▶</span>
                 <span class="sd-wave-bars">
@@ -5497,7 +5478,7 @@ function renderShotDeskReviewScreen(fromPolling = false) {
                   <span class="sd-wave-bar"></span><span class="sd-wave-bar"></span>
                   <span class="sd-wave-bar"></span><span class="sd-wave-bar"></span>
                 </span>
-                <span style="font-size:11px;font-weight:700;margin-left:4px;">Phát Voice</span>
+                <span class="u-fs11 u-fw700 u-ml4">Phát Voice</span>
               </button>
               <audio id="sdReviewDeskAudioEl" src="${shot.audio_url}" controls style="flex:1;height:34px;border-radius:4px;"></audio>
             </div>
@@ -5506,9 +5487,9 @@ function renderShotDeskReviewScreen(fromPolling = false) {
 
         ${shot.error ? `
           <div style="background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:12px;color:var(--red);font-size:12px;">
-            <div style="font-weight:700;margin-bottom:4px;">❌ Lỗi Render:</div>
-            <div style="line-height:1.4;">${esc(shot.error)}</div>
-            <div style="margin-top:8px;">
+            <div class="u-fw700 u-mb4">❌ Lỗi Render:</div>
+            <div class="u-lh14">${esc(shot.error)}</div>
+            <div class="u-mt8">
               <button class="btn btn-warning btn-sm" onclick="autoHealAndRetryShotDesk(${shot.index})">
                 ⚡ AI Tự Sửa Prompt & Render Lại Ngay
               </button>
@@ -5519,8 +5500,8 @@ function renderShotDeskReviewScreen(fromPolling = false) {
         <div id="sdReviewDecisionArea" style="background:var(--bg0);border:1px solid var(--border);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px;">
           ${renderReviewDecisionButtons(shot, isApproved, isRendering)}
           <div style="margin-top:6px;padding-top:8px;border-top:1px dashed var(--border);">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-              <span style="font-size:11.5px;font-weight:700;color:var(--text);">📝 Ghi Chú Đạo Diễn (Director Memo):</span>
+            <div class="fx fx-jc-sb fx-ac u-mb4">
+              <span class="u-fs115 u-fw700 u-c-text">📝 Ghi Chú Đạo Diễn (Director Memo):</span>
               <span id="sdNoteSavedHint" style="font-size:10.5px;color:var(--green);display:none;font-weight:700;">✓ Đã lưu</span>
             </div>
             <input type="text" id="sdDirectorNoteInput" value="${esc(shot.director_note || (currentShotDeskProject ? localStorage.getItem('sd_note_' + currentShotDeskProject.id + '_' + shot.index) : '') || '')}" placeholder="Ghi nhận xét cho shot này (vd: Mặt chuẩn, background đẹp...)" oninput="saveDirectorNote(${shot.index}, this.value)" style="width:100%;font-size:11.5px;padding:5px 8px;background:var(--bg1);border:1px solid var(--border);border-radius:6px;color:var(--text);">
@@ -5536,15 +5517,15 @@ function renderShotDeskReviewScreen(fromPolling = false) {
           <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;">
             <div>
               <div style="font-size:10.5px;color:var(--muted);text-align:center;margin-bottom:3px;">First Frame</div>
-              ${shot.first_frame_url ? `<img loading="lazy" decoding="async" src="${shot.first_frame_url}" style="width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:4px;border:1px solid var(--border);cursor:pointer;" onclick="openShotDeskImageModal(this.src, 'First Frame')" title="Bấm xem lớn">` : '<div style="font-size:10px;color:var(--muted);text-align:center;">None</div>'}
+              ${shot.first_frame_url ? `<img loading="lazy" decoding="async" src="${shot.first_frame_url}" style="width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:4px;border:1px solid var(--border);cursor:pointer;" onclick="openShotDeskImageModal(this.src, 'First Frame')" title="Bấm xem lớn">` : '<div class="u-fs10 u-c-muted u-ta-c">None</div>'}
             </div>
             <div>
               <div style="font-size:10.5px;color:var(--muted);text-align:center;margin-bottom:3px;">Middle Frame</div>
-              ${shot.middle_frame_url ? `<img loading="lazy" decoding="async" src="${shot.middle_frame_url}" style="width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:4px;border:1px solid var(--border);cursor:pointer;" onclick="openShotDeskImageModal(this.src, 'Middle Frame')" title="Bấm xem lớn">` : '<div style="font-size:10px;color:var(--muted);text-align:center;">Không dùng</div>'}
+              ${shot.middle_frame_url ? `<img loading="lazy" decoding="async" src="${shot.middle_frame_url}" style="width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:4px;border:1px solid var(--border);cursor:pointer;" onclick="openShotDeskImageModal(this.src, 'Middle Frame')" title="Bấm xem lớn">` : '<div class="u-fs10 u-c-muted u-ta-c">Không dùng</div>'}
             </div>
             <div>
               <div style="font-size:10.5px;color:var(--muted);text-align:center;margin-bottom:3px;">Last Frame</div>
-              ${shot.last_frame_url ? `<img loading="lazy" decoding="async" src="${shot.last_frame_url}" style="width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:4px;border:1px solid var(--border);cursor:pointer;" onclick="openShotDeskImageModal(this.src, 'Last Frame')" title="Bấm xem lớn">` : '<div style="font-size:10px;color:var(--muted);text-align:center;">None</div>'}
+              ${shot.last_frame_url ? `<img loading="lazy" decoding="async" src="${shot.last_frame_url}" style="width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:4px;border:1px solid var(--border);cursor:pointer;" onclick="openShotDeskImageModal(this.src, 'Last Frame')" title="Bấm xem lớn">` : '<div class="u-fs10 u-c-muted u-ta-c">None</div>'}
             </div>
           </div>
         </div>
@@ -5566,12 +5547,12 @@ function renderShotDeskReviewScreen(fromPolling = false) {
             ${esc(shot.used_prompt || shot.prompt)}
           </div>
           ${shot.compliance_prompt ? `
-            <div style="margin-top:6px;font-size:11px;color:var(--yellow);">
+            <div class="u-mt6 u-fs11 u-c-yellow">
               <b>Compliance:</b> ${esc(shot.compliance_prompt)}
             </div>
           ` : ''}
           ${shot.voiceover ? `
-            <div style="margin-top:6px;font-size:12px;color:#c084fc;">
+            <div style="margin-top:6px;font-size:12px;color:#a5b4fc;">
               <b>Lời thoại:</b> "${esc(shot.voiceover)}"
             </div>
           ` : ''}
@@ -5581,21 +5562,21 @@ function renderShotDeskReviewScreen(fromPolling = false) {
           <div style="font-weight:700;font-size:12.5px;color:var(--muted);margin-bottom:8px;text-transform:uppercase;">
             🔍 Danh Mục Kiểm Định Tiêu Chuẩn (Audit Checklist)
           </div>
-          <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;">
-            <label style="display:flex;align-items:center;gap:8px;margin-bottom:0;">
-              <input type="checkbox" checked disabled style="width:auto;">
+          <div class="fx fx-col fx-g6 u-fs12">
+            <label class="fx fx-ac fx-g8 u-mb0">
+              <input class="u-w-auto" type="checkbox" checked disabled>
               <span>Nhất quán nhân vật: Khớp khuôn mặt, trang phục trong Character Block</span>
             </label>
-            <label style="display:flex;align-items:center;gap:8px;margin-bottom:0;">
-              <input type="checkbox" checked disabled style="width:auto;">
+            <label class="fx fx-ac fx-g8 u-mb0">
+              <input class="u-w-auto" type="checkbox" checked disabled>
               <span>Tỉ lệ khung hình: Chuẩn ${esc(p.aspect_ratio || '9:16')}</span>
             </label>
-            <label style="display:flex;align-items:center;gap:8px;margin-bottom:0;">
-              <input type="checkbox" checked disabled style="width:auto;">
+            <label class="fx fx-ac fx-g8 u-mb0">
+              <input class="u-w-auto" type="checkbox" checked disabled>
               <span>Watermark: Sạch 100%, không dính text méo hay logo rác</span>
             </label>
-            <label style="display:flex;align-items:center;gap:8px;margin-bottom:0;">
-              <input type="checkbox" checked disabled style="width:auto;">
+            <label class="fx fx-ac fx-g8 u-mb0">
+              <input class="u-w-auto" type="checkbox" checked disabled>
               <span>Chuyển cảnh (Continuity): ${esc(shot.transition_note || 'Match cut')}</span>
             </label>
           </div>
@@ -5731,10 +5712,10 @@ function renderShotDeskTimelineScreen() {
     const thumbUrl = s.first_frame_url || s.last_frame_url || '';
     videoTrackHtml += `
       <div class="sd-clip-block" onclick="openReviewDeskForShot(${s.index})" style="${isApproved ? 'border-color:var(--green);background:rgba(52,211,153,0.08);' : 'opacity:0.65;'}cursor:pointer;" title="Bấm để mở Review Desk cho Shot ${s.index}">
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div class="fx fx-ac fx-g8">
           ${thumbUrl ? `<img loading="lazy" decoding="async" src="${thumbUrl}" style="width:34px;height:48px;object-fit:cover;border-radius:4px;border:1px solid rgba(255,255,255,0.15);flex-shrink:0;">` : ''}
           <div style="overflow:hidden;flex:1;">
-            <div style="font-weight:700;display:flex;justify-content:space-between;align-items:center;">
+            <div class="u-fw700 fx fx-jc-sb fx-ac">
               <span>Shot ${s.index}</span>
               <span style="font-size:10px;color:${isApproved ? 'var(--green)' : 'var(--muted)'};">${isApproved ? '✓ Approved' : s.status}</span>
             </div>
@@ -5754,8 +5735,8 @@ function renderShotDeskTimelineScreen() {
   shots.forEach((s, idx) => {
     const hasVoice = !!s.voiceover;
     voiceTrackHtml += `
-      <div style="background:rgba(168,85,247,0.1);border:1px solid rgba(168,85,247,0.3);border-radius:6px;padding:6px 10px;min-width:130px;font-size:11.5px;">
-        <div style="font-weight:600;color:#c084fc;">🎙️ Thoại Shot ${s.index}</div>
+      <div style="background:rgba(99,102,241,0.1);border:1px solid rgba(99,102,241,0.3);border-radius:6px;padding:6px 10px;min-width:130px;font-size:11.5px;">
+        <div style="font-weight:600;color:#a5b4fc;">🎙️ Thoại Shot ${s.index}</div>
         <div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;">
           ${hasVoice ? `"${esc(s.voiceover)}"` : '(Không thoại)'}
         </div>
@@ -5973,7 +5954,7 @@ function displayShotDeskFinalMovie(videoUrl, srtUrl, duration, folderPath) {
       <div><b>Dự án:</b> ${esc(currentShotDeskProject?.title || 'Phim')}</div>
       <div><b>Thời lượng:</b> ${duration || 0}s</div>
       <div><b>Tỉ lệ:</b> ${esc(currentShotDeskProject?.aspect_ratio || '9:16')}</div>
-      <div style="color:var(--green);margin-top:4px;">✓ Đã ghép video, hòa âm chuẩn 44.1kHz, phụ đề 1 tầng sát đáy.</div>
+      <div class="u-c-green u-mt4">✓ Đã ghép video, hòa âm chuẩn 44.1kHz, phụ đề 1 tầng sát đáy.</div>
     `;
   }
 
@@ -6427,31 +6408,31 @@ function showSequentialPlayerModal() {
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.92);backdrop-filter:blur(20px);z-index:100000;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;';
 
   modal.innerHTML = `
-    <div style="width:100%;max-width:960px;background:#0b0f19;border:1px solid rgba(168,85,247,0.4);box-shadow:0 24px 64px rgba(0,0,0,0.9);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;">
+    <div style="width:100%;max-width:960px;background:#0b0f19;border:1px solid rgba(99,102,241,0.4);box-shadow:0 24px 64px rgba(0,0,0,0.9);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;">
       <div style="padding:14px 20px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.1);display:flex;justify-content:space-between;align-items:center;">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <span style="font-size:16px;">🎬</span>
+        <div class="fx fx-ac fx-g12">
+          <span class="u-fs16">🎬</span>
           <div>
             <div style="font-weight:700;font-size:14px;color:#fff;">Xem Thử Toàn Bộ Phim (Rough-Cut Sequential Preview)</div>
-            <div style="font-size:11px;color:var(--muted);">${esc(currentShotDeskProject.title)} • <span id="sdSeqCounter">Shot 1/${seqShotsList.length}</span></div>
+            <div class="u-fs11 u-c-muted">${esc(currentShotDeskProject.title)} • <span id="sdSeqCounter">Shot 1/${seqShotsList.length}</span></div>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:10px;">
-          <button class="btn btn-ghost btn-sm" onclick="closeSequentialPlayerModal()" style="font-size:14px;color:var(--muted);padding:4px 10px;">✕ Đóng</button>
+        <div class="fx fx-ac fx-g10">
+          <button class="btn btn-ghost btn-sm u-fs14 u-c-muted u-p-4-10" onclick="closeSequentialPlayerModal()">✕ Đóng</button>
         </div>
       </div>
       <div style="position:relative;background:#000;display:flex;align-items:center;justify-content:center;min-height:420px;max-height:68vh;">
         <video id="sdSeqVideo" controls autoplay style="width:100%;max-height:68vh;object-fit:contain;"></video>
         <div id="sdSeqOverlayInfo" style="position:absolute;top:16px;left:16px;background:rgba(0,0,0,0.75);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.15);border-radius:6px;padding:6px 12px;font-size:12px;color:#fff;pointer-events:none;">
-          <span id="sdSeqShotBadge" style="font-weight:700;color:var(--accent);">Shot 1</span>: <span id="sdSeqShotTitle">Tiêu đề</span>
+          <span class="u-fw700 u-c-accent" id="sdSeqShotBadge">Shot 1</span>: <span id="sdSeqShotTitle">Tiêu đề</span>
         </div>
       </div>
       <div style="padding:12px 20px;background:rgba(255,255,255,0.02);border-top:1px solid rgba(255,255,255,0.08);display:flex;justify-content:space-between;align-items:center;">
-        <div style="display:flex;gap:8px;">
+        <div class="fx fx-g8">
           <button class="btn btn-outline btn-sm" onclick="stepSeqShot(-1)">⏮️ Shot Trước</button>
           <button class="btn btn-outline btn-sm" onclick="stepSeqShot(1)">Shot Tiếp Theo ⏭️</button>
         </div>
-        <div style="font-size:11.5px;color:var(--muted);">Tự động chuyển tiếp cảnh kế tiếp khi kết thúc clip</div>
+        <div class="u-fs115 u-c-muted">Tự động chuyển tiếp cảnh kế tiếp khi kết thúc clip</div>
       </div>
     </div>
   `;
@@ -6598,7 +6579,7 @@ function openShotDeskImageModal(src, title) {
   modal.innerHTML = `
     <div class="modal-window" style="max-width:520px;background:#000;">
       <div class="modal-header" style="border-color:#222;">
-        <div style="font-weight:700;color:var(--text);">${esc(title || 'Xem Ảnh Tham Chiếu')}</div>
+        <div class="u-fw700 u-c-text">${esc(title || 'Xem Ảnh Tham Chiếu')}</div>
         <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
       </div>
       <div class="modal-body" style="padding:10px;display:flex;justify-content:center;">
@@ -6615,14 +6596,14 @@ function openCharacterBlockModal(name, block) {
   modal.innerHTML = `
     <div class="modal-window" style="max-width:640px;">
       <div class="modal-header">
-        <div style="font-weight:700;font-size:15px;color:var(--accent);">👤 Character Block: ${esc(name)}</div>
+        <div class="u-fw700 u-fs15 u-c-accent">👤 Character Block: ${esc(name)}</div>
         <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
       </div>
       <div class="modal-body">
-        <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+        <div class="u-fs12 u-c-muted u-mb8">
           Character Block này được nạp trực tiếp vào prompt của mọi cảnh có nhân vật này xuất hiện để đảm bảo diện mạo và trang phục nhất quán 100%:
         </div>
-        <div style="background:#090d16;border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:12px;color:#38bdf8;white-space:pre-wrap;line-height:1.5;">
+        <div style="background:#090d16;border:1px solid var(--border);border-radius:6px;padding:12px;font-family:monospace;font-size:12px;color:#818cf8;white-space:pre-wrap;line-height:1.5;">
           ${esc(block)}
         </div>
       </div>
@@ -6659,14 +6640,14 @@ function openShotDeskEditModal(shotIndex) {
   modal.innerHTML = `
     <div class="modal-window" style="max-width:680px;">
       <div class="modal-header">
-        <div style="font-weight:700;font-size:15px;">✏️ Chỉnh Sửa Shot ${shot.index}: ${esc(shot.title || '')}</div>
+        <div class="u-fw700 u-fs15">✏️ Chỉnh Sửa Shot ${shot.index}: ${esc(shot.title || '')}</div>
         <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
       </div>
       <div class="modal-body">
         <div class="form-row">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="margin-bottom:0;">Prompt Mô Tả Cảnh (English Cinematic Prompt)</label>
-            <button type="button" class="btn btn-warning btn-sm" style="padding:2px 8px;font-size:11px;font-weight:700;" onclick="quickCleanModalPrompt()" title="Tự động loại bỏ từ khóa bạo lực/bắt giữ nhạy cảm và chuyển thành ngôn ngữ điện ảnh an toàn">
+          <div class="fx fx-jc-sb fx-ac u-mb4">
+            <label class="u-mb0">Prompt Mô Tả Cảnh (English Cinematic Prompt)</label>
+            <button type="button" class="btn btn-warning btn-sm u-p-2-8 u-fs11 u-fw700" onclick="quickCleanModalPrompt()" title="Tự động loại bỏ từ khóa bạo lực/bắt giữ nhạy cảm và chuyển thành ngôn ngữ điện ảnh an toàn">
               ⚡ AI Làm Sạch Prompt Này
             </button>
           </div>
@@ -6689,14 +6670,14 @@ function openShotDeskEditModal(shotIndex) {
 
         <!-- Cấu hình Giọng đọc & Khớp môi (Voice & Lip-Sync) -->
         <div class="form-row" style="background:var(--bg0);border:1px solid var(--border);border-radius:8px;padding:12px;margin:12px 0;">
-          <div style="font-weight:700;font-size:12px;color:var(--accent);margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;">
+          <div class="u-fw700 u-fs12 u-c-accent u-mb10 fx fx-jc-sb fx-ac">
             <span>🎙️ CẤU HÌNH GIỌNG ĐỌC & KHỚP MÔI (VOICE & LIP-SYNC)</span>
             <span style="font-size:11px;color:var(--muted);font-weight:normal;">Edge-TTS / Native AI Audio</span>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+          <div class="gd gd-2 fx-g10 u-mb10">
             <div>
               <label style="font-size:11px;margin-bottom:4px;display:block;">Chế độ phát giọng đọc</label>
-              <select id="sdEditVoiceModeInput" onchange="onShotVoiceModeChanged()" style="width:100%;">
+              <select class="u-w100" id="sdEditVoiceModeInput" onchange="onShotVoiceModeChanged()">
                 <option value="narration" ${voiceMode === 'narration' ? 'selected' : ''}>🎙️ Thuyết minh dẫn chuyện (Lồng tiếng TTS)</option>
                 <option value="dialogue" ${voiceMode === 'dialogue' ? 'selected' : ''}>🗣️ Nhân vật tự nói (Lồng tiếng TTS + Khớp môi)</option>
                 <option value="ai_voice" ${voiceMode === 'ai_voice' ? 'selected' : ''}>🤖 Không lồng tiếng (Dùng giọng & âm thanh gốc của AI)</option>
@@ -6704,28 +6685,28 @@ function openShotDeskEditModal(shotIndex) {
             </div>
             <div>
               <label style="font-size:11px;margin-bottom:4px;display:block;">Nhân vật phát ngôn (Speaker)</label>
-              <select id="sdEditSpeakerInput" onchange="onShotSpeakerChanged()" style="width:100%;">
+              <select class="u-w100" id="sdEditSpeakerInput" onchange="onShotSpeakerChanged()">
                 ${charOptions}
               </select>
             </div>
           </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;">
+          <div class="gd gd-2 fx-g10 fx-ac">
             <div id="sdEditVoiceGroup">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                <label style="font-size:11px;margin-bottom:0;">Giọng đọc (Voice)</label>
+              <div class="fx fx-jc-sb fx-ac u-mb4">
+                <label class="u-fs11 u-mb0">Giọng đọc (Voice)</label>
                 <button type="button" class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:1px 5px;color:var(--accent);" onclick="testPlayVoice(document.getElementById('sdEditVoiceInput').value, document.getElementById('sdEditVoiceoverInput').value)">🔊 Nghe thử</button>
               </div>
-              <select id="sdEditVoiceInput" style="width:100%;">
+              <select class="u-w100" id="sdEditVoiceInput">
                 ${voiceSelectHtml(voice)}
               </select>
             </div>
             <div style="padding-top:16px;">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:0;font-size:12px;">
                 <input type="checkbox" id="sdEditLipSyncInput" ${lipSync ? 'checked' : ''} style="width:16px;height:16px;accent-color:var(--accent);">
-                <span style="font-weight:600;color:var(--green);">👄 Tự động khớp môi (AI Lip-Sync)</span>
+                <span class="u-fw600 u-c-green">👄 Tự động khớp môi (AI Lip-Sync)</span>
               </label>
-              <div style="font-size:10px;color:var(--muted);margin-top:2px;">Điều khiển khẩu hình chuyển động nhịp nhàng theo câu thoại</div>
+              <div class="u-fs10 u-c-muted u-mt2">Điều khiển khẩu hình chuyển động nhịp nhàng theo câu thoại</div>
             </div>
           </div>
 
@@ -6764,7 +6745,7 @@ function onShotVoiceModeChanged() {
       voiceInput.style.opacity = '0.45';
     }
     if (voiceNote) {
-      voiceNote.innerHTML = '<span style="color:var(--yellow);font-weight:600;">🤖 Giọng gốc của AI:</span> Hệ thống không lồng tiếng TTS đè lên; giữ nguyên 100% âm thanh, tiếng động và lời thoại tự sinh từ mô hình AI video.';
+      voiceNote.innerHTML = '<span class="u-c-yellow u-fw600">🤖 Giọng gốc của AI:</span> Hệ thống không lồng tiếng TTS đè lên; giữ nguyên 100% âm thanh, tiếng động và lời thoại tự sinh từ mô hình AI video.';
       voiceNote.style.display = 'block';
     }
   } else {
@@ -6778,8 +6759,8 @@ function onShotVoiceModeChanged() {
     }
     if (voiceNote) {
       voiceNote.innerHTML = (mode === 'dialogue') ?
-        '🗣️ <b style="color:var(--green);">Nhân vật tự nói:</b> Sinh giọng đọc tiếng Việt và điều khiển cơ miệng chuyển động khớp câu thoại.' :
-        '🎙️ <b style="color:var(--accent);">Thuyết minh:</b> Giọng đọc người dẫn chuyện ngoài khung hình, nhân vật giữ phong thái tự nhiên.';
+        '🗣️ <b class="u-c-green">Nhân vật tự nói:</b> Sinh giọng đọc tiếng Việt và điều khiển cơ miệng chuyển động khớp câu thoại.' :
+        '🎙️ <b class="u-c-accent">Thuyết minh:</b> Giọng đọc người dẫn chuyện ngoài khung hình, nhân vật giữ phong thái tự nhiên.';
       voiceNote.style.display = 'block';
     }
   }
@@ -6904,18 +6885,18 @@ function openShotDeskProjectVoiceModal() {
   modal.innerHTML = `
     <div class="modal-window" style="max-width:520px;">
       <div class="modal-header">
-        <div style="font-weight:700;font-size:15px;">🎙️ Cấu Hình Giọng Đọc & Khớp Môi Toàn Dự Án</div>
+        <div class="u-fw700 u-fs15">🎙️ Cấu Hình Giọng Đọc & Khớp Môi Toàn Dự Án</div>
         <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
       </div>
       <div class="modal-body">
-        <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px;">
+        <div class="u-fs125 u-c-muted u-mb12">
           Thiết lập giọng đọc mặc định và phong cách thoại cho dự án <b>${esc(p.title || p.id)}</b>.
         </div>
 
         <div class="form-row" id="sdProjVoiceRow">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="margin-bottom:0;">Giọng đọc mặc định (VieNeu / OmniVoice / Edge-TTS)</label>
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 6px;color:var(--accent);" onclick="testPlayVoice(document.getElementById('sdProjDefaultVoice').value)">🔊 Nghe thử</button>
+          <div class="fx fx-jc-sb fx-ac u-mb4">
+            <label class="u-mb0">Giọng đọc mặc định (VieNeu / OmniVoice / Edge-TTS)</label>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="testPlayVoice(document.getElementById('sdProjDefaultVoice').value)">🔊 Nghe thử</button>
           </div>
           <select id="sdProjDefaultVoice">
             ${voiceSelectHtml(defaultVoice)}
@@ -6931,12 +6912,12 @@ function openShotDeskProjectVoiceModal() {
           </select>
         </div>
 
-        <div class="form-row" style="background:rgba(56,189,248,0.06);border:1px solid rgba(56,189,248,0.25);border-radius:6px;padding:10px 12px;margin-top:10px;">
+        <div class="form-row" style="background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.25);border-radius:6px;padding:10px 12px;margin-top:10px;">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:0;font-size:12.5px;">
             <input type="checkbox" id="sdProjApplyAllShots" checked style="width:16px;height:16px;accent-color:var(--accent);">
-            <span style="font-weight:700;color:var(--accent);">Áp dụng ngay cho tất cả các Shot hiện có (${(p.shots || []).length} shots)</span>
+            <span class="u-fw700 u-c-accent">Áp dụng ngay cho tất cả các Shot hiện có (${(p.shots || []).length} shots)</span>
           </label>
-          <div style="font-size:11px;color:var(--muted);margin-top:4px;">
+          <div class="u-fs11 u-c-muted u-mt4">
             Đồng bộ giọng đọc và chế độ khớp môi cho toàn bộ các shot trong dự án.
           </div>
         </div>
@@ -7082,18 +7063,18 @@ function openHotkeysCheatSheetModal() {
   modal.id = 'sdHotkeysModalEl';
   modal.className = 'modal-backdrop';
   modal.innerHTML = `
-    <div class="modal" style="max-width:560px;background:rgba(13,20,36,0.96);backdrop-filter:blur(24px);border:1px solid rgba(56,189,248,0.3);box-shadow:0 24px 64px rgba(0,0,0,0.8);">
+    <div class="modal" style="max-width:560px;background:rgba(13,20,36,0.96);backdrop-filter:blur(24px);border:1px solid rgba(99,102,241,0.3);box-shadow:0 24px 64px rgba(0,0,0,0.8);">
       <div class="modal-header" style="border-bottom:1px solid var(--border);">
-        <div class="modal-title" style="display:flex;align-items:center;gap:8px;">
+        <div class="modal-title fx fx-ac fx-g8">
           <span>🎬</span> Bảng Phím Tắt Đạo Diễn (Director Hotkeys)
         </div>
         <button class="modal-close" onclick="this.closest('.modal-backdrop').remove()">✕</button>
       </div>
       <div class="modal-body" style="padding:16px 20px;">
-        <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+        <div class="u-fs12 u-c-muted u-mb14">
           Điều khiển duyệt cảnh và phê duyệt phim nhanh như DaVinci Resolve & Hollywood Suite:
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12.5px;">
+        <div class="gd gd-2 fx-g10 u-fs125">
           <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Phát / Dừng Video</span>
             <span class="sd-kbd">Space</span>
@@ -7352,7 +7333,7 @@ function applyShotDeskScrollFrameState() {
   if (btn && label && icon) {
     if (isShotDeskScrollFrameEnabled) {
       btn.style.color = 'var(--accent)';
-      btn.style.borderColor = 'rgba(56, 189, 248, 0.4)';
+      btn.style.borderColor = 'rgba(99, 102, 241, 0.4)';
       label.textContent = 'Khung Cuộn';
       icon.textContent = '🔒';
       btn.title = 'Đang bật khung cuộn cố định (Common settings ghim cố định ở trên). Bấm để chuyển sang Toàn Trang';
@@ -7765,7 +7746,7 @@ function renderAffiliateScenes(scenes) {
   const roleStyles = {
     'hook': { bg: 'linear-gradient(135deg, rgba(236,72,153,0.2) 0%, rgba(244,63,94,0.1) 100%)', border: 'rgba(236,72,153,0.4)', text: '#f43f5e', label: '🔥 CẢNH 1: HOOK 3S CHẶN LƯỚT' },
     'pain': { bg: 'linear-gradient(135deg, rgba(245,158,11,0.2) 0%, rgba(217,119,6,0.1) 100%)', border: 'rgba(245,158,11,0.4)', text: '#fbbf24', label: '😫 CẢNH 2: NỖI ĐAU KHÁCH HÀNG' },
-    'demo': { bg: 'linear-gradient(135deg, rgba(168,85,247,0.2) 0%, rgba(139,92,246,0.1) 100%)', border: 'rgba(168,85,247,0.4)', text: '#c084fc', label: '✨ CẢNH 3: TRÌNH DIỄN & GIẢI PHÁP' },
+    'demo': { bg: 'linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(139,92,246,0.1) 100%)', border: 'rgba(99,102,241,0.4)', text: '#a5b4fc', label: '✨ CẢNH 3: TRÌNH DIỄN & GIẢI PHÁP' },
     'proof': { bg: 'linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(5,150,105,0.1) 100%)', border: 'rgba(16,185,129,0.4)', text: '#34d399', label: '⭐ CẢNH 4: DEAL HỜI & ĐÁNH GIÁ' },
     'cta': { bg: 'linear-gradient(135deg, rgba(59,130,246,0.2) 0%, rgba(37,99,235,0.1) 100%)', border: 'rgba(59,130,246,0.4)', text: '#60a5fa', label: '👇 CẢNH 5: KÊU GỌI BẤM GIỎ HÀNG' },
   };
@@ -7779,28 +7760,28 @@ function renderAffiliateScenes(scenes) {
       <div class="card" id="affSceneCard_${idx}" style="background:var(--bg2);border:1px solid ${roleCfg.border};padding:12px;border-radius:var(--radius);margin-bottom:8px;">
         <!-- Card Header -->
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.06);">
-          <div style="display:flex;align-items:center;gap:8px;">
+          <div class="fx fx-ac fx-g8">
             <span style="font-weight:700;font-size:12px;color:${roleCfg.text};background:${roleCfg.bg};padding:3px 8px;border-radius:6px;border:1px solid ${roleCfg.border};">
               ${roleCfg.label}
             </span>
             ${imgBadge}
             ${s.badge ? `<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text);font-size:10px;">🏷️ ${s.badge}</span>` : ''}
           </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label style="font-size:11px;color:var(--muted);margin:0;">Thời lượng:</label>
+          <div class="fx fx-ac fx-g8">
+            <label class="u-fs11 u-c-muted u-m0">Thời lượng:</label>
             <input type="number" id="affSceneDur_${idx}" value="10" min="10" max="10" disabled title="Chuẩn 10 giây — đúng clip API 10s trả về, dùng trọn vẹn không cắt đuôi" style="width:48px;padding:2px 6px;text-align:center;font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);">
-            <span style="font-size:11px;color:var(--muted);">giây (chuẩn 10s)</span>
+            <span class="u-fs11 u-c-muted">giây (chuẩn 10s)</span>
             <button type="button" class="btn btn-ghost btn-xs" onclick="deleteAffiliateScene(${idx})" style="color:#ef4444;" title="Xóa cảnh này">✕</button>
           </div>
         </div>
 
         <!-- Voiceover Text -->
-        <div style="margin-bottom:8px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="font-size:11.5px;font-weight:600;color:var(--accent);margin:0;">
+        <div class="u-mb8">
+          <div class="fx fx-jc-sb fx-ac u-mb4">
+            <label class="u-fs115 u-fw600 u-c-accent u-m0">
               🎙️ Thoại Lồng Tiếng (Tiếng Việt):
             </label>
-            <button type="button" id="btnTestSceneVoice_${idx}" class="btn btn-ghost btn-xs" onclick="testAffiliateSceneVoice(${idx})" style="color:#38bdf8;padding:1px 6px;font-size:11px;">
+            <button type="button" id="btnTestSceneVoice_${idx}" class="btn btn-ghost btn-xs" onclick="testAffiliateSceneVoice(${idx})" style="color:#818cf8;padding:1px 6px;font-size:11px;">
               🔊 Nghe thử thoại
             </button>
           </div>
@@ -7808,7 +7789,7 @@ function renderAffiliateScenes(scenes) {
         </div>
 
         <!-- Prompt Video (English) -->
-        <div style="margin-bottom:6px;">
+        <div class="u-mb6">
           <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px;">
             🎥 Prompt Quay Video (Tiếng Anh thương mại 9:16):
           </label>
@@ -7816,8 +7797,8 @@ function renderAffiliateScenes(scenes) {
         </div>
 
         <!-- Scene Voice Override -->
-        <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
-          <label style="font-size:11px;color:var(--muted);margin:0;">Giọng cảnh này:</label>
+        <div class="fx fx-ac fx-g10 u-mt6">
+          <label class="u-fs11 u-c-muted u-m0">Giọng cảnh này:</label>
           <select id="affSceneVoice_${idx}" class="form-control" style="font-size:11px;padding:3px 6px;width:240px;">
             ${voiceOpts}
           </select>
@@ -8008,9 +7989,10 @@ function sendAffiliateToMainStudio() {
   }
 
   if (confirm("Thao tác này sẽ nạp 5 cảnh tiếp thị vào tab 'Tạo Phim Mới' với tỷ lệ 9:16. Bạn có muốn tiếp tục?")) {
-    // Đặt tên phim và tỷ lệ khung hình
-    const titleInput = document.getElementById('movieTitle');
-    const ratioSel = document.getElementById('aspectRatio');
+    // Đặt tên phim và tỷ lệ khung hình (id hien tai: projectTitle/globalAspectRatio;
+    // ban cu dung movieTitle/aspectRatio da khong con trong HTML -> doan nay chet lam)
+    const titleInput = document.getElementById('projectTitle');
+    const ratioSel = document.getElementById('globalAspectRatio');
     const voiceSel = document.getElementById('voiceSelect');
     if (titleInput) titleInput.value = window.affiliateCurrentScript.title || "Video_Tiep_Thi";
     if (ratioSel) ratioSel.value = document.getElementById('affiliateAspectRatio')?.value || '9:16';
