@@ -1742,6 +1742,21 @@ function updateMonitor(data, jobId) {
     document.getElementById('btnCancelJob').style.display = 'inline-flex';
   }
 
+  // Timing breakdown: thời gian từng giai đoạn (Render / Poll API / TTS / Ghép / Tổng)
+  const tCard = document.getElementById('timingCard');
+  const tBox = document.getElementById('timingBreakdown');
+  if (tCard && tBox) {
+    const t = data.timing || {};
+    const hasTiming = ['render_s', 'poll_s', 'tts_s', 'compose_s', 'total_s'].some(k => (t[k] || 0) > 0);
+    if (hasTiming) {
+      tCard.style.display = 'block';
+      const fmt = v => (v == null ? '0.0' : Number(v).toFixed(1)) + 's';
+      tBox.innerHTML = `<span>🎬 Render <b>${fmt(t.render_s)}</b></span><span>⏳ Poll API <b>${fmt(t.poll_s)}</b></span><span>🎙️ TTS <b>${fmt(t.tts_s)}</b></span><span>🎞️ Ghép <b>${fmt(t.compose_s)}</b></span><span>⏱️ Tổng <b>${fmt(t.total_s)}</b></span>`;
+    } else {
+      tCard.style.display = 'none';
+    }
+  }
+
   // Pre-Export Scene Audit Card: Hiển thị bảng kiểm định nếu có audit
   if (data.audit || data.status === 'audit_pending') {
     renderSceneAuditCard(data.audit, data, jobId);
