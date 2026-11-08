@@ -10,6 +10,7 @@ FastAPI backend:
 
 import asyncio
 import base64
+import copy
 import json
 import logging
 import os
@@ -953,6 +954,10 @@ async def create_movie(req: MovieRequest):
 
     job_id = uuid.uuid4().hex[:12]
     job = new_job(job_id, len(req.scenes), req=req)
+    # Snapshot nhân vật CỦA PHIM này vào job (để Monitor/job detail thấy được;
+    # save_job đã serialize req bằng model_dump nên snapshot list-dict lưu
+    # cùng job_state.json an toàn).
+    job["characters"] = copy.deepcopy(req.characters or [])
     if cm_checks is not None:
         job["consistency_mode"] = "max"
         job["consistency_checks"] = cm_checks["checks"]
@@ -2934,6 +2939,8 @@ class ProjectSaveRequest(BaseModel):
     script_text: str = Field(default="", max_length=100000)
     aspect_ratio: str = Field(default="16:9", max_length=10)
     voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=200)
+    voice_mode: str = Field(default="tts", max_length=20)
+    consistency_mode: str = Field(default="standard", max_length=20)
     export_mode: str = Field(default="full", max_length=20)
     chain_mode: str = Field(default="none", max_length=20)
     chain_fallback_mode: str = Field(default="independent", max_length=20)

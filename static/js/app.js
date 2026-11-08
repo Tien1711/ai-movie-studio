@@ -887,8 +887,66 @@ function clearAll() {
   renderScenes();
 }
 
+// ── Reset toàn bộ trạng thái phim (dùng chung cho "Phim mới" + nạp sample
+//    + nạp affiliate) ─────────────────────────────────────────────────────
+// Khác clearAll() (chỉ xóa cảnh): reset cả tiêu đề, kịch bản thô, style
+// locks (kể cả lockCharacter), giọng, nhạc, chain/transition, consistency
+// mode và danh sách nhân vật CỦA PHIM. Thư viện nhân vật toàn cục KHÔNG
+// bị đụng tới. Không hỏi xác nhận — hàm gọi phải tự hỏi trước nếu cần.
+function resetFilmState() {
+  const $ = (id) => document.getElementById(id);
+  scenes = [];
+  sceneIdCounter = 0;
+  filmCharacters = [];
+  if ($('projectTitle')) {
+    $('projectTitle').value = '';
+    $('projectTitle').dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  if ($('rawScriptInput')) $('rawScriptInput').value = '';
+  ['lockStyle', 'lockLighting', 'lockColor', 'lockCamera', 'lockCharacter'].forEach(id => {
+    if ($(id)) $(id).value = '';
+  });
+  if ($('voiceSelect')) $('voiceSelect').value = 'vi-VN-HoaiMyNeural';
+  if ($('voiceModeSelect')) $('voiceModeSelect').value = 'tts';
+  if ($('exportMode')) $('exportMode').value = 'full';
+  if ($('chainMode')) $('chainMode').value = 'none';
+  if ($('chainFallbackMode')) $('chainFallbackMode').value = 'independent';
+  if ($('subtitleMode')) $('subtitleMode').value = 'burn_in';
+  if ($('exportQuality')) $('exportQuality').value = '720p';
+  if ($('sceneTransition')) $('sceneTransition').value = 'none';
+  if ($('bgMusicSelect')) $('bgMusicSelect').value = '';
+  if ($('musicVolume')) { $('musicVolume').value = 0.25; if ($('lblMusicVol')) $('lblMusicVol').textContent = '25%'; }
+  if ($('voiceVolume')) { $('voiceVolume').value = 1.0; if ($('lblVoiceVol')) $('lblVoiceVol').textContent = '100%'; }
+  if ($('consistencyMax')) $('consistencyMax').checked = false;
+  if ($('globalAspectRatio')) applyGlobalAspectRatio('16:9', false);
+  renderScenes();
+  renderFilmCharacters();
+  if (typeof window.__showWizardStep === 'function') window.__showWizardStep(1);
+}
+
+function isFilmDirty() {
+  const $ = (id) => document.getElementById(id);
+  const lockSet = ['lockStyle', 'lockLighting', 'lockColor', 'lockCamera', 'lockCharacter']
+    .some(id => $(id) && $(id).value.trim() !== '');
+  return scenes.length > 0
+    || ($('projectTitle') && $('projectTitle').value.trim() !== '')
+    || ($('rawScriptInput') && $('rawScriptInput').value.trim() !== '')
+    || lockSet
+    || filmCharacters.length > 0;
+}
+
+function newFilm() {
+  if (isFilmDirty() && !confirm(
+      '🆕 Tạo phim mới sẽ xóa toàn bộ nội dung chưa lưu của phim hiện tại '
+      + '(tiêu đề, kịch bản, cảnh, khóa nhân vật, giọng, nhạc, chain...).\n'
+      + 'Thư viện nhân vật KHÔNG bị xóa.\nTiếp tục?')) return;
+  resetFilmState();
+  showPanel('create');
+  showToast('🆕 Đã tạo phim mới — nhân vật và khóa của phim cũ đã được gỡ.');
+}
+
 function loadDialogueSample() {
-  clearAll();
+  resetFilmState();
   document.getElementById('projectTitle').value = "Gặp Gỡ Định Mệnh";
   // Cảnh 1: Đối thoại 2 nhân vật Nam và Nữ
   addScene(
@@ -919,7 +977,7 @@ function loadDialogueSample() {
 }
 
 function loadTiktokSample() {
-  clearAll();
+  resetFilmState();
   document.getElementById('projectTitle').value = "Bí Ẩn Vũ Trụ Cyberpunk";
   document.getElementById('exportMode').value = "full";
   addScene(
@@ -941,7 +999,7 @@ function loadTiktokSample() {
 }
 
 function loadSampleStoryboard() {
-  clearAll();
+  resetFilmState();
   document.getElementById('projectTitle').value = "Huyền Thoại Kiếm Sĩ";
   const defRatio = document.getElementById('globalAspectRatio')?.value || cfg.aspectRatio || '16:9';
   const samples = [
@@ -955,7 +1013,7 @@ function loadSampleStoryboard() {
 }
 
 function loadOneMinuteSample() {
-  clearAll();
+  resetFilmState();
   document.getElementById('projectTitle').value = "Kẻ Du Hành Thời Gian 2099";
   const defRatio = document.getElementById('globalAspectRatio')?.value || cfg.aspectRatio || '16:9';
   const scenes60s = [
@@ -1189,7 +1247,7 @@ function detectCharacterVoice(characterName, contextText = "", registry = {}) {
 }
 
 function parseUniversalScript(text) {
-  clearAll();
+  resetFilmState();
   const globalPreset = document.getElementById('globalStylePreset')?.value.trim() || '';
   const globalRatio = document.getElementById('globalAspectRatio')?.value || cfg.aspectRatio || "16:9";
   const characterVoiceRegistry = {};
@@ -1384,7 +1442,7 @@ async function aiStandardizeScript() {
 }
 
 function parseProfessionalMarkdownScript(text) {
-  clearAll();
+  resetFilmState();
   const characterVoiceRegistry = {};
 
   // 1. Trích xuất Tiêu đề phim nếu có
@@ -1522,6 +1580,9 @@ function buildMoviePayload() {
       camera: document.getElementById('lockCamera')?.value || '',
       character: document.getElementById('lockCharacter')?.value || '',
     },
+    // Chỉ gửi nhân vật CỦA PHIM hiện tại — không gửi toàn bộ thư viện
+    // toàn cục (đó là nguyên nhân phim mới ăn nhân vật phim cũ).
+    characters: filmCharacters.map(c => JSON.parse(JSON.stringify(c))),
     scenes: scenes.map((s, i) => ({
       index: i + 1,
       prompt: s.prompt,
@@ -2498,6 +2559,100 @@ function esc(s) {
 let charactersList = [];
 let sceneInputTimer = null;
 
+// ── Nhân vật CỦA PHIM hiện tại (scope theo phim) ──────────────────────────
+// Thư viện charactersList (Hồ sơ nhân vật, file _characters.json toàn cục)
+// chỉ là nơi LƯU MẪU để chọn. Chỉ nhân vật đã GÁN vào filmCharacters mới
+// được áp cho phim này (tự động nhận diện, khóa ảnh/giọng, gửi kèm payload).
+// Mỗi entry là BẢN SAO chụp lúc gán (id/name/aliases/voice/avatar/
+// description/character_sheet) nên sửa/xóa trong thư viện không làm đổi
+// phim đã gán, và phim mới bắt đầu với danh sách rỗng.
+let filmCharacters = [];
+
+function filmCharacterSnapshot(c) {
+  if (!c) return null;
+  return {
+    id: c.id || '',
+    name: c.name || '',
+    aliases: Array.isArray(c.aliases) ? [...c.aliases] : [],
+    voice: c.voice || '',
+    avatar: c.avatar || '',
+    description: c.description || '',
+    character_sheet: c.character_sheet ? { ...c.character_sheet } : {},
+  };
+}
+
+function getFilmCharacterById(id) {
+  return filmCharacters.find(c => c.id === id) || null;
+}
+
+function renderFilmCharacters() {
+  const listEl = document.getElementById('filmCharactersList');
+  const countEl = document.getElementById('filmCharactersCount');
+  const selEl = document.getElementById('filmCharacterAddSelect');
+  if (countEl) countEl.textContent = `${filmCharacters.length} nhân vật`;
+  if (selEl) {
+    const available = (charactersList || []).filter(
+      c => !filmCharacters.some(f => f.id === c.id));
+    selEl.innerHTML = available.length === 0
+      ? `<option value="">— Hết nhân vật trong thư viện —</option>`
+      : `<option value="">— Chọn nhân vật trong thư viện —</option>` +
+        available.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+  }
+  if (!listEl) return;
+  if (filmCharacters.length === 0) {
+    listEl.innerHTML = `
+      <div style="text-align:center;padding:14px;color:var(--muted);background:var(--bg0);border-radius:8px;border:1px dashed var(--border);font-size:12px;">
+        Chưa gán nhân vật nào cho phim này — phim mới sẽ không ăn nhân vật phim cũ.
+      </div>`;
+    return;
+  }
+  listEl.innerHTML = filmCharacters.map(c => `
+    <div style="display:flex;gap:10px;align-items:center;background:var(--bg0);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;">
+      ${c.avatar
+        ? `<img loading="lazy" src="${esc(c.avatar)}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0;">`
+        : `<div style="width:36px;height:36px;border-radius:50%;background:var(--bg2);display:flex;align-items:center;justify-content:center;flex-shrink:0;">👤</div>`}
+      <div class="fx-f1">
+        <div class="u-fw700 u-fs13">${esc(c.name)}</div>
+        <div class="u-fs11 u-c-muted">🎙️ ${esc(c.voice || 'Mặc định')}${c.description ? ` • ${esc(c.description.slice(0, 60))}${c.description.length > 60 ? '…' : ''}` : ''}</div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" title="Đặt mô tả nhân vật này làm khóa chính (lockCharacter)" onclick="setFilmCharacterLock('${esc(c.id)}')">🔒 Khóa chính</button>
+      <button type="button" class="btn btn-ghost btn-sm u-c-red" title="Gỡ nhân vật khỏi phim này (không xóa thư viện)" onclick="removeFilmCharacter('${esc(c.id)}')">✕ Gỡ</button>
+    </div>`).join('');
+}
+
+function addFilmCharacter(charId) {
+  if (!charId) return false;
+  if (getFilmCharacterById(charId)) return false;
+  const snap = filmCharacterSnapshot(
+    (charactersList || []).find(c => c.id === charId));
+  if (!snap) return false;
+  filmCharacters.push(snap);
+  renderFilmCharacters();
+  return true;
+}
+
+function removeFilmCharacter(charId) {
+  const c = getFilmCharacterById(charId);
+  if (!c) return;
+  filmCharacters = filmCharacters.filter(f => f.id !== charId);
+  // Gỡ đúng nhân vật đang làm khóa chính thì xóa luôn lock để khỏi rò.
+  const lockEl = document.getElementById('lockCharacter');
+  if (lockEl && c.description && lockEl.value.trim() === c.description.trim()) {
+    lockEl.value = '';
+  }
+  renderFilmCharacters();
+}
+
+function setFilmCharacterLock(charId) {
+  const c = getFilmCharacterById(charId);
+  if (!c || !c.description) {
+    alert('Nhân vật này chưa có mô tả tạo hình để làm khóa.');
+    return;
+  }
+  document.getElementById('lockCharacter').value = c.description;
+  showToast(`🔒 Đã đặt "${c.name}" làm khóa nhân vật chính của phim`);
+}
+
 async function loadCharacters() {
   try {
     const res = await apiFetch('/api/characters');
@@ -2505,6 +2660,8 @@ async function loadCharacters() {
       charactersList = await res.json();
       renderCharacterGrid();
       populateCharVoiceDropdown();
+      // Vẽ lại mục "Nhân vật của phim" (danh sách chọn gán phụ thuộc thư viện).
+      if (typeof renderFilmCharacters === 'function') renderFilmCharacters();
     }
   } catch (e) {
     console.warn("Could not load characters:", e);
@@ -2748,7 +2905,10 @@ async function deleteCharacter(charId) {
 }
 
 function linkCharacterToAllMatchingScenes(charId) {
-  const c = charactersList.find(ch => ch.id === charId);
+  // Nút "Đồng bộ vào cảnh" ở panel thư viện: gán nhân vật vào PHIM TRƯỚC
+  // rồi mới đồng bộ — nếu không sẽ rò nhân vật thư viện sang phim hiện tại.
+  addFilmCharacter(charId);
+  const c = getFilmCharacterById(charId);
   if (!c) return;
 
   syncScenesFromDOM();
@@ -2775,7 +2935,10 @@ function linkCharacterToAllMatchingScenes(charId) {
 
 // ── Real-time Scene Matching Logic ──────────────────────────────────────
 function detectCharactersInScene(scene) {
-  if (!charactersList || charactersList.length === 0) return null;
+  // CHỈ nhận diện trong nhân vật CỦA PHIM (filmCharacters), không quét thư
+  // viện toàn cục — nếu không cảnh phim mới nhắc tên trùng sẽ tự ăn avatar
+  // + giọng của nhân vật phim cũ.
+  if (!filmCharacters || filmCharacters.length === 0) return null;
 
   let segText = '';
   if (scene.voiceSegments && scene.voiceSegments.length > 0) {
@@ -2784,7 +2947,7 @@ function detectCharactersInScene(scene) {
   const fullText = `${scene.title || ''} ${scene.prompt || ''} ${scene.voiceover || ''} ${segText}`.toLowerCase();
   if (!fullText.trim()) return null;
 
-  const sorted = [...charactersList].sort((a, b) => {
+  const sorted = [...filmCharacters].sort((a, b) => {
     const maxA = Math.max(a.name.length, ...(a.aliases || []).map(al => al.length));
     const maxB = Math.max(b.name.length, ...(b.aliases || []).map(al => al.length));
     return maxB - maxA;
@@ -2822,7 +2985,9 @@ function autoLinkCharacterToScene(scene) {
 function applyCharToScene(sceneId, charId, mode) {
   syncScenesFromDOM();
   const s = scenes.find(sc => sc.id === sceneId);
-  const ch = charactersList.find(c => c.id === charId);
+  // Chỉ áp nhân vật CỦA PHIM (banner nhận diện giờ cũng chỉ hiện nhân
+  // vật của phim, nên lookup này không bao giờ chạm thư viện toàn cục).
+  const ch = getFilmCharacterById(charId);
   if (!s || !ch) return;
 
   if (mode === 'image' || mode === 'all') {
@@ -2941,7 +3106,7 @@ function onSceneContentInput(sceneId) {
 function applyCharSheetAngle(sceneId, charId, angle) {
   syncScenesFromDOM();
   const s = scenes.find(sc => sc.id === sceneId);
-  const ch = charactersList.find(c => c.id === charId);
+  const ch = getFilmCharacterById(charId);
   if (!s || !ch) return;
 
   s.sheet_angle = angle;
@@ -3722,6 +3887,7 @@ async function saveCurrentProject() {
     aspect_ratio: document.getElementById('globalAspectRatio')?.value || '16:9',
     voice: document.getElementById('voiceSelect')?.value || 'vi-VN-HoaiMyNeural',
     voice_mode: document.getElementById('voiceModeSelect')?.value || 'tts',
+    consistency_mode: document.getElementById('consistencyMax')?.checked ? 'max' : 'standard',
     export_mode: document.getElementById('exportMode')?.value || 'full',
     chain_mode: document.getElementById('chainMode')?.value || 'none',
     chain_fallback_mode: document.getElementById('chainFallbackMode')?.value || 'independent',
@@ -3732,7 +3898,10 @@ async function saveCurrentProject() {
     music_volume: parseFloat(document.getElementById('musicVolume')?.value || '0.25'),
     voice_volume: parseFloat(document.getElementById('voiceVolume')?.value || '1.0'),
     scenes: scenes,
-    characters: (typeof CHARACTERS !== 'undefined') ? CHARACTERS : [],
+    // Nhân vật CỦA PHIM hiện tại (bản sao). Trước đây chỗ này gửi biến
+    // CHARACTERS vốn không tồn tại -> luôn lưu [] nên mở lại project
+    // không bao giờ khôi phục được nhân vật.
+    characters: filmCharacters.map(c => JSON.parse(JSON.stringify(c))),
     style_locks: {
       style: document.getElementById('lockStyle')?.value || '',
       lighting: document.getElementById('lockLighting')?.value || '',
@@ -3811,58 +3980,96 @@ async function openProjectsModal() {
   }
 }
 
+// ── Khôi phục project: GHI ĐÈ TOÀN BỘ trạng thái phim ─────────────────────
+// Quy tắc chống rò rỉ: mọi field đều được set dứt khoát (thiếu -> giá trị
+// mặc định/rỗng), KHÔNG còn kiểu "chỉ ghi đè khi project có giá trị đó"
+// (kiểu cũ làm lockCharacter/giọng/ảnh tham chiếu của phim trước nằm nguyên
+// khi mở project không có nhân vật).
+// Dùng chung cho loadProjectByName (mở từ server) và importProjectJson
+// (mở file JSON local) để hai đường mở project luôn giống nhau.
+function applyProjectData(data) {
+  const $ = (id) => document.getElementById(id);
+  const setVal = (id, v, def = '') => { const el = $(id); if (el) el.value = (v ?? def); };
+  const setNum = (id, v, def, labelId) => {
+    const el = $(id);
+    if (!el) return;
+    const n = (v === undefined || v === null) ? def : v;
+    el.value = n;
+    const lb = labelId ? $(labelId) : null;
+    if (lb) lb.textContent = Math.round(n * 100) + '%';
+  };
+
+  setVal('projectTitle', data.title, '');
+  // Đổi tiêu đề cũng cập nhật chip tên trên topbar (input event).
+  $('projectTitle')?.dispatchEvent(new Event('input', { bubbles: true }));
+  if (data.aspect_ratio) applyGlobalAspectRatio(data.aspect_ratio, false);
+  else applyGlobalAspectRatio('16:9', false);
+  setVal('voiceSelect', data.voice, 'vi-VN-HoaiMyNeural');
+  setVal('voiceModeSelect', data.voice_mode, 'tts');
+  setVal('exportMode', data.export_mode, 'full');
+  setVal('chainMode', data.chain_mode, 'none');
+  setVal('chainFallbackMode', data.chain_fallback_mode, 'independent');
+  setVal('subtitleMode', data.subtitle_mode, 'burn_in');
+  setVal('exportQuality', data.quality, '720p');
+  setVal('sceneTransition', data.transition, 'none');
+  setVal('bgMusicSelect', data.bg_music_path, '');
+  setNum('musicVolume', data.music_volume, 0.25, 'lblMusicVol');
+  setNum('voiceVolume', data.voice_volume, 1.0, 'lblVoiceVol');
+  if (data.script_text !== undefined) setVal('rawScriptInput', data.script_text, '');
+
+  // Style locks: set cả 5 khóa, thiếu -> rỗng (không để lock phim cũ sót).
+  const locks = data.style_locks || {};
+  const lockIds = { style: 'lockStyle', lighting: 'lockLighting', color: 'lockColor', camera: 'lockCamera', character: 'lockCharacter' };
+  Object.entries(lockIds).forEach(([k, id]) => setVal(id, locks[k], ''));
+  const cm = $('consistencyMax');
+  if (cm) cm.checked = (data.consistency_mode === 'max');
+
+  // Nhân vật CỦA PHIM: khôi phục đúng danh sách đã lưu; phim không có
+  // nhân vật -> rỗng (không giữ nhân vật phim trước).
+  if (Array.isArray(data.characters) && data.characters.length > 0) {
+    filmCharacters = data.characters.map(filmCharacterSnapshot).filter(Boolean);
+  } else if (locks.character) {
+    // Project cũ (lưu trước bản scope này): chỉ có lock text, không có mảng
+    // characters -> giữ lock hoạt động bằng 1 entry legacy để mở lại vẫn
+    // thấy nhân vật khóa của nó, không tự sinh nhân vật mới.
+    filmCharacters = [{
+      id: 'legacy', name: 'Nhân vật khóa', aliases: [],
+      voice: data.voice || '', avatar: '',
+      description: locks.character, character_sheet: {},
+    }];
+  } else {
+    filmCharacters = [];
+  }
+  renderFilmCharacters();
+
+  // Cảnh: rebuild hoàn toàn (đã gồm reference_image/voice_segments riêng).
+  if (Array.isArray(data.scenes)) {
+    scenes = data.scenes.map((s, idx) => ({
+      id: ++sceneIdCounter,
+      title: s.title || `Cảnh ${idx + 1}`,
+      prompt: s.prompt || '',
+      voiceover: s.voiceover || '',
+      voice: s.voice || '',
+      duration: s.duration || 5,
+      size: s.size || data.aspect_ratio || '16:9',
+      reference_image: s.reference_image || '',
+      reference_image_name: s.reference_image_name || '',
+      chain_from_previous: !!s.chain_from_previous,
+      sheet_angle: s.sheet_angle || 'front',
+      voiceMode: (s.voice_segments && s.voice_segments.length > 0) ? 'multi' : 'single',
+      voiceSegments: s.voice_segments || [],
+    }));
+    renderScenes();
+  }
+}
+
 async function loadProjectByName(name) {
   try {
     const res = await apiFetch(`/api/projects/${encodeURIComponent(name)}`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 
-    if (data.title) document.getElementById('projectTitle').value = data.title;
-    if (data.aspect_ratio) applyGlobalAspectRatio(data.aspect_ratio, false);
-    if (data.voice) document.getElementById('voiceSelect').value = data.voice;
-    if (data.export_mode) document.getElementById('exportMode').value = data.export_mode;
-    if (data.chain_mode) document.getElementById('chainMode').value = data.chain_mode;
-    if (data.chain_fallback_mode && document.getElementById('chainFallbackMode')) document.getElementById('chainFallbackMode').value = data.chain_fallback_mode;
-    if (data.subtitle_mode && document.getElementById('subtitleMode')) document.getElementById('subtitleMode').value = data.subtitle_mode;
-    if (data.quality && document.getElementById('exportQuality')) document.getElementById('exportQuality').value = data.quality;
-    if (data.transition && document.getElementById('sceneTransition')) document.getElementById('sceneTransition').value = data.transition;
-    if (data.bg_music_path && document.getElementById('bgMusicSelect')) document.getElementById('bgMusicSelect').value = data.bg_music_path;
-    if (data.music_volume !== undefined && document.getElementById('musicVolume')) {
-      document.getElementById('musicVolume').value = data.music_volume;
-      document.getElementById('lblMusicVol').textContent = Math.round(data.music_volume * 100) + '%';
-    }
-    if (data.voice_volume !== undefined && document.getElementById('voiceVolume')) {
-      document.getElementById('voiceVolume').value = data.voice_volume;
-      document.getElementById('lblVoiceVol').textContent = Math.round(data.voice_volume * 100) + '%';
-    }
-
-    if (data.style_locks) {
-      if (data.style_locks.style && document.getElementById('lockStyle')) document.getElementById('lockStyle').value = data.style_locks.style;
-      if (data.style_locks.lighting && document.getElementById('lockLighting')) document.getElementById('lockLighting').value = data.style_locks.lighting;
-      if (data.style_locks.color && document.getElementById('lockColor')) document.getElementById('lockColor').value = data.style_locks.color;
-      if (data.style_locks.camera && document.getElementById('lockCamera')) document.getElementById('lockCamera').value = data.style_locks.camera;
-      if (data.style_locks.character && document.getElementById('lockCharacter')) document.getElementById('lockCharacter').value = data.style_locks.character;
-    }
-
-    if (Array.isArray(data.scenes)) {
-      scenes = data.scenes.map((s, idx) => ({
-        id: ++sceneIdCounter,
-        title: s.title || `Cảnh ${idx + 1}`,
-        prompt: s.prompt || '',
-        voiceover: s.voiceover || '',
-        voice: s.voice || '',
-        duration: s.duration || 5,
-        size: s.size || data.aspect_ratio || '16:9',
-        reference_image: s.reference_image || '',
-        reference_image_name: s.reference_image_name || '',
-        chain_from_previous: !!s.chain_from_previous,
-        sheet_angle: s.sheet_angle || 'front',
-        voiceMode: (s.voice_segments && s.voice_segments.length > 0) ? 'multi' : 'single',
-        voiceSegments: s.voice_segments || [],
-      }));
-      renderScenes();
-    }
-
+    applyProjectData(data);
     showPanel('create');
     alert(`🎉 Đã mở thành công Project "${name}" với ${scenes.length} cảnh!`);
   } catch (e) {
@@ -3889,6 +4096,7 @@ function exportProjectJson() {
   syncScenesFromDOM();
   const payload = {
     title: document.getElementById('projectTitle')?.value || '',
+    script_text: document.getElementById('rawScriptInput')?.value || '',
     aspect_ratio: document.getElementById('globalAspectRatio')?.value || '16:9',
     voice: document.getElementById('voiceSelect')?.value || 'vi-VN-HoaiMyNeural',
     voice_mode: document.getElementById('voiceModeSelect')?.value || 'tts',
@@ -3902,6 +4110,7 @@ function exportProjectJson() {
     music_volume: parseFloat(document.getElementById('musicVolume')?.value || '0.25'),
     voice_volume: parseFloat(document.getElementById('voiceVolume')?.value || '1.0'),
     scenes: scenes,
+    characters: filmCharacters.map(c => JSON.parse(JSON.stringify(c))),
     style_locks: {
       style: document.getElementById('lockStyle')?.value || '',
       lighting: document.getElementById('lockLighting')?.value || '',
@@ -3931,40 +4140,9 @@ function importProjectJson() {
     reader.onload = (re) => {
       try {
         const data = JSON.parse(re.target.result);
-        if (data.title) document.getElementById('projectTitle').value = data.title;
-        if (data.aspect_ratio) applyGlobalAspectRatio(data.aspect_ratio, false);
-        if (data.voice) document.getElementById('voiceSelect').value = data.voice;
-        if (data.export_mode) document.getElementById('exportMode').value = data.export_mode;
-        if (data.chain_mode) document.getElementById('chainMode').value = data.chain_mode;
-        if (data.chain_fallback_mode && document.getElementById('chainFallbackMode')) document.getElementById('chainFallbackMode').value = data.chain_fallback_mode;
-        if (data.subtitle_mode && document.getElementById('subtitleMode')) document.getElementById('subtitleMode').value = data.subtitle_mode;
-        if (data.quality && document.getElementById('exportQuality')) document.getElementById('exportQuality').value = data.quality;
-        if (data.transition && document.getElementById('sceneTransition')) document.getElementById('sceneTransition').value = data.transition;
-        if (data.style_locks) {
-          if (data.style_locks.style && document.getElementById('lockStyle')) document.getElementById('lockStyle').value = data.style_locks.style;
-          if (data.style_locks.lighting && document.getElementById('lockLighting')) document.getElementById('lockLighting').value = data.style_locks.lighting;
-          if (data.style_locks.color && document.getElementById('lockColor')) document.getElementById('lockColor').value = data.style_locks.color;
-          if (data.style_locks.camera && document.getElementById('lockCamera')) document.getElementById('lockCamera').value = data.style_locks.camera;
-          if (data.style_locks.character && document.getElementById('lockCharacter')) document.getElementById('lockCharacter').value = data.style_locks.character;
-        }
-        if (Array.isArray(data.scenes)) {
-          scenes = data.scenes.map((s, idx) => ({
-            id: ++sceneIdCounter,
-            title: s.title || `Cảnh ${idx + 1}`,
-            prompt: s.prompt || '',
-            voiceover: s.voiceover || '',
-            voice: s.voice || '',
-            duration: s.duration || 5,
-            size: s.size || data.aspect_ratio || '16:9',
-            reference_image: s.reference_image || '',
-            reference_image_name: s.reference_image_name || '',
-            chain_from_previous: !!s.chain_from_previous,
-            sheet_angle: s.sheet_angle || 'front',
-            voiceMode: (s.voice_segments && s.voice_segments.length > 0) ? 'multi' : 'single',
-            voiceSegments: s.voice_segments || [],
-          }));
-          renderScenes();
-        }
+        // Cùng đường khôi phục toàn bộ như loadProjectByName (không còn
+        // kiểu chỉ ghi đè khi có giá trị -> rò lock/nhân vật phim trước).
+        applyProjectData(data);
         alert(`🎉 Đã nhập thành công dự án với ${scenes.length} cảnh!`);
       } catch (err) {
         alert(`Lỗi đọc file JSON: ${err.message}`);
@@ -8004,6 +8182,9 @@ function sendAffiliateToMainStudio() {
   }
 
   if (confirm("Thao tác này sẽ nạp 5 cảnh tiếp thị vào tab 'Tạo Phim Mới' với tỷ lệ 9:16. Bạn có muốn tiếp tục?")) {
+    // Nạp affiliate = bắt đầu một phim mới: reset sạch trạng thái phim
+    // hiện tại (khóa nhân vật/giọng/nhạc/chain...) để khỏi rò sang.
+    if (typeof resetFilmState === 'function') resetFilmState();
     // Đặt tên phim và tỷ lệ khung hình (id hien tai: projectTitle/globalAspectRatio;
     // ban cu dung movieTitle/aspectRatio da khong con trong HTML -> doan nay chet lam)
     const titleInput = document.getElementById('projectTitle');
@@ -8046,4 +8227,6 @@ window.addEventListener('DOMContentLoaded', () => {
   initDirectorHotkeys();
   updateViewModeButtons();
   applyShotDeskScrollFrameState();
+  // Vẽ mục "Nhân vật của phim" ngay cả khi thư viện chưa tải xong.
+  if (typeof renderFilmCharacters === 'function') renderFilmCharacters();
 });
