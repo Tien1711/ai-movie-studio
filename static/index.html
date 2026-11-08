@@ -99,6 +99,7 @@
           <div class="panel-sub">3 bước: Thông tin phim → Danh sách cảnh → Sản xuất &nbsp;·&nbsp; Phím tắt: <span class="kbd">Ctrl</span>+<span class="kbd">Enter</span> sản xuất, <span class="kbd">Alt</span>+<span class="kbd">C</span>/<span class="kbd">A</span>/<span class="kbd">K</span>/… chuyển mục</div>
         </div>
         <div class="panel-head-actions">
+          <button type="button" class="btn btn-ghost btn-sm" id="btnNewFilm" onclick="newFilm()" title="Tạo phim mới: xóa sạch tiêu đề, kịch bản, cảnh, khóa nhân vật, giọng, nhạc của phim hiện tại (thư viện nhân vật không bị xóa)">🆕 Phim mới</button>
           <button type="button" class="btn btn-ghost btn-sm" onclick="saveCurrentProject()" title="Lưu toàn bộ kịch bản, cảnh, nhân vật, prompt vào dự án">💾 Lưu Project</button>
           <button type="button" class="btn btn-ghost btn-sm" onclick="openProjectsModal()" title="Mở lại các dự án đã lưu trước đây">📂 Mở Project</button>
         </div>
@@ -202,6 +203,19 @@
             </div>
           </div>
         </div></div></details>
+        <!-- Nhân vật CỦA PHIM này (scope theo phim, khác thư viện toàn cục) -->
+        <div class="u-mt12" id="filmCharactersSection">
+          <div class="u-row-between">
+            <label class="u-mb0 u-c-accent u-fw700">👥 Nhân vật của phim này</label>
+            <span class="u-muted-sm" id="filmCharactersCount">0 nhân vật</span>
+          </div>
+          <div class="u-fs11 u-c-muted u-mt2">Chỉ nhân vật đã gán ở đây mới được dùng cho phim này (tự động nhận diện, khóa ảnh/giọng, gửi kèm khi sản xuất). Hồ sơ nhân vật là thư viện mẫu chung — gán vào phim mới dùng; gỡ khỏi phim không xóa thư viện.</div>
+          <div id="filmCharactersList" class="u-mt8"></div>
+          <div class="fx fx-g6 u-mt8">
+            <select id="filmCharacterAddSelect" class="fx-f1"></select>
+            <button type="button" class="btn btn-primary btn-sm" onclick="addFilmCharacter(document.getElementById('filmCharacterAddSelect').value); renderFilmCharacters();">➕ Gán vào phim</button>
+          </div>
+        </div>
         <div class="u-mt12">
           <div>
             <div class="u-row-between">
