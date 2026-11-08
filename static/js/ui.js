@@ -774,3 +774,138 @@
   })();
 
 })();
+
+/* ── Consistency Max — Đồng nhất tối đa (2026-11-07) ───────────────────────
+   Toggle trong panel Tạo phim + nút "Kiểm tra đồng nhất" + modal báo cáo.
+   Nạp sau app.js (defer). Chỉ thêm tính năng UI, không đổi id/ham/endpoint:
+   - Toggle tự BẬT khi phim có từ 6 cảnh trở lên (người dùng vẫn tắt tay;
+     khi đã tắt/bật tay thì không tự đổi nữa).
+   - Preflight gọi POST /api/consistency-check qua apiFetch (tự gắn key).
+   - startMovieCreation (app.js) gọi runConsistencyPreflight trước khi
+     POST /api/movies; server vẫn kiểm tra lại và trả 422 nếu có lỗi. */
+(function () {
+  'use strict';
+  const $ = (s, r) => (r || document).querySelector(s);
+  const esc = (v) => String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  const CM_MIN_SCENES_AUTO_ON = 6;
+
+  function cmCheckbox() { return $('#consistencyMax'); }
+
+  function syncConsistencyMaxToggle() {
+    const box = cmCheckbox();
+    if (!box) return;
+    if (window.__cmManual) return; // user đã bật/tắt tay -> tôn trọng lựa chọn
+    const count = (typeof window.scenes !== 'undefined' && Array.isArray(window.scenes))
+      ? window.scenes.length : 0;
+    box.checked = count >= CM_MIN_SCENES_AUTO_ON;
+  }
+
+  // Đồng bộ toggle mỗi khi danh sách cảnh render lại (renderScenes ở app.js).
+  if (typeof window.renderScenes === 'function' && !window.__cmRenderWrapped) {
+    window.__cmRenderWrapped = true;
+    const _origRenderScenes = window.renderScenes;
+    window.renderScenes = function () {
+      const r = _origRenderScenes.apply(this, arguments);
+      try { syncConsistencyMaxToggle(); } catch (e) { /* bỏ qua */ }
+      return r;
+    };
+  }
+  cmCheckbox()?.addEventListener('change', () => { window.__cmManual = true; });
+  // Đồng bộ lần đầu khi UI nạp xong (scenes có thể đã load từ project).
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', syncConsistencyMaxToggle);
+  } else {
+    syncConsistencyMaxToggle();
+  }
+
+  async function runConsistencyPreflight(payload) {
+    const doFetch = (typeof window.apiFetch === 'function') ? window.apiFetch : window.fetch.bind(window);
+    const res = await doFetch('/api/consistency-check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return await res.json();
+  }
+
+  function checkLevelIcon(level) {
+    return level === 'error' ? '🔴' : level === 'warning' ? '🟡' : '🔵';
+  }
+
+  function showConsistencyReport(result, opts) {
+    opts = opts || {};
+    const checks = (result && result.checks) || [];
+    const errors = (result && result.errors) || 0;
+    const warnings = (result && result.warnings) || 0;
+    const passed = result ? !!result.passed : false;
+    const old = $('#consistencyModal');
+    if (old) old.remove();
+    const modal = document.createElement('div');
+    modal.id = 'consistencyModal';
+    modal.className = 'modal-backdrop';
+    const rows = checks.length ? checks.map((c) => `
+      <div class="cm-check cm-${esc(c.level || 'info')}">
+        <div class="cm-check-head">${checkLevelIcon(c.level)} <b>[${esc(c.code || '')}]</b>
+          ${c.scene_index ? `<span class="cm-scene">Cảnh ${esc(c.scene_index)}</span>` : ''}</div>
+        <div>${esc(c.message || '')}</div>
+        ${c.suggestion ? `<div class="cm-suggest">💡 ${esc(c.suggestion)}</div>` : ''}
+      </div>`).join('') : '<div class="cm-check cm-info">Không có gì để kiểm tra.</div>';
+    modal.innerHTML = `
+      <div class="modal-window" style="max-width:640px;">
+        <div class="modal-header">
+          <div class="modal-title">🎯 Báo cáo đồng nhất — ${passed ? '✅ Đạt' : '⛔ Chưa đạt'}</div>
+          <button class="btn btn-ghost btn-sm" data-cm-close>✕ Đóng</button>
+        </div>
+        <div class="modal-body">
+          <div class="cm-summary">${errors} lỗi &nbsp;•&nbsp; ${warnings} cảnh báo &nbsp;•&nbsp; ${checks.length} mục kiểm tra</div>
+          ${rows}
+          ${!passed ? '<div class="cm-note">Sửa các mục lỗi đỏ rồi bấm Sản xuất lại. Tool không tự sửa prompt/thoại của bạn.</div>' : ''}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" data-cm-chars>👥 Mở Hồ sơ nhân vật</button>
+          ${opts.allowProceed && !errors && typeof opts.onProceed === 'function'
+            ? '<button class="btn btn-primary" data-cm-proceed>🚀 Vẫn sản xuất</button>' : ''}
+          <button class="btn btn-ghost" data-cm-close>Đóng</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal || e.target.closest('[data-cm-close]')) close();
+      if (e.target.closest('[data-cm-chars]')) {
+        close();
+        if (typeof window.showPanel === 'function') window.showPanel('characters');
+      }
+      if (e.target.closest('[data-cm-proceed]')) {
+        close();
+        if (typeof opts.onProceed === 'function') opts.onProceed();
+      }
+    });
+  }
+
+  async function checkConsistencyFromForm() {
+    if (typeof window.buildMoviePayload !== 'function') {
+      alert('Chưa tải xong form Tạo phim, thử lại sau giây lát.');
+      return null;
+    }
+    if (typeof window.syncScenesFromDOM === 'function') window.syncScenesFromDOM();
+    const payload = window.buildMoviePayload();
+    payload.consistency_mode = 'max'; // nút kiểm tra luôn kiểm tra theo chuẩn max
+    try {
+      const result = await runConsistencyPreflight(payload);
+      showConsistencyReport(result, { allowProceed: false });
+      return result;
+    } catch (e) {
+      alert('Không kiểm tra được: ' + (e && e.message ? e.message : e));
+      return null;
+    }
+  }
+
+  window.runConsistencyPreflight = runConsistencyPreflight;
+  window.checkConsistencyFromForm = checkConsistencyFromForm;
+  window.showConsistencyReport = showConsistencyReport;
+  window.syncConsistencyMaxToggle = syncConsistencyMaxToggle;
+})();

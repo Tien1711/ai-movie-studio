@@ -185,3 +185,10 @@ can kiem tra thu cong theo checklist tren truoc khi dua len production.
   video cuối, card video affiliate nổi bật ở đầu panel affiliate và Batch Matrix
   (panel Monitor) tự thu gọn thành dải tiến độ compact (pill ✅/❌/▶️/⌛ từng cảnh),
   bấm "Mở rộng" để xem lại từng cảnh; job mới bắt đầu thì mở lại đầy đủ.
+## Đồng nhất tối đa (Consistency Max, 2026-11-07)
+
+- Toggle "🎯 Đồng nhất tối đa" trong panel Tạo phim (cạnh mục Chaining): tự BẬT khi phim có từ 6 cảnh trở lên, vẫn tắt được bằng tay (sau khi bật/tắt tay thì không tự đổi nữa).
+- Khi bật: `POST /api/movies` chạy preflight (`consistency.py`) trước khi tạo job — có lỗi thì trả 422 kèm danh sách check, không tạo job; chỉ cảnh báo thì vẫn tạo job và ép `chain_mode="sequential"` (ghi log rõ đã override). Nút "🔍 Kiểm tra đồng nhất" gọi `POST /api/consistency-check` (không tạo job) và hiện báo cáo trong modal (lỗi đỏ, cảnh báo vàng, gợi ý); nút "Mở Hồ sơ nhân vật" nhảy sang panel Characters để sửa lock. Tool không tự sửa prompt/thoại của user.
+- Endpoint `POST /api/jobs/{job_id}/consistency-check` kiểm tra lại req đã lưu của 1 job.
+- Neo lại nhân vật: trong chuỗi sequential, cứ mỗi 8 scene (mốc 8/16/24...) thì dùng ảnh keyframe/character reference thay cho Last Frame để reset drift (`CONSISTENCY_ANCHOR_EVERY = 8` trong `consistency.py`); scene không có ảnh neo thì giữ nguyên Last Frame.
+- Giới hạn: phát hiện shot cầu nối chỉ là heuristic từ khóa thời gian/địa điểm (sáng/trưa/chiều/tối/đêm, trong nhà/ngoài trời, danh từ địa điểm), chưa hiểu ngữ nghĩa sâu nên có thể báo thừa/thiếu — chỉ dùng làm gợi ý.

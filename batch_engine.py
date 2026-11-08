@@ -33,6 +33,11 @@ FFMPEG_TIMEOUT = 120                            # timeout mặc định cho mỗ
 CHAIN_WAIT_TIMEOUT = 600.0                      # chờ cảnh trước trong chaining tối đa 600s
 TRANSIENT_HTTP_STATUSES = {408, 429, 502, 503, 504}
 
+# Neo lại nhân vật trong chuỗi sequential: lỗi nhỏ tích lũy theo chuỗi nên
+# cứ mỗi N scene thì dùng ảnh nhân vật/keyframe thay cho prev_last_frame
+# để reset drift (consistency.py — chế độ Đồng nhất tối đa).
+from consistency import CONSISTENCY_ANCHOR_EVERY, consistency_anchor_reference  # noqa: E402
+
 # Cache duration theo (path, mtime, size) — tránh spawn ffmpeg lặp lại (§3.5).
 _DURATION_CACHE: Dict[Tuple[str, float, int], float] = {}
 _DURATION_CACHE_MAX = 512
@@ -1286,7 +1291,21 @@ async def run_batch(
                         prev_last_frame = s["last_frame_path"]
                     continue
 
-                if prev_last_frame:
+                # Neo lại nhân vật định kỳ (Đồng nhất tối đa): cứ mỗi
+                # CONSISTENCY_ANCHOR_EVERY scene thì ưu tiên ảnh nhân vật /
+                # keyframe của chính scene đó thay cho prev_last_frame để
+                # reset drift tích lũy. Không có ảnh neo thì giữ nguyên
+                # Last Frame (không crash, không đổi hành vi).
+                anchor_ref = None
+                if idx > 1 and idx % CONSISTENCY_ANCHOR_EVERY == 0:
+                    anchor_ref = consistency_anchor_reference(s)
+                if anchor_ref:
+                    s["reference_image"] = anchor_ref
+                    if progress_cb:
+                        progress_cb(idx, f"🎯 Neo lại nhân vật Cảnh {idx} "
+                                         f"(anchor mỗi {CONSISTENCY_ANCHOR_EVERY} cảnh) "
+                                         f"➔ Dùng ảnh nhân vật/keyframe thay Last Frame...")
+                elif prev_last_frame:
                     s["reference_image"] = prev_last_frame
                     if progress_cb:
                         progress_cb(idx, f"🔗 Khóa Last Frame Cảnh {idx-1} ➔ Đang đặt làm First Frame...")

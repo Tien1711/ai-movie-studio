@@ -338,6 +338,22 @@
             </button>
           </div>
         </div>
+
+        <div class="form-row" style="margin-top:12px;background:rgba(56,189,248,0.05);padding:10px;border-radius:6px;border:1px solid rgba(56,189,248,0.3);">
+          <div>
+            <label class="cm-toggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:700;color:var(--accent);">
+              <input type="checkbox" id="consistencyMax" style="width:16px;height:16px;accent-color:var(--accent);">
+              🎯 Đồng nhất tối đa (khuyên dùng cho phim dài)
+            </label>
+            <div style="font-size:11px;color:var(--muted);margin-top:3px;">
+              Ép nối tiếp Last Frame + kiểm tra khóa nhân vật, shot cầu nối, thời lượng trước khi sản xuất.
+              Tự bật khi phim có từ 6 cảnh trở lên — vẫn tắt được bằng tay.
+            </div>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:8px;">
+            <button type="button" class="btn btn-ghost btn-sm" id="btnConsistencyCheck" onclick="checkConsistencyFromForm()" title="Kiểm tra khóa nhân vật, cầu nối, thời lượng mà không tạo job">🔍 Kiểm tra đồng nhất</button>
+          </div>
+        </div>
         </div> <!-- /#createCommonSettingsBody -->
       </div>
 

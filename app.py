@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from batch_engine import run_batch, generate_keyframe_image, heal_prompt_with_ai, apply_style_locks, sanitize_prompt_heuristics
 from composer import compose_full_movie, audit_movie_scenes, compose_scene_video
+from consistency import run_consistency_checks
 from tts_manager import list_all_voices, synthesize_voice, VIENEU_VOICES_CONFIG, OMNIVOICE_VOICES_CONFIG
 from affiliate_engine import (
     AFFILIATE_CATEGORIES,
@@ -382,6 +383,10 @@ class MovieRequest(BaseModel):
     max_concurrent: Optional[int] = Field(default=12, ge=1, le=12)
     chain_mode: Optional[str] = "none"   # "none" | "sequential"
     chain_fallback_mode: Optional[str] = "independent" # "independent" | "fallback_image" | "stop"
+    # Chế độ đồng nhất: "standard" (mặc định, tương thích API cũ) | "max"
+    # (Đồng nhất tối đa: ép chain_mode="sequential" + bắt buộc preflight
+    # kiểm tra khóa nhân vật/cầu nối/thời lượng trước khi tạo job).
+    consistency_mode: str = Field(default="standard", max_length=20)
     bg_music_path: Optional[str] = None
     music_volume: Optional[float] = Field(default=0.25, ge=0.0, le=2.0)
     voice_volume: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
@@ -617,6 +622,13 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             job_log(job, "🛑 Job đã bị hủy trước khi bắt đầu.")
             _save_job_best_effort(job)
             return
+        # Phòng thủ cho chế độ Đồng nhất tối đa: job tạo trước khi có preflight
+        # hoặc resume từ req cũ vẫn phải chạy sequential.
+        if getattr(req, "consistency_mode", "standard") == "max" \
+                and (req.chain_mode or "none") != "sequential":
+            req.chain_mode = "sequential"
+            job_log(job, "🎯 [Đồng nhất tối đa] Ép chain_mode='sequential' "
+                         "trước khi render.")
         output_dir = WORKSPACE / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "audio").mkdir(exist_ok=True)
@@ -834,22 +846,110 @@ def index():
     )
 
 
+def _apply_consistency_max(req: MovieRequest):
+    """Áp dụng chế độ Đồng nhất tối đa cho req trước khi tạo job.
+
+    - consistency_mode không hợp lệ -> (None, 422).
+    - "standard" -> (None, None): không làm gì, tương thích API cũ.
+    - "max" -> chạy preflight (consistency.run_consistency_checks):
+      có lỗi -> (checks, 422) kèm danh sách check, KHÔNG tạo job;
+      chỉ warning/info -> ép chain_mode="sequential" (ghi log rõ đã
+      override) và trả (checks, None) để caller lưu warnings vào job.
+    """
+    mode = (req.consistency_mode or "standard").strip().lower()
+    if mode not in ("standard", "max"):
+        return None, JSONResponse(
+            {"error": "consistency_mode chỉ nhận 'standard' hoặc 'max'."},
+            status_code=422)
+    if mode != "max":
+        return None, None
+    req.consistency_mode = "max"
+    checks = run_consistency_checks(req.model_dump(), consistency_mode="max")
+    if checks["errors"] > 0:
+        return checks, JSONResponse(
+            {"error": "Preflight đồng nhất chưa đạt — sửa lỗi trước khi sản xuất.",
+             "checks": checks["checks"],
+             "errors": checks["errors"],
+             "warnings": checks["warnings"]},
+            status_code=422)
+    if (req.chain_mode or "none") != "sequential":
+        print(f"[ConsistencyMax] Ép chain_mode {req.chain_mode!r} -> "
+              f"'sequential' cho phim '{req.title}' (consistency_mode=max).")
+        req.chain_mode = "sequential"
+    return checks, None
+
+
+@app.post("/api/consistency-check")
+async def api_consistency_check(req: MovieRequest):
+    """Preflight kiểm tra đồng nhất cho 1 kịch bản (không tạo job).
+
+    Body là MovieRequest đầy đủ. Trả {passed, errors, warnings, checks}.
+    UI gọi endpoint này khi bấm 'Kiểm tra đồng nhất' trước khi sản xuất.
+    """
+    mode = (req.consistency_mode or "standard").strip().lower()
+    if mode not in ("standard", "max"):
+        return JSONResponse(
+            {"error": "consistency_mode chỉ nhận 'standard' hoặc 'max'."},
+            status_code=422)
+    checks = run_consistency_checks(req.model_dump(), consistency_mode=mode)
+    return {"passed": checks["passed"], "errors": checks["errors"],
+            "warnings": checks["warnings"], "checks": checks["checks"]}
+
+
+@app.post("/api/jobs/{job_id}/consistency-check")
+async def api_job_consistency_check(job_id: str):
+    """Preflight kiểm tra đồng nhất cho req đã lưu của 1 job."""
+    job = get_or_restore_job(job_id)
+    if not job or not job.get("req"):
+        return JSONResponse({"error": "Không tìm thấy job hoặc cấu hình ban đầu"},
+                            status_code=404)
+    stored = job["req"]
+    data = stored.model_dump() if hasattr(stored, "model_dump") else stored
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "Cấu hình job không đọc được"},
+                            status_code=500)
+    mode = str(data.get("consistency_mode") or "standard")
+    checks = run_consistency_checks(data, consistency_mode=mode)
+    return {"job_id": job_id, "consistency_mode": mode,
+            "chain_mode": data.get("chain_mode"),
+            "passed": checks["passed"], "errors": checks["errors"],
+            "warnings": checks["warnings"], "checks": checks["checks"]}
+
+
 @app.post("/api/movies")
 async def create_movie(req: MovieRequest):
     """Tạo job mới. Trả về job_id để theo dõi."""
     if not req.scenes:
         return JSONResponse({"error": "Không có cảnh nào!"}, status_code=400)
 
+    # Chế độ Đồng nhất tối đa: preflight + ép sequential trước khi tạo job.
+    cm_checks, cm_error = _apply_consistency_max(req)
+    if cm_error is not None:
+        return cm_error
+
     job_id = uuid.uuid4().hex[:12]
     job = new_job(job_id, len(req.scenes), req=req)
+    if cm_checks is not None:
+        job["consistency_mode"] = "max"
+        job["consistency_checks"] = cm_checks["checks"]
+        job["consistency_warnings"] = cm_checks["warnings"]
     _save_job_or_http500(job)
     job_log(job, f"📋 Dự án: '{req.title}' — {len(req.scenes)} cảnh — giọng: {req.voice}")
+    if cm_checks is not None and cm_checks["warnings"] > 0:
+        job_log(job, f"🎯 [Đồng nhất tối đa] Preflight: {cm_checks['warnings']} cảnh báo "
+                     f"(chain đã ép sequential, xem consistency_checks).")
     _save_job_or_http500(job)
     # Spawn qua _spawn_job_task (giữ reference trong JOB_TASKS để cancel thật);
     # nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
     _spawn_job_task(job_id, film_pipeline(job, req))
 
-    return {"job_id": job_id, "message": "Đã bắt đầu sản xuất phim hàng loạt"}
+    resp: Dict[str, Any] = {"job_id": job_id, "message": "Đã bắt đầu sản xuất phim hàng loạt"}
+    if cm_checks is not None:
+        resp["consistency_mode"] = "max"
+        resp["chain_mode"] = req.chain_mode
+        resp["consistency_warnings"] = cm_checks["warnings"]
+        resp["consistency_checks"] = cm_checks["checks"]
+    return resp
 
 
 async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
