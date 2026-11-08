@@ -1489,6 +1489,43 @@
 
 
 <!-- Modal nhập Khóa API Studio: hiện khi server bật auth mà trình duyệt chưa có key, hoặc key đã lưu bị từ chối (401). -->
+<!-- Timeline Editor: hộp thoại render lại 1 shot (mở bằng js/ui.js TimelineEditor) -->
+<div id="tlRerenderModal" class="modal-backdrop" style="display:none;">
+  <div class="modal-window" style="max-width:560px;">
+    <div class="modal-header">
+      <div style="font-weight:700;font-size:16px;color:var(--accent);">🔄 Render lại shot này</div>
+      <button class="btn btn-ghost btn-sm" id="btnCloseTlRerenderModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="tlRerenderInfo" style="color:var(--muted);font-size:12.5px;margin:0 0 10px;"></p>
+      <label>Prompt mới (để trống = giữ prompt hiện tại)</label>
+      <textarea id="tlRerenderPrompt" rows="4" style="width:100%;" placeholder="Nhập prompt mới cho shot này..."></textarea>
+      <div class="form-row cols-2" style="margin-top:10px;">
+        <div>
+          <label>Lời thoại / thuyết minh</label>
+          <input id="tlRerenderVoiceover" type="text" placeholder="Giữ nguyên nếu để trống">
+        </div>
+        <div>
+          <label>Thời lượng (giây)</label>
+          <select id="tlRerenderDuration">
+            <option value="">Giữ nguyên</option>
+            <option value="5">5s</option>
+            <option value="6">6s</option>
+            <option value="8">8s</option>
+            <option value="10">10s</option>
+          </select>
+        </div>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin:10px 0 0;">Nhân vật, giọng đọc và ảnh tham chiếu được giữ nguyên theo khóa hiện tại. Clip cũ được lưu lại để so sánh A/B sau khi render xong. Phim đã ghép trước đó sẽ được đánh dấu “cần ghép lại”.</p>
+      <div id="tlRerenderError" style="color:#f87171;font-size:12px;min-height:16px;margin-top:6px;"></div>
+      <div style="display:flex;gap:10px;margin-top:12px;">
+        <button class="btn btn-primary" id="btnConfirmTlRerender">🚀 Render lại</button>
+        <button class="btn btn-ghost" id="btnCancelTlRerender">Hủy</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="apiKeyModal" class="modal-backdrop" style="display:none;">
   <div class="modal-window" style="max-width:480px;">
     <div class="modal-header">

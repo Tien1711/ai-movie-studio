@@ -651,10 +651,12 @@ function renderSceneItemHtml(s, i) {
         <div style="display:flex;gap:6px;margin-left:auto;">
           ${i > 0 ? `<button class="btn btn-ghost btn-sm" onclick="moveScene(${s.id},-1)">^</button>` : ''}
           ${i < scenes.length - 1 ? `<button class="btn btn-ghost btn-sm" onclick="moveScene(${s.id},1)">v</button>` : ''}
+          ${window.TimelineEditor ? window.TimelineEditor.headerButtonsHtml(s, i) : ''}
           <button class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="removeScene(${s.id})">x</button>
         </div>
       </div>
 
+      ${window.TimelineEditor ? window.TimelineEditor.cardExtraHtml(s, i) : ''}
       ${chainBarHtml}
 
       ${charMatchBannerHtml}

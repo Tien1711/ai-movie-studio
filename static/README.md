@@ -135,3 +135,28 @@ can kiem tra thu cong theo checklist tren truoc khi dua len production.
   curl -s http://localhost:8123/api/auth/status                                        # -> {"auth_required":true}
   ```
   (Chi dung key tam thoi trong luc kiem tra; khong ghi key that vao file nao trong repo.)
+
+## Timeline Editor (2026-11-07, chua commit)
+- Timeline strip tren danh sach canh (panel Tao phim): o ti le theo duration,
+  bam o de xem truoc + cuon toi card. Tong thoi luong + badge "phim da ghep cu".
+- Keo-tha card bang HTML5 DnD (da co san) + vach chi vi tri tha + nut len/xuong;
+  thu tu moi luu xuong server: POST /api/jobs/{id}/scenes/reorder {order:[...]}
+  (hoan vi 1..N; 400 neu sai, 409 neu job dang chay; doi ten file clip theo
+  chi so moi, danh dau final_stale). Loi -> hoan lai thu tu cu tren UI.
+- Xem truoc: bam vao card -> video clip neu co, neu khong thi keyframe, neu
+  khong thi prompt + trang thai. Poll trang thai job 4s de khoa keo-tha khi
+  job dang chay.
+- Render lai 1 shot: nut 🔄 tren card -> dialog sua prompt/voiceover/duration
+  (nhan vat/giong/anh giu nguyen theo khoa). POST /api/jobs/{id}/scenes/{idx}/rerender
+  (409 neu job/scene dang render); clip cu luu sang previous/ (giu toi da 1 ban).
+  So sanh A/B tren card: GET .../previous-video; POST .../restore-previous
+  (hoan doi clip + prompt) / .../discard-previous (giu ban moi). Khong tu ghep
+  lai ca phim: final_stale=true, hien "can ghep lai".
+- Code: backend app.py (endpoint + helper _scene_file_relpaths/_rename_scene_files/
+  _save_previous_clip/_swap_previous_clip, single_scene_pipeline them
+  recompose_final=False); frontend chu yeu static/js/ui.js (window.TimelineEditor),
+  app.js chi them 2 hook trong renderSceneItemHtml; CSS static/css/ui.css (.tl-*).
+  Test: test_timeline_editor.py (5 test).
+- Gioi han: chua ap dung keo-tha cho Shot Desk project (chi panel Tao phim);
+  chua kiem tra bang trinh duyet that (VM khong co headless browser); reorder
+  doi ten file clip tren dia nen job dang co final video se bi danh dau cu.

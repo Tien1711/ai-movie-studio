@@ -1064,8 +1064,175 @@ class RetrySingleSceneRequest(BaseModel):
     voiceover: Optional[str] = Field(default=None, max_length=5000)
 
 
-async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
-    """Pipeline render lại DUY NHẤT một cảnh độc lập."""
+# ── Timeline Editor: reorder / rerender helpers ────────────────────────────
+def _scene_file_relpaths(idx: int) -> Dict[str, str]:
+    """Đường dẫn tương đối (trong thư mục job) của mọi file gắn với 1 cảnh."""
+    n = f"{idx:03d}"
+    return {
+        "clip": f"final/clip_{n}.mp4",
+        "video": f"scenes/scene_{n}.mp4",
+        "raw": f"scenes/scene_{n}_raw.mp4",
+        "audio": f"audio/scene_{n}.mp3",
+        "last_frame": f"scenes/scene_{n}_last_frame.jpg",
+        "prev_clip": f"previous/clip_{n}.mp4",
+        "prev_video": f"previous/scene_{n}.mp4",
+        "prev_audio": f"previous/scene_{n}.mp3",
+        "prev_last_frame": f"previous/scene_{n}_last_frame.jpg",
+    }
+
+
+def _rename_scene_files(job_id: str, mapping: Dict[int, int]) -> None:
+    """Đổi tên file của các cảnh theo mapping old_idx -> new_idx.
+    2 pha qua thư mục staging để không va chạm khi hoán đổi (vd 1<->2).
+    File nào không tồn tại thì bỏ qua; lỗi 1 file chỉ log, không dừng cả reorder."""
+    job_dir = get_safe_job_dir(job_id)
+    staging = job_dir / ".reorder_tmp"
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        staged: Dict[str, Path] = {}
+        for old_idx, new_idx in mapping.items():
+            if old_idx == new_idx:
+                continue
+            for role, rel in _scene_file_relpaths(old_idx).items():
+                src = job_dir / rel
+                if src.is_file():
+                    dst_stage = staging / f"{role}_{old_idx}.tmp"
+                    try:
+                        shutil.move(str(src), str(dst_stage))
+                        staged[f"{role}_{old_idx}"] = dst_stage
+                    except Exception as exc:
+                        logger.warning("Reorder: không dời được %s: %s", src, exc)
+        for key, stage_path in staged.items():
+            role, old_idx_s = key.rsplit("_", 1)
+            new_idx = mapping[int(old_idx_s)]
+            dst = job_dir / _scene_file_relpaths(new_idx)[role]
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(stage_path), str(dst))
+            except Exception as exc:
+                logger.warning("Reorder: không đặt lại được %s -> %s: %s", stage_path, dst, exc)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _previous_clip_dir(job_id: str) -> Path:
+    d = get_safe_job_dir(job_id) / "previous"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_previous_clip(job: Dict, idx: int) -> Optional[Dict]:
+    """Sao chép clip hiện tại của cảnh sang previous/ (giữ tối đa 1 bản cũ
+    để khỏi phình đĩa — bản cũ hơn nữa bị xóa). Trả về metadata
+    previous_clip, hoặc None nếu cảnh chưa có file nào."""
+    job_id = job["id"]
+    job_dir = get_safe_job_dir(job_id)
+    prev_dir = _previous_clip_dir(job_id)
+    for role, rel in _scene_file_relpaths(idx).items():
+        if not role.startswith("prev_"):
+            continue
+        p = job_dir / rel
+        if p.is_file():
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    copied = []
+    for role, rel in _scene_file_relpaths(idx).items():
+        if role.startswith("prev_"):
+            continue
+        src = job_dir / rel
+        if src.is_file():
+            try:
+                shutil.copy2(str(src), str(prev_dir / src.name))
+                copied.append(src.name)
+            except Exception as exc:
+                logger.warning("Rerender: không sao chép được %s: %s", src, exc)
+    if not copied:
+        return None
+    meta = {
+        "prompt": _scene(job, idx).get("prompt", ""),
+        "created_at": time.time(),
+        "has_video": any(n.endswith(".mp4") for n in copied),
+        "files": copied,
+    }
+    _scene(job, idx)["previous_clip"] = meta
+    return meta
+
+
+def _delete_previous_clip(job: Dict, idx: int) -> None:
+    """Xóa toàn bộ file bản cũ + metadata previous_clip của 1 cảnh."""
+    job_dir = get_safe_job_dir(job["id"])
+    for role, rel in _scene_file_relpaths(idx).items():
+        if not role.startswith("prev_"):
+            continue
+        p = job_dir / rel
+        if p.is_file():
+            try:
+                p.unlink()
+            except Exception:
+                pass
+    _scene(job, idx).pop("previous_clip", None)
+
+
+def _swap_previous_clip(job: Dict, idx: int) -> Optional[Dict]:
+    """Hoán đổi clip hiện tại <-> bản previous. Trả về metadata previous_clip
+    MỚI sau hoán đổi (chính là bản vừa bị thay ra để vẫn đổi lại được),
+    hoặc None nếu trước đó không có clip hiện tại (sau restore không còn
+    bản cũ nào để quay lại)."""
+    job_id = job["id"]
+    job_dir = get_safe_job_dir(job_id)
+    prev_dir = _previous_clip_dir(job_id)
+    staging = job_dir / ".restore_tmp"
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        staged = []
+        for role, rel in _scene_file_relpaths(idx).items():
+            if role.startswith("prev_"):
+                continue
+            src = job_dir / rel
+            if src.is_file():
+                shutil.move(str(src), str(staging / src.name))
+                staged.append(src.name)
+        for role, rel in _scene_file_relpaths(idx).items():
+            if not role.startswith("prev_"):
+                continue
+            src = job_dir / rel
+            if src.is_file():
+                dst = job_dir / _scene_file_relpaths(idx)[role[5:]]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+        for name in staged:
+            shutil.move(str(staging / name), str(prev_dir / name))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    sc = _scene(job, idx)
+    if not staged:
+        sc.pop("previous_clip", None)
+        return None
+    meta = {
+        "prompt": sc.get("prompt", ""),
+        "created_at": time.time(),
+        "has_video": any(n.endswith(".mp4") for n in staged),
+        "files": staged,
+    }
+    sc["previous_clip"] = meta
+    return meta
+
+
+def _clear_rerendering(job: Dict, idx) -> None:
+    """Xóa cờ 'đang render lại' của 1 cảnh (gọi ở mọi đường ra của pipeline)."""
+    try:
+        _scene(job, idx).pop("rerendering", None)
+    except Exception:
+        pass
+
+
+async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_final: bool = True):
+    """Pipeline render lại DUY NHẤT một cảnh độc lập.
+    recompose_final=False (dùng cho rerender từng shot ở Timeline Editor):
+    không tự ghép lại cả phim — chỉ đánh dấu job['final_stale']=True để người
+    dùng chủ động bấm Ghép lại khi đã chốt các shot."""
     idx = target_scene.index
     job_id = job["id"]
     output_dir = WORKSPACE / job_id
@@ -1078,6 +1245,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
             "msg": "❌ Muse API key chưa được cấu hình (MUSE2API_KEY).",
             "error": "Muse API key chưa được cấu hình (MUSE2API_KEY).",
         })
+        _clear_rerendering(job, idx)
         job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render lại cảnh.")
         _save_job_best_effort(job)
         return
@@ -1153,7 +1321,12 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
                 scenes_dicts = [s.model_dump() for s in req.scenes]
                 audit = audit_movie_scenes(scenes_dicts, all_results)
                 job["audit"] = audit
-                if audit["is_complete"]:
+                if audit["is_complete"] and not recompose_final:
+                    # Rerender từng shot: KHÔNG tự ghép lại cả phim. Giữ nguyên
+                    # final cũ nhưng đánh dấu đã cũ để UI hiện "cần ghép lại".
+                    job["final_stale"] = True
+                    job_log(job, f"ℹ️ [Cảnh {idx}] Render lại xong. Phim đã ghép trước đó đã cũ — bấm Ghép lại ở panel Monitor để xuất bản mới.")
+                elif audit["is_complete"]:
                     job_log(job, f"🎞️ Toàn bộ {audit['total']} cảnh đã hoàn tất! Đang ghép lại phim hoàn chỉnh...")
                     try:
                         final_path = _unwrap_final_path(
@@ -1197,6 +1370,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
                 job.setdefault("failed_scenes", []).append(idx)
             job_log(job, f"❌ [Cảnh {idx}] Thử lại thất bại: {res.get('error')}")
 
+        _clear_rerendering(job, idx)
         _save_job_best_effort(job)
 
     except Exception as exc:
@@ -1205,6 +1379,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem):
             "msg": f"❌ Lỗi: {exc}",
             "error": str(exc),
         })
+        _clear_rerendering(job, idx)
         job_log(job, f"❌ [Cảnh {idx}] Exception: {exc}")
         _save_job_best_effort(job)
 
@@ -1250,6 +1425,210 @@ async def retry_single_scene_endpoint(
         "scene_index": scene_idx,
         "prompt": target_scene.prompt,
     }
+
+
+# ── Timeline Editor: reorder + rerender từng shot ──────────────────────────
+class ReorderScenesRequest(BaseModel):
+    order: List[int] = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/jobs/{job_id}/scenes/reorder")
+def reorder_job_scenes(job_id: str, payload: ReorderScenesRequest):
+    """Đổi thứ tự các cảnh của job (Timeline Editor).
+    Body: {"order": [3, 1, 2]} = chỉ số server CŨ theo thứ tự MỚI (hoán vị 1..N).
+    Đổi tên file clip/audio/last-frame theo chỉ số mới, đánh dấu final cũ."""
+    job = get_or_restore_job(job_id)
+    if not job or not job.get("req"):
+        return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
+    req: MovieRequest = job["req"]
+    n = len(req.scenes)
+    order = payload.order
+    if len(order) != n or sorted(order) != list(range(1, n + 1)):
+        return JSONResponse(
+            {"error": f"Thứ tự không hợp lệ: phải là hoán vị của 1..{n} (đủ số lượng, không trùng, không thiếu)"},
+            status_code=400)
+    if _is_job_running(job):
+        return JSONResponse(
+            {"error": "Job đang render — không đổi được thứ tự lúc này. Hãy đợi render xong hoặc hủy job trước."},
+            status_code=409)
+    with JOBS_LOCK:
+        old_scenes = list(req.scenes)
+        new_scenes = [old_scenes[i - 1] for i in order]
+        for new_idx, s in enumerate(new_scenes, start=1):
+            s.index = new_idx
+        req.scenes = new_scenes
+        mapping = {old_idx: new_pos for new_pos, old_idx in enumerate(order, start=1)}
+        _rename_scene_files(job_id, mapping)
+        old_entries = job.get("scenes", {})
+        new_entries = StrKeyDict()
+        for new_pos, old_idx in enumerate(order, start=1):
+            entry = dict(old_entries.get(str(old_idx), old_entries.get(old_idx, {})) or {})
+            if entry.get("video_url"):
+                entry["video_url"] = f"/api/jobs/{job_id}/scenes/{new_pos}/video"
+            if entry.get("last_frame_url"):
+                entry["last_frame_url"] = f"/api/jobs/{job_id}/last-frame/{new_pos}"
+            new_entries[str(new_pos)] = entry
+        job["scenes"] = new_entries
+        job_dir = get_safe_job_dir(job_id)
+        new_results = []
+        for new_pos, old_idx in enumerate(order, start=1):
+            for r in job.get("results", []):
+                if r.get("index") == old_idx:
+                    r = dict(r)
+                    r["index"] = new_pos
+                    if r.get("video_path"):
+                        r["video_path"] = str(job_dir / "scenes" / f"scene_{new_pos:03d}.mp4")
+                    if r.get("audio_path"):
+                        r["audio_path"] = str(job_dir / "audio" / f"scene_{new_pos:03d}.mp3")
+                    if r.get("last_frame_path"):
+                        r["last_frame_path"] = str(job_dir / "scenes" / f"scene_{new_pos:03d}_last_frame.jpg")
+                    if r.get("last_frame_url"):
+                        r["last_frame_url"] = f"/api/jobs/{job_id}/last-frame/{new_pos}"
+                    new_results.append(r)
+        job["results"] = sorted(new_results, key=lambda x: x["index"])
+        if job.get("clips"):
+            new_clips = []
+            for url in job["clips"]:
+                m = re.search(r"clip_(\d+)\.mp4$", url)
+                if m and int(m.group(1)) in mapping:
+                    new_clips.append(url[:m.start(1)] + f"{mapping[int(m.group(1))]:03d}" + url[m.end(1):])
+                else:
+                    new_clips.append(url)
+            job["clips"] = new_clips
+        job["final_stale"] = True
+        job_log(job, f"🔀 Đã đổi thứ tự cảnh: {order} (phim đã ghép trước đó cần ghép lại)")
+        _save_job_or_http500(job)
+    total_duration = sum(s.duration for s in req.scenes)
+    return {
+        "success": True,
+        "order": order,
+        "total_duration": total_duration,
+        "final_stale": True,
+        "scenes": [{"index": s.index, "prompt": s.prompt, "duration": s.duration} for s in req.scenes],
+    }
+
+
+class RerenderSceneRequest(BaseModel):
+    """Body rerender 1 shot: mọi field đều tùy chọn. Chỉ field nào gửi lên mới
+    đổi — nhân vật/giọng/reference image giữ nguyên trừ khi đổi rõ ràng
+    (tôn trọng Character Block / voice lock đã có)."""
+    prompt: Optional[str] = Field(default=None, max_length=5000)
+    voiceover: Optional[str] = Field(default=None, max_length=5000)
+    voice: Optional[str] = Field(default=None, max_length=200)
+    duration: Optional[int] = Field(default=None, ge=1, le=60)
+    size: Optional[str] = Field(default=None, max_length=10)
+    reference_image: Optional[str] = None
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_idx}/rerender")
+async def rerender_single_scene_endpoint(
+    job_id: str,
+    scene_idx: int,
+    payload: Optional[RerenderSceneRequest] = None,
+):
+    """Render lại DUY NHẤT 1 shot (Timeline Editor), tái dùng single_scene_pipeline.
+    Trước khi render đè, clip cũ được sao chép sang previous/ (giữ tối đa 1 bản)
+    để so sánh A/B / quay lại. Không tự ghép lại cả phim (final_stale=True)."""
+    job = get_or_restore_job(job_id)
+    if not job or not job.get("req"):
+        return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
+    req: MovieRequest = job["req"]
+    target_scene = next((s for s in req.scenes if s.index == scene_idx), None)
+    if not target_scene:
+        return JSONResponse({"error": f"Không tìm thấy cảnh {scene_idx}"}, status_code=404)
+    if _is_job_running(job) or _scene(job, scene_idx).get("rerendering"):
+        return JSONResponse(
+            {"error": "Job đang render (hoặc cảnh này đang được render lại) — hãy đợi xong rồi thử lại."},
+            status_code=409)
+    with JOBS_LOCK:
+        prev = _save_previous_clip(job, scene_idx)
+        if payload:
+            for field, value in payload.model_dump(exclude_unset=True).items():
+                if value is not None:
+                    setattr(target_scene, field, value)
+                    _scene(job, scene_idx)[field] = value
+        sc = _scene(job, scene_idx)
+        sc["status"] = "running"
+        sc["msg"] = "🔄 Đang render lại shot này..."
+        sc["error"] = None
+        sc["rerendering"] = True
+        _save_job_or_http500(job)
+    _spawn_job_task(job_id, single_scene_pipeline(job, target_scene, recompose_final=False))
+    return {
+        "success": True,
+        "scene_index": scene_idx,
+        "status": "rerendering",
+        "prompt": target_scene.prompt,
+        "previous_clip": prev,
+    }
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_idx}/restore-previous")
+def restore_previous_scene_endpoint(job_id: str, scene_idx: int):
+    """Quay lại bản cũ: hoán đổi clip hiện tại <-> bản previous (bản mới vừa
+    render thành bản cũ để vẫn đổi lại được). Khôi phục cả prompt cũ."""
+    job = get_or_restore_job(job_id)
+    if not job or not job.get("req"):
+        return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
+    req: MovieRequest = job["req"]
+    target_scene = next((s for s in req.scenes if s.index == scene_idx), None)
+    if not target_scene:
+        return JSONResponse({"error": f"Không tìm thấy cảnh {scene_idx}"}, status_code=404)
+    sc = _scene(job, scene_idx)
+    if _is_job_running(job) or sc.get("rerendering"):
+        return JSONResponse({"error": "Job đang render — hãy đợi xong rồi thử lại."}, status_code=409)
+    prev = sc.get("previous_clip")
+    if not prev:
+        return JSONResponse({"error": f"Cảnh {scene_idx} không có bản clip cũ để quay lại"}, status_code=404)
+    with JOBS_LOCK:
+        old_prompt = target_scene.prompt
+        prev_prompt = prev.get("prompt", "")
+        new_prev = _swap_previous_clip(job, scene_idx)
+        target_scene.prompt = prev_prompt
+        sc["prompt"] = prev_prompt
+        job["final_stale"] = True
+        job_log(job, f"↩️ [Cảnh {scene_idx}] Đã quay lại bản clip cũ (prompt cũ đã khôi phục).")
+        _save_job_or_http500(job)
+    return {
+        "success": True,
+        "scene_index": scene_idx,
+        "prompt": prev_prompt,
+        "previous_clip": new_prev,
+        "final_stale": True,
+    }
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_idx}/discard-previous")
+def discard_previous_scene_endpoint(job_id: str, scene_idx: int):
+    """Giữ bản mới: xóa file + metadata bản cũ (xác nhận A/B xong)."""
+    job = get_or_restore_job(job_id)
+    if not job or not job.get("req"):
+        return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
+    req: MovieRequest = job["req"]
+    if not any(s.index == scene_idx for s in req.scenes):
+        return JSONResponse({"error": f"Không tìm thấy cảnh {scene_idx}"}, status_code=404)
+    if _is_job_running(job) or _scene(job, scene_idx).get("rerendering"):
+        return JSONResponse({"error": "Job đang render — hãy đợi xong rồi thử lại."}, status_code=409)
+    with JOBS_LOCK:
+        if not _scene(job, scene_idx).get("previous_clip"):
+            return JSONResponse({"error": f"Cảnh {scene_idx} không có bản clip cũ để xóa"}, status_code=404)
+        _delete_previous_clip(job, scene_idx)
+        job_log(job, f"✅ [Cảnh {scene_idx}] Đã giữ bản mới, xóa bản clip cũ.")
+        _save_job_or_http500(job)
+    return {"success": True, "scene_index": scene_idx}
+
+
+@app.get("/api/jobs/{job_id}/scenes/{scene_idx}/previous-video")
+def get_scene_previous_video(job_id: str, scene_idx: int):
+    """Stream bản clip CŨ của 1 cảnh (phục vụ so sánh A/B sau rerender)."""
+    idx = int(scene_idx)
+    clip_path = resolve_safe_job_path(job_id, f"previous/clip_{idx:03d}.mp4")
+    if clip_path.exists() and clip_path.is_file():
+        return FileResponse(str(clip_path), media_type="video/mp4")
+    scene_path = resolve_safe_job_path(job_id, f"previous/scene_{idx:03d}.mp4")
+    if scene_path.exists() and scene_path.is_file():
+        return FileResponse(str(scene_path), media_type="video/mp4")
+    return JSONResponse({"error": "Không có bản clip cũ cho cảnh này"}, status_code=404)
 
 
 @app.get("/api/jobs/{job_id}/scenes/{scene_idx}/video")
