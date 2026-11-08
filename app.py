@@ -1209,31 +1209,6 @@ async def retry_failed_scenes(job_id: str, auto_fix: bool = True):
     }
 
 
-class UpdateScenePromptRequest(BaseModel):
-    scene_index: int
-    new_prompt: str = Field(max_length=5000)
-
-
-@app.post("/api/jobs/{job_id}/scenes/update-prompt")
-def update_scene_prompt(job_id: str, payload: UpdateScenePromptRequest):
-    """Cập nhật trực tiếp prompt mới cho 1 cảnh trong job."""
-    job = get_or_restore_job(job_id)
-    if not job or not job.get("req"):
-        return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
-    req: MovieRequest = job["req"]
-    for s in req.scenes:
-        if s.index == payload.scene_index:
-            s.prompt = payload.new_prompt
-            sc = _scene(job, payload.scene_index)
-            if sc:
-                sc["prompt"] = payload.new_prompt
-            job_log(job, f"✏️ [Cảnh {payload.scene_index}] Người dùng đã cập nhật Prompt mới: {payload.new_prompt[:50]}...")
-            # audit §1.4: trước đây chỉ gán trong bộ nhớ, load lại từ đĩa là mất.
-            _save_job_or_http500(job)
-            return {"success": True, "scene_index": payload.scene_index, "prompt": payload.new_prompt}
-    return JSONResponse({"error": f"Không tìm thấy cảnh {payload.scene_index}"}, status_code=404)
-
-
 class FixPromptRequest(BaseModel):
     prompt: str = Field(max_length=5000)
     error: str = Field(default="", max_length=5000)
@@ -1966,9 +1941,10 @@ def download_video(job_id: str, filename: str):
 
 
 @app.get("/api/jobs")
-@app.get("/api/library")
 def list_jobs():
     """Lấy danh sách tất cả jobs đã sản xuất trong Workspace."""
+    # audit 2026-11-08 #14: alias GET /api/library đã xóa (trùng 100% logic
+    # với /api/jobs, 0 caller frontend/test/docs). Frontend dùng /api/jobs.
     # load_all_persisted_jobs() giờ chỉ load 1 lần (startup/lần đầu) — không đọc
     # toàn bộ job_state.json mỗi request (audit §3.4).
     load_all_persisted_jobs()
@@ -3527,7 +3503,13 @@ def api_set_character_sheet_angle(char_id: str, req: SheetAngleRequest):
 
 @app.get("/api/jobs/{job_id}/last-frame/{scene_idx}")
 def api_get_scene_last_frame(job_id: str, scene_idx: int):
-    """Lấy khung hình cuối cùng (last frame) đã trích xuất từ video của cảnh an toàn."""
+    """Lấy khung hình cuối cùng (last frame) đã trích xuất từ video của cảnh an toàn.
+
+    GIỮ LẠI (audit 2026-11-08 #14): endpoint này KHÔNG chết — backend tự sinh
+    URL trỏ tới nó trong response reorder (last_frame_url) và frontend dùng
+    URL đó để hiển thị ảnh Last Frame ở Monitor/Shot Desk (app.js dùng
+    s.last_frame_url trực tiếp làm src <img>). Ngoài ra còn phục vụ API ngoài.
+    """
     idx = int(scene_idx)
     frame_path = resolve_safe_job_path(job_id, f"scenes/scene_{idx:03d}_last_frame.jpg")
     if frame_path.exists() and frame_path.is_file():
@@ -3611,9 +3593,17 @@ Chỉ trả về JSON thuần, không giải thích thêm."""
     return {"success": True, "beats": beats}
 
 
-@app.get("/api/character-library")
-def get_character_library():
-    """Lấy danh sách các ảnh nhân vật đã tải lên gần đây để tái sử dụng."""
+@app.get("/api/reference-images")
+@app.get("/api/character-library", deprecated=True)
+def get_reference_images():
+    """Lấy danh sách các ảnh tham chiếu đã tải lên gần đây để tái sử dụng.
+
+    audit 2026-11-08 #10: endpoint này trước đây tên /api/character-library,
+    gây nhầm với GET /api/characters (hồ sơ nhân vật trong _characters.json)
+    trong khi nó chỉ trả 20 ảnh upload gần đây. Đổi tên chính thành
+    /api/reference-images; route cũ giữ làm alias deprecated để không gãy
+    client ngoài, sẽ gỡ ở bản sau.
+    """
     if not UPLOAD_DIR.exists():
         return []
     items = []
@@ -3634,14 +3624,51 @@ def list_voices():
     return list_all_voices()
 
 
+# ── Voice preview cache: giới hạn 200 file, dọn LRU theo mtime ──────────
+# audit 2026-11-08 #15: _voice_previews trước đây tích lũy vô hạn (mỗi giọng
+# × mỗi câu mẫu một file). Làm theo mẫu _tts_cache_prune (batch_engine.py:
+# 500 file/500MB) nhưng chỉ giới hạn số file vì preview rất nhỏ.
+_VOICE_PREVIEW_MAX_FILES = 200
+
+
+def _voice_preview_prune(cache_dir=None) -> None:
+    """Dọn _voice_previews khi vượt giới hạn: xóa file cũ nhất (LRU theo mtime)."""
+    try:
+        cache_dir = Path(cache_dir) if cache_dir is not None else WORKSPACE / "_voice_previews"
+        if not cache_dir.is_dir():
+            return
+        entries = [(p, p.stat()) for p in cache_dir.glob("*.mp3")]
+        if len(entries) <= _VOICE_PREVIEW_MAX_FILES:
+            return
+        entries.sort(key=lambda ps: ps[1].st_mtime)  # cũ nhất trước
+        for p, _s in list(entries):
+            if len(entries) <= _VOICE_PREVIEW_MAX_FILES:
+                break
+            try:
+                p.unlink()
+                entries.remove((p, _s))
+            except OSError:
+                pass
+    except Exception as exc:
+        print(f"[Voice Preview] Prune thất bại (bỏ qua): {exc}")
+
+
 @app.get("/api/voices/preview")
 async def preview_voice(voice: str = "vi-VN-HoaiMyNeural", text: str = ""):
-    """Sinh nhanh đoạn audio mẫu để người dùng nghe thử giọng nói trực tiếp trên web."""
-    sample_text = text.strip()
+    """Sinh nhanh đoạn audio mẫu để người dùng nghe thử giọng nói trực tiếp trên web.
+
+    audit 2026-11-08 #12: các voice đặc biệt (ai_voice/native/none/no_dub)
+    KHÔNG có giọng TTS thật — trước đây backend âm thầm đổi thành
+    vi-VN-HoaiMyNeural và phát giọng khác, gây hiểu lầm. Giờ trả 400 để
+    frontend disable nút nghe thử kèm tooltip giải thích, không phát giọng khác.
+    """
     if voice in ("ai_voice", "native", "none", "no_dub"):
-        sample_text = "Chế độ giọng gốc AI: Lời thoại sẽ được đưa thẳng vào Prompt để Muse AI tự sinh âm thanh và khẩu hình trực tiếp trong video."
-        voice = "vi-VN-HoaiMyNeural"
-    elif not sample_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Giọng này không có bản nghe thử: lời thoại được AI sinh giọng gốc trong video, không qua TTS.",
+        )
+    sample_text = text.strip()
+    if not sample_text:
         if voice.startswith("vieneu:"):
             cfg = next((c for c in VIENEU_VOICES_CONFIG if c["id"] == voice), None)
             sample_text = cfg["sample_text"] if cfg else "Xin chào, tôi là trợ lý thuyết minh giọng nói VieNeu TTS."
@@ -3679,6 +3706,10 @@ async def preview_voice(voice: str = "vi-VN-HoaiMyNeural", text: str = ""):
 
     if not cache_file.exists() or cache_file.stat().st_size < 500:
         await synthesize_voice(sample_text, voice, str(cache_file))
+
+    # audit #15: dọn LRU mỗi lần preview (kể cả cache hit) để thư mục đã
+    # phình từ trước vẫn được dọn dần về tối đa 200 file.
+    _voice_preview_prune(cache_dir)
 
     return FileResponse(str(cache_file), media_type="audio/mpeg")
 

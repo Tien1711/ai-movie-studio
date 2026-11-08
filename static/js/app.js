@@ -133,6 +133,14 @@ function applyGlobalAspectRatio(val, forceAll = false) {
   }
 }
 
+// audit 2026-11-08 #13: âm lượng hiển thị dạng ×N (vd ×0.25, ×1.0, ×2.0),
+// không dùng % — slider tới 2.0 mà hiện "200%" là sai đơn vị.
+function formatVolumeLabel(v) {
+  const n = parseFloat(v);
+  if (!isFinite(n)) return '×1.0';
+  return '×' + n.toFixed(2).replace(/0$/, '');
+}
+
 function updateConcurrent(val) {
   // Backend MovieRequest.max_concurrent chỉ nhận 1–12 (audit #6): kẹp ở
   // đây để mọi đường set (input, cấu hình, localStorage cũ) đều ≤ 12.
@@ -214,7 +222,7 @@ async function checkApiHealth() {
       if (resEl) resEl.textContent = 'Đã kết nối - ' + data.accounts + ' tài khoản hoạt động';
       const hint = document.getElementById('concurrentHint');
       if (hint) {
-        hint.textContent = `⚡ Có ${data.accounts} tài khoản Muse — Tự động chia đều chạy song song qua ${data.accounts} tài khoản!`;
+        hint.textContent = `Tối đa ${data.accounts} luồng song song (đặt ở ô Concurrent)`;
       }
 
       // Tự động cập nhật input Render song song và cấu hình nếu chưa chỉnh thủ công.
@@ -499,7 +507,7 @@ function renderSceneItemHtml(s, i) {
               <select class="seg-voice" style="width:100%;background:var(--bg0);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:12px;">
                 ${voiceSelectHtml(seg.voice)}
               </select>
-              <button type="button" class="btn btn-ghost btn-sm u-p-3-6" title="Nghe thử giọng nhân vật này" onclick="testPlayVoice(this.previousElementSibling.value, this.closest('.char-seg-item').querySelector('.seg-text').value)">🔊</button>
+              <button type="button" class="btn btn-ghost btn-sm u-p-3-6" ${specialVoicePreviewAttrs(seg.voice)} onclick="testPlayVoice(this.previousElementSibling.value, this.closest('.char-seg-item').querySelector('.seg-text').value)">🔊</button>
             </div>
           </div>
           <div class="fx fx-ac fx-jc-c">
@@ -764,7 +772,7 @@ function renderSceneItemHtml(s, i) {
           <div>
             <div class="fx fx-jc-sb fx-ac">
               <label class="u-mb0">Giọng đọc riêng cảnh này</label>
-              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="testPlayVoice(document.querySelector('#scene-${s.id} .scene-voice-sel').value || document.getElementById('voiceSelect').value)">🔊 Nghe thử</button>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" ${specialVoicePreviewAttrs(s.voice || document.getElementById('voiceSelect')?.value || '')} onclick="testPlayVoice(document.querySelector('#scene-${s.id} .scene-voice-sel').value || document.getElementById('voiceSelect').value)">🔊 Nghe thử</button>
             </div>
             <select class="scene-voice-sel u-mt4">
               <option value="">-- Dùng giọng mặc định toàn phim --</option>
@@ -922,8 +930,8 @@ function resetFilmState() {
   if ($('exportQuality')) $('exportQuality').value = '720p';
   if ($('sceneTransition')) $('sceneTransition').value = 'none';
   if ($('bgMusicSelect')) $('bgMusicSelect').value = '';
-  if ($('musicVolume')) { $('musicVolume').value = 0.25; if ($('lblMusicVol')) $('lblMusicVol').textContent = '25%'; }
-  if ($('voiceVolume')) { $('voiceVolume').value = 1.0; if ($('lblVoiceVol')) $('lblVoiceVol').textContent = '100%'; }
+  if ($('musicVolume')) { $('musicVolume').value = 0.25; if ($('lblMusicVol')) $('lblMusicVol').textContent = formatVolumeLabel(0.25); }
+  if ($('voiceVolume')) { $('voiceVolume').value = 1.0; if ($('lblVoiceVol')) $('lblVoiceVol').textContent = formatVolumeLabel(1.0); }
   if ($('consistencyMax')) $('consistencyMax').checked = false;
   if ($('globalAspectRatio')) applyGlobalAspectRatio('16:9', false);
   renderScenes();
@@ -2284,8 +2292,28 @@ function sanitizePromptDirect(sceneId) {
 let previewAudio = null;
 let currentPreviewBtn = null;
 
+// audit 2026-11-08 #12: các voice đặc biệt không có giọng TTS thật — backend
+// /api/voices/preview trả 400 thay vì phát giọng HoaiMy. Nút nghe thử phải
+// disable kèm tooltip giải thích, và testPlayVoice chặn ngay từ đầu để
+// không bao giờ phát giọng khác thay thế.
+const SPECIAL_PREVIEW_VOICES = ['ai_voice', 'native', 'none', 'no_dub'];
+const SPECIAL_VOICE_PREVIEW_TIP = 'Giọng này không có bản nghe thử: lời thoại do AI sinh giọng gốc trong video, không qua TTS.';
+function isSpecialVoice(voiceId) { return SPECIAL_PREVIEW_VOICES.includes(voiceId); }
+// Trả chuỗi thuộc tính cho nút "Nghe thử" đi kèm một select giọng.
+function specialVoicePreviewAttrs(voiceId) {
+  return isSpecialVoice(voiceId)
+    ? `disabled title="${SPECIAL_VOICE_PREVIEW_TIP}"`
+    : 'title="Nghe thử giọng nhân vật này"';
+}
+
 async function testPlayVoice(voiceId, customText = '', triggerBtn = null) {
   if (!voiceId) return;
+  // audit #12: voice đặc biệt không có bản nghe thử — không gọi backend
+  // (backend cũng trả 400), chỉ giải thích, không phát giọng khác.
+  if (isSpecialVoice(voiceId)) {
+    alert(SPECIAL_VOICE_PREVIEW_TIP);
+    return;
+  }
 
   const btn = triggerBtn || (window.event?.target?.closest('button'));
 
@@ -2376,6 +2404,24 @@ async function testPlayVoice(voiceId, customText = '', triggerBtn = null) {
   }
 }
 
+// audit #12: khi người dùng đổi giọng trong select, đồng bộ trạng thái
+// disable của nút "Nghe thử" đi kèm (không chờ render lại).
+document.addEventListener('change', (e) => {
+  const sel = e.target;
+  if (!sel || !sel.matches || !sel.matches('.seg-voice, .scene-voice-sel, #sdEditVoiceInput, #sdProjDefaultVoice')) return;
+  const container = sel.parentElement;
+  if (!container) return;
+  const btn = container.querySelector('button[onclick*="testPlayVoice"]');
+  if (!btn) return;
+  if (isSpecialVoice(sel.value)) {
+    btn.disabled = true;
+    btn.title = SPECIAL_VOICE_PREVIEW_TIP;
+  } else {
+    btn.disabled = false;
+    btn.title = 'Nghe thử giọng nhân vật này';
+  }
+});
+
 // ── Library ─────────────────────────────────────────────────────────────
 async function loadLibrary() {
   try {
@@ -2445,7 +2491,7 @@ let characterLibrary = [];
 
 async function loadCharacterLibrary() {
   try {
-    const res = await apiFetch('/api/character-library');
+    const res = await apiFetch('/api/reference-images');
     if (res.ok) {
       characterLibrary = await res.json();
     }
@@ -2735,7 +2781,7 @@ function renderCharacterGrid() {
             <div class="char-card-name">${esc(c.name)}</div>
             <div class="char-card-voice fx fx-ac fx-g6">
               <span>🎙️ ${esc(voiceLabel)}</span>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:10px;padding:1px 5px;" onclick="testPlayVoice('${esc(c.voice)}')">🔊</button>
+              <button type="button" class="btn btn-ghost btn-sm" style="font-size:10px;padding:1px 5px;" ${specialVoicePreviewAttrs(c.voice)} onclick="testPlayVoice('${esc(c.voice)}')">🔊</button>
             </div>
           </div>
         </div>
@@ -4025,7 +4071,7 @@ function applyProjectData(data) {
     const n = (v === undefined || v === null) ? def : v;
     el.value = n;
     const lb = labelId ? $(labelId) : null;
-    if (lb) lb.textContent = Math.round(n * 100) + '%';
+    if (lb) lb.textContent = formatVolumeLabel(n);
   };
 
   setVal('projectTitle', data.title, '');
@@ -6917,7 +6963,7 @@ function openShotDeskEditModal(shotIndex) {
             <div id="sdEditVoiceGroup">
               <div class="fx fx-jc-sb fx-ac u-mb4">
                 <label class="u-fs11 u-mb0">Giọng đọc (Voice)</label>
-                <button type="button" class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:1px 5px;color:var(--accent);" onclick="testPlayVoice(document.getElementById('sdEditVoiceInput').value, document.getElementById('sdEditVoiceoverInput').value)">🔊 Nghe thử</button>
+                <button type="button" class="btn btn-ghost btn-sm" style="font-size:10.5px;padding:1px 5px;color:var(--accent);" ${specialVoicePreviewAttrs(voice)} onclick="testPlayVoice(document.getElementById('sdEditVoiceInput').value, document.getElementById('sdEditVoiceoverInput').value)">🔊 Nghe thử</button>
               </div>
               <select class="u-w100" id="sdEditVoiceInput">
                 ${voiceSelectHtml(voice)}
@@ -7118,7 +7164,7 @@ function openShotDeskProjectVoiceModal() {
         <div class="form-row" id="sdProjVoiceRow">
           <div class="fx fx-jc-sb fx-ac u-mb4">
             <label class="u-mb0">Giọng đọc mặc định (VieNeu / OmniVoice / Edge-TTS)</label>
-            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="testPlayVoice(document.getElementById('sdProjDefaultVoice').value)">🔊 Nghe thử</button>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" ${specialVoicePreviewAttrs(defaultVoice)} onclick="testPlayVoice(document.getElementById('sdProjDefaultVoice').value)">🔊 Nghe thử</button>
           </div>
           <select id="sdProjDefaultVoice">
             ${voiceSelectHtml(defaultVoice)}
