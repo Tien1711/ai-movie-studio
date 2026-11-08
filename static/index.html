@@ -19,17 +19,19 @@
   <header class="topbar">
     <button id="btnSidebarToggle" class="btn btn-ghost btn-sm" type="button" title="Thu gọn / mở sidebar" aria-label="Thu gọn sidebar">☰</button>
     <div class="logo u-flex-10">
-      <span style="font-size:22px;filter:drop-shadow(0 0 10px rgba(56,189,248,0.5));">🎬</span>
-      <span style="background:linear-gradient(135deg,#38bdf8,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-weight:900;letter-spacing:-0.5px;font-size:17px;">AI MOVIE STUDIO</span>
-      <span class="badge" style="background:rgba(56,189,248,0.15);color:var(--accent);font-size:10px;font-weight:800;letter-spacing:1px;padding:2px 7px;border-radius:12px;border:1px solid rgba(56,189,248,0.3);">PRO 2.0</span>
+      <span class="logo-mark">🎬</span>
+      <span class="logo-text">AI MOVIE STUDIO</span>
+      <span class="badge logo-badge">PRO 2.0</span>
+      <span id="topbarProjectName" class="topbar-project" title="Tên dự án hiện tại — đổi ở Tạo phim → Thông tin phim">Huyền Thoại Kiếm Sĩ</span>
     </div>
     <div class="topbar-actions">
-      <div id="museStatusBar" class="muse-status-bar warn" style="display:flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:12px;background:rgba(255,255,255,0.04);border:1px solid var(--border);">
-        <span id="museStatusDot" style="color:var(--yellow);font-size:10px;">●</span>
-        <span id="museStatusText" style="font-weight:600;">Muse2API: Đang kiểm tra...</span>
-        <span id="museAccountsBadge" style="display:none;background:rgba(56,189,248,0.15);color:var(--accent);padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;"></span>
+      <div id="museStatusBar" class="muse-status-bar warn">
+        <span id="museStatusDot" class="muse-status-dot">●</span>
+        <span class="u-fw600" id="museStatusText">Muse2API: Đang kiểm tra...</span>
+        <span id="museAccountsBadge" class="muse-accounts-badge"></span>
       </div>
-      <button class="btn btn-ghost btn-sm" style="color:#c084fc;border:1px solid rgba(168,85,247,0.4);" onclick="showPanel('shot-desk')" title="Chuẩn Shot Desk Project & Review Desk">🎬 Shot Desk Studio</button>
+      <button id="topbarCreateBtn" class="btn btn-primary btn-sm" type="button" onclick="startMovieCreation()" title="Bắt đầu sản xuất phim (Ctrl+Enter)">🚀 Sản xuất</button>
+      <button class="btn btn-ghost btn-sm" onclick="showPanel('shot-desk')" title="Chuẩn Shot Desk Project & Review Desk">🎬 Shot Desk Studio</button>
       <button id="btnThemeToggle" class="btn btn-ghost btn-sm" type="button" title="Chuyển sang Light mode">🌙</button>
       <button class="btn btn-ghost btn-sm" onclick="showPanel('settings')">⚙️ Cài đặt</button>
     </div>
@@ -38,41 +40,50 @@
   <!-- ══ SIDEBAR ══════════════════════════════════════════════════ -->
   <aside class="sidebar" id="sidebar" aria-label="Điều hướng chính">
     <div class="nav-section">Sản xuất</div>
-    <div class="nav-item active" data-panel="create" id="nav-create">
+    <div class="nav-item active" data-panel="create" id="nav-create" title="Tạo phim mới (Alt+C)">
       <span class="icon">✏️</span> Tạo phim mới
+      <span class="nav-kbd">Alt+C</span>
     </div>
-    <div class="nav-item" data-panel="affiliate" id="nav-affiliate">
+    <div class="nav-item" data-panel="affiliate" id="nav-affiliate" title="Video Tiếp Thị — Affiliate (Alt+A)">
       <span class="icon">🛍️</span> Video Tiếp Thị (Affiliate)
-      <span class="badge" style="margin-left:auto;font-size:10px;background:linear-gradient(135deg, #ec4899, #f43f5e);color:#fff;padding:1px 6px;border-radius:8px;font-weight:700;">HOT</span>
+      <span class="badge badge-hot">HOT</span>
+      <span class="nav-kbd">Alt+A</span>
     </div>
-    <div class="nav-item" data-panel="shot-desk" id="nav-shot-desk">
+    <div class="nav-item" data-panel="shot-desk" id="nav-shot-desk" title="Shot Desk Studio (Alt+K)">
       <span class="icon">🎬</span> Shot Desk Studio
-      <span class="badge" id="navShotDeskBadge" style="margin-left:auto;font-size:10px;background:rgba(168,85,247,0.2);color:#c084fc;padding:1px 6px;border-radius:8px;">Active</span>
+      <span class="badge badge-sd" id="navShotDeskBadge">Active</span>
+      <span class="nav-kbd">Alt+K</span>
     </div>
-    <div class="nav-item" data-panel="characters" id="nav-characters">
+    <div class="nav-item" data-panel="characters" id="nav-characters" title="Hồ sơ nhân vật (Alt+N)">
       <span class="icon">👥</span> Hồ sơ nhân vật
+      <span class="nav-kbd">Alt+N</span>
     </div>
-    <div class="nav-item" data-panel="monitor" id="nav-monitor">
+    <div class="nav-item" data-panel="monitor" id="nav-monitor" title="Theo dõi tiến độ (Alt+M)">
       <span class="icon">📊</span> Theo dõi tiến độ
+      <span class="nav-kbd">Alt+M</span>
     </div>
-    <div class="nav-item" data-panel="quick-video" id="nav-quick-video">
+    <div class="nav-item" data-panel="quick-video" id="nav-quick-video" title="Video Nhanh (Alt+Q)">
       <span class="icon">⚡</span> Video Nhanh
+      <span class="nav-kbd">Alt+Q</span>
     </div>
-    <div class="nav-item" data-panel="library" id="nav-library">
+    <div class="nav-item" data-panel="library" id="nav-library" title="Thư viện phim (Alt+L)">
       <span class="icon">🗂️</span> Thư viện phim
+      <span class="nav-kbd">Alt+L</span>
     </div>
 
     <div class="nav-section">Công cụ</div>
-    <div class="nav-item" data-action="prompt-sheet">
+    <div class="nav-item" data-action="prompt-sheet" title="Sheet Prompt Mẫu (Alt+P)">
       <span class="icon">💡</span> Sheet Prompt Mẫu
+      <span class="nav-kbd">Alt+P</span>
     </div>
-    <div class="nav-item" data-panel="settings" id="nav-settings">
+    <div class="nav-item" data-panel="settings" id="nav-settings" title="Cấu hình API (Alt+O)">
       <span class="icon">⚙️</span> Cấu hình API
+      <span class="nav-kbd">Alt+O</span>
     </div>
 
     <div class="sidebar-footer">
       v2.0.0 · Cinema Hollywood Edition<br>
-      <span id="sidebarConcurrent" style="color:var(--accent);font-weight:700;"></span>
+      <span id="sidebarConcurrent"></span>
     </div>
   </aside>
   <div id="sidebarOverlay" class="sidebar-overlay"></div>
@@ -82,34 +93,45 @@
 
     <!-- ─ Panel: Tạo phim ─────────────────────────────────────── -->
     <div class="panel active" id="panel-create">
+      <div class="panel-head">
+        <div>
+          <h2>🎞️ Tạo phim mới</h2>
+          <div class="panel-sub">3 bước: Thông tin phim → Danh sách cảnh → Sản xuất &nbsp;·&nbsp; Phím tắt: <span class="kbd">Ctrl</span>+<span class="kbd">Enter</span> sản xuất, <span class="kbd">Alt</span>+<span class="kbd">C</span>/<span class="kbd">A</span>/<span class="kbd">K</span>/… chuyển mục</div>
+        </div>
+        <div class="panel-head-actions">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="saveCurrentProject()" title="Lưu toàn bộ kịch bản, cảnh, nhân vật, prompt vào dự án">💾 Lưu Project</button>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="openProjectsModal()" title="Mở lại các dự án đã lưu trước đây">📂 Mở Project</button>
+        </div>
+      </div>
 
       <!-- Project config -->
       <div class="card">
-        <div class="card-header" style="flex-wrap:wrap;gap:10px;">
+        <div class="card-header fx-wrap fx-g10">
           <div class="card-title">🎞️ Thông tin dự án & Cài đặt làm phim</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <div class="fx fx-g6 fx-wrap">
             <button type="button" class="btn btn-ghost btn-sm" id="btnToggleCreateCommonSettings" onclick="toggleCreateCommonSettings()" title="Thu gọn / Mở rộng bảng cài đặt chung để nhường không gian cho danh sách video cảnh">🔽 Cài Đặt Chung</button>
-            <button type="button" class="btn btn-ghost btn-sm" onclick="saveCurrentProject()" title="Lưu toàn bộ kịch bản, cảnh, nhân vật, prompt vào dự án">💾 Lưu Project</button>
-            <button type="button" class="btn btn-ghost btn-sm" onclick="openProjectsModal()" title="Mở lại các dự án đã lưu trước đây">📂 Mở Project</button>
             <button type="button" class="btn btn-ghost btn-sm" onclick="exportProjectJson()" title="Tải file JSON dự án về máy">📤 Tải JSON</button>
             <button type="button" class="btn btn-ghost btn-sm" onclick="importProjectJson()" title="Mở file JSON dự án từ máy tính">📥 Nhập JSON</button>
-            <button type="button" class="btn btn-ghost btn-sm" style="color:var(--yellow);" onclick="cleanWorkspace()" title="Dọn dẹp các file cache, video nháp tạm thời để giải phóng dung lượng đĩa">🧹 Dọn Workspace</button>
+            <button type="button" class="btn btn-ghost btn-sm u-c-yellow" onclick="cleanWorkspace()" title="Dọn dẹp các file cache, video nháp tạm thời để giải phóng dung lượng đĩa">🧹 Dọn Workspace</button>
           </div>
         </div>
 
         <div id="createCommonSettingsBody">
+        <div class="cfg-grid">
+        <div class="cfg-col">
+        <h3 class="form-group-title"><span class="fg-num">1</span> Thông tin phim <span class="req-note">* bắt buộc</span></h3>
         <!-- Row 1: Thông tin cơ bản -->
         <div class="form-row cols-3">
           <div>
-            <label>Tên dự án</label>
-            <input type="text" id="projectTitle" value="Huyền Thoại Kiếm Sĩ">
+            <label>Tên dự án <span class="req" title="Bắt buộc">*</span></label>
+            <input type="text" id="projectTitle" value="Huyền Thoại Kiếm Sĩ" required aria-required="true">
           </div>
           <div>
             <div class="u-row-between">
-              <label style="margin-bottom:0;">Tỉ lệ khung hình toàn phim</label>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 6px;color:var(--accent);" onclick="applyGlobalAspectRatio(document.getElementById('globalAspectRatio').value, true)" title="Đồng bộ ngay tỉ lệ này cho toàn bộ các cảnh">🔄 Đổi cả phim</button>
+              <label class="u-mb0">Tỉ lệ khung hình toàn phim</label>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="applyGlobalAspectRatio(document.getElementById('globalAspectRatio').value, true)" title="Đồng bộ ngay tỉ lệ này cho toàn bộ các cảnh">🔄 Đổi cả phim</button>
             </div>
-            <select id="globalAspectRatio" style="margin-top:4px;" onchange="applyGlobalAspectRatio(this.value, true)">
+            <select class="u-mt4" id="globalAspectRatio" onchange="applyGlobalAspectRatio(this.value, true)">
               <option value="16:9" selected>🖥️ 16:9 (Ngang chuẩn YouTube, TV)</option>
               <option value="9:16">📱 9:16 (Dọc TikTok, Shorts, Reels)</option>
               <option value="1:1">⏹️ 1:1 (Vuông Instagram, Facebook)</option>
@@ -126,21 +148,89 @@
           </div>
         </div>
 
+        <h3 class="form-group-title"><span class="fg-num">2</span> Nhân vật &amp; khóa nhất quán</h3>
+        <details class="adv-box"><summary>⚙️ Nâng cao: Style Locks &amp; Chaining <span class="adv-hint">mặc định thu gọn</span></summary><div class="adv-body">
+        <!-- Row 5: Khóa Nhất Quán Phong Cách Điện Ảnh (Style Locks) -->
+        <div style="margin-top:12px;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:8px;padding:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" onclick="toggleStyleLocksPanel()">
+            <div class="u-fw700 u-c-accent fx fx-ac fx-g8">
+              <span>🎨 Khóa Nhất Quán Phong Cách, Ánh Sáng & Nhân Vật (Style Locks)</span>
+              <span class="pill running u-fs10">Production Bible</span>
+            </div>
+            <span class="u-c-muted u-fs12" id="styleLocksToggleIcon">▼ Thu gọn/Mở rộng</span>
+          </div>
+          <div id="styleLocksContent" style="display:block;margin-top:10px;">
+            <div class="form-row cols-2">
+              <div>
+                <label>Máy quay & Phong cách (Style Look)</label>
+                <input type="text" id="lockStyle" value="shot on ARRI Alexa 35, 4K UHD, 35mm film grain, masterpiece, no watermark" placeholder="Ví dụ: shot on ARRI Alexa 35, 35mm film grain...">
+              </div>
+              <div>
+                <label>Ánh sáng xuyên suốt (Lighting)</label>
+                <input type="text" id="lockLighting" value="cinematic volumetric lighting, dramatic rim light, moody contrast" placeholder="Ví dụ: volumetric lighting, golden hour, neon rim...">
+              </div>
+            </div>
+            <div class="form-row cols-3 u-mt8">
+              <div>
+                <label>Màu phim (Color Grading)</label>
+                <input type="text" id="lockColor" value="teal and orange cinematic grading, deep shadows" placeholder="Ví dụ: teal and orange, neo-noir, warm vintage...">
+              </div>
+              <div>
+                <label>Ống kính (Camera Lens)</label>
+                <input type="text" id="lockCamera" value="Zeiss Master Prime anamorphic lenses, shallow depth of field" placeholder="Ví dụ: 85mm portrait, 35mm wide, anamorphic bokeh...">
+              </div>
+              <div>
+                <label>Neo ngoại hình nhân vật chính</label>
+                <input type="text" id="lockCharacter" value="" placeholder="Ví dụ: solitary swordsman in dark hanfu robe and bamboo conical hat...">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-row cols-2" style="margin-top:12px;background:rgba(0,0,0,0.2);padding:10px;border-radius:6px;border:1px solid var(--border);">
+          <div>
+            <div class="u-row-between">
+              <label class="u-mb0 u-c-yellow u-fw700">🔗 Chế độ Điều phối / Chaining</label>
+              <span class="u-muted-sm">First/Last Frame Chaining</span>
+            </div>
+            <select class="u-mt4" id="chainMode">
+              <option value="none" selected>⚡ Chạy song song đa luồng (Render các cảnh cùng lúc - Nhanh nhất)</option>
+              <option value="sequential">🔗 Nối tiếp tuần tự (Từng cảnh một: Last Frame Cảnh N-1 ➔ First Frame Cảnh N)</option>
+            </select>
+            <div class="u-fs105 u-c-muted u-mt3">
+              💡 <b>Song song</b>: Tận dụng toàn bộ tài khoản để render cùng lúc. <b>Tuần tự</b>: Bắt buộc chạy từng cảnh một để lấy ảnh cuối nối tiếp.
+            </div>
+          </div>
+        </div></div></details>
+        <div class="u-mt12">
+          <div>
+            <div class="u-row-between">
+              <label class="u-mb0 u-c-accent u-fw700">⚡ Phân rã Kịch bản theo Nhịp (Beat Planning)</label>
+              <span class="u-muted-sm">Nhịp 3-5s chuyên nghiệp</span>
+            </div>
+            <button type="button" class="btn btn-ghost" style="margin-top:4px;width:100%;font-size:12px;border:1px solid var(--accent);color:var(--accent);" onclick="openBeatBreakdownModal()">
+              🎬 Phân rã Kịch bản thành Nhịp 3-5s & Tự động Chaining
+            </button>
+          </div>
+        </div>
+        </div>
+        <div class="cfg-col">
+        <h3 class="form-group-title"><span class="fg-num">3</span> Âm thanh &amp; giọng đọc</h3>
         <!-- Row 2: Giọng đọc & Render -->
         <div class="form-row cols-4">
           <div>
             <label>Chế độ âm thanh & Lời thoại</label>
-            <select id="voiceModeSelect" style="margin-top:4px;" onchange="onGlobalVoiceModeChanged()">
+            <select class="u-mt4" id="voiceModeSelect" onchange="onGlobalVoiceModeChanged()">
               <option value="tts" selected>🎙️ Lồng tiếng thuyết minh (Edge-TTS)</option>
               <option value="ai_voice">🤖 Đưa thoại vào Prompt (AI tạo tiếng)</option>
             </select>
           </div>
           <div>
             <div class="u-row-between">
-              <label style="margin-bottom:0;" id="voiceSelectLabel">Giọng TTS mặc định</label>
-              <button type="button" id="btnTestVoice" class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 6px;color:var(--accent);" onclick="testPlayVoice(document.getElementById('voiceSelect').value)">🔊 Nghe thử</button>
+              <label class="u-mb0" id="voiceSelectLabel">Giọng TTS mặc định</label>
+              <button type="button" id="btnTestVoice" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="testPlayVoice(document.getElementById('voiceSelect').value)">🔊 Nghe thử</button>
             </div>
-            <select id="voiceSelect" style="margin-top:4px;" onchange="onVoiceSelectChanged()">
+            <select class="u-mt4" id="voiceSelect" onchange="onVoiceSelectChanged()">
               <optgroup label="⚡ VieNeu-TTS (On-Device Neural Tiếng Việt)">
                 <option value="vieneu:AdamBua" selected>👨 Nam - ⭐ Adam bựa (Nam Bắc · Hài hước, vui nhộn, meme troll)</option>
                 <option value="vieneu:TrucLy">👩 Nữ - Trúc Ly (Nữ Bắc · Tự nhiên, truyền cảm)</option>
@@ -219,32 +309,33 @@
         <div class="form-row cols-3" style="background:rgba(255,255,255,0.02);padding:12px;border-radius:8px;border:1px solid var(--border);margin-top:8px;">
           <div>
             <div class="u-row-between">
-              <label style="margin-bottom:0;color:var(--accent);font-weight:600;">🎵 Nhạc nền (BGM)</label>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 6px;" onclick="document.getElementById('bgmUploadInput').click()">📁 Tải nhạc</button>
+              <label class="u-mb0 u-c-accent u-fw600">🎵 Nhạc nền (BGM)</label>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6" onclick="document.getElementById('bgmUploadInput').click()">📁 Tải nhạc</button>
               <input type="file" id="bgmUploadInput" accept="audio/*" style="display:none;" onchange="uploadMusicFile(this)">
             </div>
-            <select id="bgMusicSelect" style="margin-top:4px;">
+            <select class="u-mt4" id="bgMusicSelect">
               <option value="">🚫 Không dùng nhạc nền</option>
             </select>
           </div>
           <div>
             <div class="u-row-between">
-              <label style="margin-bottom:0;">Âm lượng Nhạc nền: <b id="lblMusicVol" style="color:var(--accent);">25%</b></label>
+              <label class="u-mb0">Âm lượng Nhạc nền: <b class="u-c-accent" id="lblMusicVol">25%</b></label>
             </div>
-            <input type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25" style="margin-top:8px;accent-color:var(--accent);" oninput="document.getElementById('lblMusicVol').textContent=Math.round(this.value*100)+'%'">
+            <input class="u-mt8 u-ac-accent" type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25" oninput="document.getElementById('lblMusicVol').textContent=Math.round(this.value*100)+'%'">
           </div>
           <div>
             <div class="u-row-between">
-              <label style="margin-bottom:0;">Âm lượng Lời thoại: <b id="lblVoiceVol" style="color:var(--green);">100%</b></label>
+              <label class="u-mb0">Âm lượng Lời thoại: <b class="u-c-green" id="lblVoiceVol">100%</b></label>
             </div>
-            <input type="range" id="voiceVolume" min="0" max="2" step="0.1" value="1.0" style="margin-top:8px;accent-color:var(--green);" oninput="document.getElementById('lblVoiceVol').textContent=Math.round(this.value*100)+'%'">
+            <input class="u-mt8 u-ac-green" type="range" id="voiceVolume" min="0" max="2" step="0.1" value="1.0" oninput="document.getElementById('lblVoiceVol').textContent=Math.round(this.value*100)+'%'">
           </div>
         </div>
 
+        <h3 class="form-group-title"><span class="fg-num">4</span> Xuất phim</h3>
         <!-- Row 4: Phụ đề, Chất lượng xuất, Chuyển cảnh & Chaining Fallback -->
-        <div class="form-row cols-4" style="margin-top:10px;">
+        <div class="form-row cols-4 u-mt10">
           <div>
-            <label style="font-weight:600;">📝 Chế độ Phụ đề</label>
+            <label class="u-fw600">📝 Chế độ Phụ đề</label>
             <select id="subtitleMode">
               <option value="burn_in" selected>📺 Khắc vào video (Burn-in)</option>
               <option value="srt_only">📥 Chỉ file SRT tải về</option>
@@ -252,7 +343,7 @@
             </select>
           </div>
           <div>
-            <label style="font-weight:600;">🎞️ Chất lượng xuất</label>
+            <label class="u-fw600">🎞️ Chất lượng xuất</label>
             <select id="exportQuality">
               <option value="preview">⚡ Preview nhanh (CRF 28, siêu tốc)</option>
               <option value="720p" selected>📺 720p HD (Chuẩn mạng xã hội)</option>
@@ -260,7 +351,7 @@
             </select>
           </div>
           <div>
-            <label style="font-weight:600;">✨ Chuyển cảnh (Transitions)</label>
+            <label class="u-fw600">✨ Chuyển cảnh (Transitions)</label>
             <select id="sceneTransition">
               <option value="none" selected>✂️ Cắt thẳng (Cut)</option>
               <option value="fade">🌫️ Mờ dần (Fade In/Out)</option>
@@ -268,7 +359,7 @@
             </select>
           </div>
           <div>
-            <label style="font-weight:600;color:var(--yellow);">⚠️ Cảnh trước lỗi thì làm gì?</label>
+            <label class="u-fw600 u-c-yellow">⚠️ Cảnh trước lỗi thì làm gì?</label>
             <select id="chainFallbackMode">
               <option value="independent" selected>⚡ Render Độc lập (Khuyên dùng)</option>
               <option value="fallback_image">🖼️ Dùng ảnh Keyframe/Nhân vật</option>
@@ -277,66 +368,7 @@
           </div>
         </div>
 
-        <!-- Row 5: Khóa Nhất Quán Phong Cách Điện Ảnh (Style Locks) -->
-        <div style="margin-top:12px;background:rgba(0,0,0,0.25);border:1px solid var(--border);border-radius:8px;padding:12px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" onclick="toggleStyleLocksPanel()">
-            <div style="font-weight:700;color:var(--accent);display:flex;align-items:center;gap:8px;">
-              <span>🎨 Khóa Nhất Quán Phong Cách, Ánh Sáng & Nhân Vật (Style Locks)</span>
-              <span class="pill running" style="font-size:10px;">Production Bible</span>
-            </div>
-            <span id="styleLocksToggleIcon" style="color:var(--muted);font-size:12px;">▼ Thu gọn/Mở rộng</span>
-          </div>
-          <div id="styleLocksContent" style="display:block;margin-top:10px;">
-            <div class="form-row cols-2">
-              <div>
-                <label>Máy quay & Phong cách (Style Look)</label>
-                <input type="text" id="lockStyle" value="shot on ARRI Alexa 35, 4K UHD, 35mm film grain, masterpiece, no watermark" placeholder="Ví dụ: shot on ARRI Alexa 35, 35mm film grain...">
-              </div>
-              <div>
-                <label>Ánh sáng xuyên suốt (Lighting)</label>
-                <input type="text" id="lockLighting" value="cinematic volumetric lighting, dramatic rim light, moody contrast" placeholder="Ví dụ: volumetric lighting, golden hour, neon rim...">
-              </div>
-            </div>
-            <div class="form-row cols-3" style="margin-top:8px;">
-              <div>
-                <label>Màu phim (Color Grading)</label>
-                <input type="text" id="lockColor" value="teal and orange cinematic grading, deep shadows" placeholder="Ví dụ: teal and orange, neo-noir, warm vintage...">
-              </div>
-              <div>
-                <label>Ống kính (Camera Lens)</label>
-                <input type="text" id="lockCamera" value="Zeiss Master Prime anamorphic lenses, shallow depth of field" placeholder="Ví dụ: 85mm portrait, 35mm wide, anamorphic bokeh...">
-              </div>
-              <div>
-                <label>Neo ngoại hình nhân vật chính</label>
-                <input type="text" id="lockCharacter" value="" placeholder="Ví dụ: solitary swordsman in dark hanfu robe and bamboo conical hat...">
-              </div>
-            </div>
-          </div>
         </div>
-
-        <div class="form-row cols-2" style="margin-top:12px;background:rgba(0,0,0,0.2);padding:10px;border-radius:6px;border:1px solid var(--border);">
-          <div>
-            <div class="u-row-between">
-              <label style="margin-bottom:0;color:var(--yellow);font-weight:700;">🔗 Chế độ Điều phối / Chaining</label>
-              <span class="u-muted-sm">First/Last Frame Chaining</span>
-            </div>
-            <select id="chainMode" style="margin-top:4px;">
-              <option value="none" selected>⚡ Chạy song song đa luồng (Render các cảnh cùng lúc - Nhanh nhất)</option>
-              <option value="sequential">🔗 Nối tiếp tuần tự (Từng cảnh một: Last Frame Cảnh N-1 ➔ First Frame Cảnh N)</option>
-            </select>
-            <div style="font-size:10.5px;color:var(--muted);margin-top:3px;">
-              💡 <b>Song song</b>: Tận dụng toàn bộ tài khoản để render cùng lúc. <b>Tuần tự</b>: Bắt buộc chạy từng cảnh một để lấy ảnh cuối nối tiếp.
-            </div>
-          </div>
-          <div>
-            <div class="u-row-between">
-              <label style="margin-bottom:0;color:var(--accent);font-weight:700;">⚡ Phân rã Kịch bản theo Nhịp (Beat Planning)</label>
-              <span class="u-muted-sm">Nhịp 3-5s chuyên nghiệp</span>
-            </div>
-            <button type="button" class="btn btn-ghost" style="margin-top:4px;width:100%;font-size:12px;border:1px solid var(--accent);color:var(--accent);" onclick="openBeatBreakdownModal()">
-              🎬 Phân rã Kịch bản thành Nhịp 3-5s & Tự động Chaining
-            </button>
-          </div>
         </div>
 
         <div class="form-row" style="margin-top:12px;background:rgba(56,189,248,0.05);padding:10px;border-radius:6px;border:1px solid rgba(56,189,248,0.3);">
@@ -363,11 +395,11 @@
           <div class="card-title">⚡ Phân rã Kịch bản theo Nhịp Điện ảnh (Beat Planning & Chaining)</div>
           <button class="btn btn-ghost btn-sm" onclick="closeBeatBreakdownModal()">✕ Đóng</button>
         </div>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
+        <p class="u-fs12 u-c-muted u-mb10">
           Chia kịch bản thành các "nhịp" ngắn 3-5 giây (mỗi nhịp là một hành động hoặc một góc máy duy nhất). Hệ thống sẽ tự động bật <b>First/Last Frame Chaining</b> để các nhịp nối tiếp nhau liên tục không gián đoạn!
         </p>
         <textarea id="beatScriptInput" rows="4" placeholder="Dán đoạn văn kịch bản hoặc tình huống cần chia nhịp vào đây..."></textarea>
-        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px;">
+        <div class="fx fx-g10 fx-jc-fe u-mt10">
           <button class="btn btn-ghost" onclick="closeBeatBreakdownModal()">Hủy</button>
           <button class="btn btn-primary" id="btnRunBeatBreakdown" onclick="executeBeatBreakdown()">
             🪄 Phân rã thành các nhịp & Tự động bật Chaining
@@ -379,23 +411,24 @@
       <div class="card">
         <div class="card-header">
           <div class="card-title">📋 Bộ kịch bản mẫu để Test</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;">
-            <button class="btn btn-primary btn-sm" style="background:linear-gradient(135deg,#0284c7,#9333ea);font-weight:700;" onclick="openPromptSheetModal()">💡 Mở Sheet Prompt Mẫu & Cú Pháp ChatGPT</button>
+          <div class="fx fx-g6 fx-wrap">
+            <button class="btn btn-primary btn-sm u-fw700" onclick="openPromptSheetModal()">💡 Mở Sheet Prompt Mẫu & Cú Pháp ChatGPT</button>
             <button class="btn btn-ghost btn-sm" onclick="loadDialogueSample()">🎭 Test Đối thoại Nam - Nữ (2 Cảnh)</button>
             <button class="btn btn-ghost btn-sm" onclick="loadTiktokSample()">📱 Test TikTok/Shorts (9:16)</button>
             <button class="btn btn-ghost btn-sm" onclick="loadSampleStoryboard()">⚔️ Test Kiếm Hiệp (5 Cảnh)</button>
-            <button class="btn btn-ghost btn-sm" style="border:1px solid rgba(56,189,248,0.4);color:var(--accent);" onclick="loadOneMinuteSample()">⏱️ Test Phim 1 Phút (60s - 8 Cảnh)</button>
+            <button class="btn btn-ghost btn-sm btn-outline" onclick="loadOneMinuteSample()">⏱️ Test Phim 1 Phút (60s - 8 Cảnh)</button>
             <button class="btn btn-ghost btn-sm" onclick="importFromText()">📝 Paste kịch bản</button>
             <button class="btn btn-ghost btn-sm" onclick="clearAll()">🗑️ Xóa</button>
           </div>
         </div>
         <div id="importTextArea" style="display:none;margin-bottom:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <label style="margin-bottom:0;">Dán bất kỳ kịch bản nào (Kịch bản ChatGPT / Kịch bản phân cảnh / Ý tưởng thô):</label>
-            <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;color:var(--accent);padding:2px 6px;" onclick="openPromptSheetModal()">💡 Xem kịch bản mẫu & cú pháp chuẩn</button>
+          <div class="fx fx-jc-sb fx-ac u-mb4">
+            <label class="u-mb0">Dán bất kỳ kịch bản nào (Kịch bản ChatGPT / Kịch bản phân cảnh / Ý tưởng thô):</label>
+            <button type="button" class="btn btn-ghost btn-sm u-fs11 u-c-accent u-p-2-6" onclick="openPromptSheetModal()">💡 Xem kịch bản mẫu & cú pháp chuẩn</button>
           </div>
+          <input type="hidden" id="globalStylePreset" value="">
           <textarea id="rawScriptInput" rows="6" placeholder="Dán kịch bản của bạn vào đây...&#10;Ví dụ: Bạn có thể dán kịch bản phân cảnh từ ChatGPT hoặc ý tưởng truyện thô."></textarea>
-          <div style="display:flex;gap:8px;margin-top:8px;">
+          <div class="fx fx-g8 u-mt8">
             <button class="btn btn-primary btn-sm" onclick="parseAndAddScenes()">⚡ Bóc tách & Thêm cảnh trực tiếp</button>
             <button id="btnAiStandardize" class="btn btn-ghost btn-sm" style="border:1px solid var(--accent);color:var(--accent);" onclick="aiStandardizeScript()">🤖 Dùng AI Tự Động Chuyển Thể Sang Chuẩn Studio</button>
           </div>
@@ -403,15 +436,15 @@
       </div>
 
       <!-- Scene list -->
-      <div class="card">
+      <div class="card scene-list-card">
         <div class="card-header">
           <div class="card-title" id="sceneCountLabel">📽️ Danh sách phân cảnh (0 cảnh)</div>
-          <div style="display:flex;gap:6px;align-items:center;">
-            <button id="btnToggleSceneScrollFrame" class="btn btn-ghost btn-sm" onclick="toggleSceneScrollFrame()" style="font-size:11px;" title="Bật/Tắt khung cuộn cho danh sách cảnh">🔒 Khung Cuộn</button>
+          <div class="fx fx-g6 fx-ac">
+            <button id="btnToggleSceneScrollFrame" class="btn btn-ghost btn-sm u-fs11" onclick="toggleSceneScrollFrame()" title="Bật/Tắt khung cuộn cho danh sách cảnh">🔒 Khung Cuộn</button>
             <button class="btn btn-ghost btn-sm" onclick="addScene()">＋ Thêm cảnh</button>
           </div>
         </div>
-        <div class="scene-list has-scroll-frame" id="sceneList"></div>
+        <div class="scene-list has-scroll-frame" id="sceneList"><div class="scene-empty"><div class="empty-icon">🎬</div><div class="u-fw600 u-c-text">Chưa có cảnh nào</div><div class="u-mt4">Bấm “＋ Thêm cảnh” hoặc nạp kịch bản mẫu ở trên để bắt đầu.</div></div></div>
       </div>
 
       <!-- Launch button -->
@@ -419,41 +452,41 @@
         <button id="btnCreateMovie" class="btn btn-primary btn-lg" onclick="startMovieCreation()">
           🚀 Bắt đầu Sản xuất Hàng Loạt
         </button>
-        <span id="createStatus" style="color:var(--muted);font-size:13px;"></span>
+        <span class="u-c-muted u-fs13" id="createStatus"></span>
+        <span class="cta-hint">Phím tắt <span class="kbd">Ctrl</span>+<span class="kbd">Enter</span></span>
       </div>
     </div>
 
     <!-- ─ Panel: Video Tiếp Thị Liên Kết (Affiliate Marketing) ────── -->
     <div class="panel" id="panel-affiliate">
       <!-- Header Banner -->
-      <div class="card" style="background:linear-gradient(135deg, rgba(236,72,153,0.12) 0%, rgba(168,85,247,0.08) 100%);border-color:rgba(236,72,153,0.3);margin-bottom:16px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+      <div class="card aff-banner">
+        <div class="fx fx-ac fx-jc-sb fx-wrap fx-g12">
           <div>
             <div class="u-flex-10">
-              <span style="font-size:28px;">🛍️</span>
+              <span class="u-fs28">🛍️</span>
               <div>
                 <h2 style="font-size:18px;font-weight:700;margin:0;color:#fff;">
                   Xưởng Sản Xuất Video Tiếp Thị Liên Kết (Affiliate Marketing Studio)
                 </h2>
-                <div style="font-size:12.5px;color:var(--muted);margin-top:2px;">
+                <div class="u-fs125 u-c-muted u-mt2">
                   Tự động hoá sản xuất video chuyển đổi cao cho <b>TikTok Shop · Shopee Affiliate · Facebook Reels · YouTube Shorts</b>
                 </div>
               </div>
             </div>
           </div>
           <div class="u-flex-wrap">
-            <span class="badge" style="background:rgba(236,72,153,0.2);color:#f43f5e;border:1px solid rgba(236,72,153,0.3);font-size:11px;padding:3px 8px;border-radius:12px;">🔥 TikTok Shop Ready</span>
-            <span class="badge" style="background:rgba(249,115,22,0.2);color:#fb923c;border:1px solid rgba(249,115,22,0.3);font-size:11px;padding:3px 8px;border-radius:12px;">📦 Shopee Video</span>
-            <span class="badge" style="background:rgba(59,130,246,0.2);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);font-size:11px;padding:3px 8px;border-radius:12px;">📱 9:16 Vertical HD</span>
+            <span class="badge aff-badge">🔥 TikTok Shop Ready</span>
+            <span class="badge aff-badge">📦 Shopee Video</span>
+            <span class="badge aff-badge">📱 9:16 Vertical HD</span>
           </div>
         </div>
       </div>
 
       <!-- Main 2-column layout -->
-      <div style="display:grid;grid-template-columns:1fr 1.35fr;gap:20px;align-items:start;">
-        
+      <div class="affiliate-grid">
         <!-- LEFT COLUMN: Product & Campaign Inputs -->
-        <div style="display:flex;flex-direction:column;gap:16px;">
+        <div class="aff-col">
           
           <!-- Card 1: Thông tin sản phẩm -->
           <div class="card">
@@ -465,13 +498,13 @@
               <!-- Product Name -->
               <div>
                 <label class="field-label">
-                  Tên sản phẩm tiếp thị <span style="color:#f43f5e;">*</span>
+                  Tên sản phẩm tiếp thị <span class="req" title="Bắt buộc">*</span>
                 </label>
                 <input type="text" id="affiliateProdName" class="form-control u-w-full" placeholder="Ví dụ: Giá đỡ điện thoại xoay 360 hợp kim nhôm">
               </div>
 
               <!-- Category & Ratio -->
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+              <div class="gd gd-2 fx-g10">
                 <div>
                   <label class="field-label">
                     Ngành hàng / Danh mục
@@ -503,7 +536,7 @@
                 <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">
                   ⚡ Gợi ý sản phẩm mẫu thịnh hành:
                 </label>
-                <div id="affiliateSamplePills" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+                <div class="fx fx-wrap fx-g6" id="affiliateSamplePills"></div>
               </div>
 
               <!-- Key Features -->
@@ -511,7 +544,7 @@
                 <label class="field-label">
                   Tính năng cốt lõi / Điểm bán độc nhất (USP)
                 </label>
-                <textarea id="affiliateFeatures" rows="2" class="form-control" placeholder="Ví dụ: Khớp xoay 360 độ êm ru, hợp kim nhôm chắc chắn không rung lắc, gấp gọn bỏ túi mang đi khắp nơi..." style="width:100%;font-size:12.5px;"></textarea>
+                <textarea id="affiliateFeatures" rows="2" class="form-control u-w100 u-fs125" placeholder="Ví dụ: Khớp xoay 360 độ êm ru, hợp kim nhôm chắc chắn không rung lắc, gấp gọn bỏ túi mang đi khắp nơi..."></textarea>
               </div>
 
               <!-- Pain Points -->
@@ -519,11 +552,11 @@
                 <label class="field-label">
                   Nỗi đau / Vấn đề của khách hàng cần giải quyết
                 </label>
-                <textarea id="affiliatePain" rows="2" class="form-control" placeholder="Ví dụ: Cầm điện thoại mỏi nhừ tay, để bàn bị trơn trượt đổ vỡ, livestream góc quay xấu..." style="width:100%;font-size:12.5px;"></textarea>
+                <textarea id="affiliatePain" rows="2" class="form-control u-w100 u-fs125" placeholder="Ví dụ: Cầm điện thoại mỏi nhừ tay, để bàn bị trơn trượt đổ vỡ, livestream góc quay xấu..."></textarea>
               </div>
 
               <!-- Price & Promotion -->
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+              <div class="gd gd-2 fx-g10">
                 <div>
                   <label class="field-label">
                     Giá khuyến mãi / Deal
@@ -543,7 +576,7 @@
                 <label class="field-label">
                   🖼️ Ảnh sản phẩm thực tế (Khóa mẫu Product Lock)
                 </label>
-                <div style="display:flex;gap:10px;align-items:center;">
+                <div class="fx fx-g10 fx-ac">
                   <input type="file" id="affiliateImgUpload" accept="image/*" style="display:none;" onchange="onAffiliateImageUpload(event)">
                   <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('affiliateImgUpload').click()" style="border:1px dashed var(--border);padding:8px 12px;">
                     📁 Tải ảnh sản phẩm lên
@@ -553,7 +586,7 @@
                     <button type="button" class="btn btn-ghost btn-xs" onclick="clearAffiliateImage()" style="color:#ef4444;">✕ Xóa</button>
                   </div>
                 </div>
-                <div style="font-size:11px;color:var(--muted);margin-top:4px;">
+                <div class="u-fs11 u-c-muted u-mt4">
                   💡 Ảnh này được AI dùng làm tham chiếu để sản phẩm trong video đồng nhất 100% với ảnh shop của bạn.
                 </div>
               </div>
@@ -572,13 +605,13 @@
                 <label class="field-label">
                   🎬 Kiểu quay Video (Shooting Style)
                 </label>
-                <select id="affiliateShootingStyle" class="form-control" onchange="onAffiliateShootingStyleChange()" style="width:100%;font-weight:600;">
+                <select id="affiliateShootingStyle" class="form-control u-w100 u-fw600" onchange="onAffiliateShootingStyleChange()">
                   <option value="faceless" selected>👤 Người mẫu không lộ mặt (Mẫu mặc/dùng, quay từ cổ trở xuống hoặc từ phía sau)</option>
                   <option value="hands">✋ Chỉ quay tay (Đôi tay cầm, xoay, thao tác với sản phẩm trên nền đẹp)</option>
                   <option value="product">📦 Chỉ quay sản phẩm (Không có người — sản phẩm được quay như quảng cáo)</option>
                   <option value="koc_face">🧑 KOC lộ mặt đầy đủ (Khuôn mặt đồng nhất theo hình mẫu KOC)</option>
                 </select>
-                <div id="affiliateShootingStyleDesc" style="font-size:11.5px;color:#a855f7;margin-top:4px;font-style:italic;">
+                <div id="affiliateShootingStyleDesc" class="u-fs115 u-c-accent u-mt4 u-fs-it">
                   💡 Người mẫu mặc/dùng sản phẩm, chỉ quay từ cổ trở xuống hoặc từ phía sau. Tinh tế, sang trọng, loại bỏ hoàn toàn lỗi biến dạng mặt!
                 </div>
               </div>
@@ -594,7 +627,7 @@
                   <option value="chuyen_gia_nu">👩‍💼 Mai Phương (Nữ Chuyên Gia 29t · Thanh lịch uy tín, Sức khỏe/Cao cấp)</option>
                   <option value="nam_lich_lam">🧔 Hoàng Nam (Nam Reviewer 30t · Lịch lãm nam tính, Công nghệ)</option>
                 </select>
-                <div id="affiliateKocDesc" style="font-size:11.5px;color:#38bdf8;margin-top:4px;font-style:italic;">
+                <div id="affiliateKocDesc" class="u-fs115 u-c-accent u-mt4 u-fs-it">
                   💡 Tự động khóa chặt khuôn mặt, trang phục và phong cách của KOC xuyên suốt 5 cảnh quay để không bị mỗi cảnh một người khác nhau!
                 </div>
               </div>
@@ -611,16 +644,16 @@
                   <option value="before_after">🔄 Before / After (Biến hóa trước và sau khi dùng) [Bắt mắt]</option>
                   <option value="aida">⚡ AIDA (Attention ➔ Interest ➔ Desire ➔ Action) [Kinh điển marketing]</option>
                 </select>
-                <div id="affiliateFrameworkDesc" style="font-size:11.5px;color:#c084fc;margin-top:4px;font-style:italic;"></div>
+                <div id="affiliateFrameworkDesc" class="u-fs115 u-c-accent u-mt4 u-fs-it"></div>
               </div>
 
               <!-- Voice Selection -->
               <div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                  <label style="font-size:12px;font-weight:600;color:var(--text);margin:0;">
+                <div class="fx fx-jc-sb fx-ac u-mb4">
+                  <label class="u-fs12 u-fw600 u-c-text u-m0">
                     Giọng đọc lồng tiếng tiếp thị
                   </label>
-                  <button type="button" id="btnAffiliateVoiceTest" class="btn btn-ghost btn-xs" onclick="testAffiliateVoice()" style="color:#38bdf8;">
+                  <button type="button" id="btnAffiliateVoiceTest" class="btn btn-ghost btn-xs u-c-accent" onclick="testAffiliateVoice()">
                     🔊 Nghe thử giọng
                   </button>
                 </div>
@@ -630,8 +663,8 @@
               </div>
 
               <!-- Generate Button -->
-              <div style="margin-top:6px;">
-                <button type="button" id="btnGenAffiliateScript" class="btn btn-primary" onclick="generateAffiliateScriptAction()" style="width:100%;padding:12px;font-size:14px;font-weight:700;background:linear-gradient(135deg, #ec4899, #a855f7);border:none;box-shadow:0 4px 14px rgba(236,72,153,0.35);">
+              <div class="u-mt6">
+                <button type="button" id="btnGenAffiliateScript" class="btn btn-primary u-w100" onclick="generateAffiliateScriptAction()" style="padding:12px;font-size:14px;font-weight:700;">
                   ✨ AI Tạo Kịch Bản Video Tiếp Thị (5 Cảnh 9:16)
                 </button>
               </div>
@@ -640,27 +673,27 @@
         </div>
 
         <!-- RIGHT COLUMN: Storyboard Review & Video Export -->
-        <div style="display:flex;flex-direction:column;gap:16px;">
+        <div class="aff-col">
           
           <div class="card" style="min-height:550px;">
-            <div class="card-header" style="flex-wrap:wrap;gap:10px;">
+            <div class="card-header fx-wrap fx-g10">
               <div>
                 <div class="card-title" id="affiliateScriptHeader">🎬 Kịch Bản Phân Cảnh Bán Hàng (Storyboard)</div>
-                <div id="affiliateScriptSub" style="font-size:12px;color:var(--muted);margin-top:2px;">
+                <div class="u-fs12 u-c-muted u-mt2" id="affiliateScriptSub">
                   Xem và chỉnh sửa trực tiếp từng câu thoại, prompt quay và nút nghe thử trước khi xuất video.
                 </div>
               </div>
-              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <div class="fx fx-g6 fx-wrap">
                 <button type="button" class="btn btn-ghost btn-sm" onclick="copyAffiliateScriptText()">📋 Copy Kịch Bản</button>
                 <button type="button" class="btn btn-ghost btn-sm" onclick="addAffiliateSceneCustom()">＋ Thêm Cảnh</button>
               </div>
             </div>
 
             <!-- Completed Affiliate Video Showcase Card -->
-            <div id="affiliateFinishedVideoCard" class="card" style="display:none;background:linear-gradient(135deg, rgba(16,185,129,0.15) 0%, rgba(59,130,246,0.1) 100%);border:1px solid rgba(16,185,129,0.5);margin-bottom:16px;box-shadow:0 4px 20px rgba(16,185,129,0.25);">
+            <div id="affiliateFinishedVideoCard" class="card aff-finished-card" style="display:none;">
               <div class="card-header" style="flex-wrap:wrap;gap:8px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.08);">
                 <div class="card-title" style="color:#34d399;display:flex;align-items:center;gap:8px;font-size:15px;">
-                  <span style="font-size:20px;">🎉</span> Video Tiếp Thị Đã Sản Xuất Hoàn Tất (9:16)
+                  <span class="u-fs20">🎉</span> Video Tiếp Thị Đã Sản Xuất Hoàn Tất (9:16)
                 </div>
                 <div class="u-flex-wrap">
                   <a id="btnAffiliateDlVideo" class="btn btn-success btn-sm" href="#" download>⬇️ Tải MP4 Video</a>
@@ -674,11 +707,11 @@
                 </div>
                 <div style="flex:1;min-width:240px;">
                   <h4 id="affiliateFinishedTitle" style="font-size:15px;color:#fff;margin-bottom:8px;font-weight:700;"></h4>
-                  <p style="font-size:12.5px;color:var(--text);line-height:1.5;margin-bottom:14px;">
+                  <p class="u-fs125 u-c-text u-lh15 u-mb14">
                     ✨ <b>Video dọc 9:16</b> chuẩn TikTok Shop / Reels / Shorts đã được lồng tiếng tự nhiên, hòa âm BGM và khắc phụ đề chuẩn xác từng giây. Bạn có thể tải về để đăng ngay lên kênh bán hàng!
                   </p>
-                  <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                    <a id="btnAffiliateDlVideoBig" class="btn btn-primary btn-sm" href="#" download style="background:linear-gradient(135deg, #10b981, #059669);border:none;box-shadow:0 4px 12px rgba(16,185,129,0.3);font-weight:700;padding:8px 16px;">
+                  <div class="fx fx-g10 fx-wrap">
+                    <a id="btnAffiliateDlVideoBig" class="btn btn-primary btn-sm" href="#" download style="font-weight:700;padding:8px 16px;">
                       ⬇️ Tải Video Về Máy (MP4)
                     </a>
                     <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('affiliateFinishedPlayer').play()">
@@ -691,11 +724,11 @@
 
             <!-- Campaign Title & Badges Bar -->
             <div id="affiliateCampaignBar" style="display:none;background:var(--bg3);padding:10px 14px;border-radius:var(--radius);margin-bottom:14px;border:1px solid var(--border);">
-              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+              <div class="fx fx-jc-sb fx-ac fx-wrap fx-g8">
                 <div style="font-weight:700;font-size:13.5px;color:var(--accent);" id="affiliateCampaignTitle"></div>
-                <div style="display:flex;gap:6px;align-items:center;">
+                <div class="fx fx-g6 fx-ac">
                   <span class="badge" style="background:rgba(34,197,94,0.15);color:#4ade80;font-size:11px;padding:2px 8px;border-radius:10px;">🎯 Hook 99/100</span>
-                  <span class="badge" style="background:rgba(168,85,247,0.15);color:#c084fc;font-size:11px;padding:2px 8px;border-radius:10px;">TikTok Shop</span>
+                  <span class="badge aff-badge">TikTok Shop</span>
                 </div>
               </div>
             </div>
@@ -703,10 +736,10 @@
             <!-- Storyboard Scenes Container -->
             <div id="affiliateScenesList" class="u-col-12">
               <!-- Empty state placeholder -->
-              <div id="affiliateEmptyState" style="text-align:center;padding:48px 20px;color:var(--muted);">
-                <div style="font-size:42px;margin-bottom:12px;">💡</div>
-                <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:6px;">Chưa có kịch bản phân cảnh</div>
-                <div style="font-size:12.5px;max-width:380px;margin:0 auto 18px;">
+              <div id="affiliateEmptyState" class="empty-state">
+                <div class="empty-icon">💡</div>
+                <div class="empty-title">Chưa có kịch bản phân cảnh</div>
+                <div class="empty-text">
                   Nhập tên sản phẩm ở cột bên trái và bấm <b>"✨ AI Tạo Kịch Bản Video Tiếp Thị"</b> để tự động sản xuất 5 cảnh Hook - Nỗi đau - Trình diễn - Deal - Kêu gọi mua hàng!
                 </div>
                 <button class="btn btn-ghost btn-sm" onclick="loadSampleAffiliateQuick()" style="border:1px solid var(--border);">
@@ -718,20 +751,20 @@
             <!-- Render & Export Actions -->
             <div id="affiliateRenderActionBox" style="display:none;margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
               
-              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px;">
+              <div class="fx fx-jc-sb fx-ac fx-wrap fx-g12 u-mb14">
                 <div>
-                  <div style="font-size:12px;font-weight:600;color:var(--text);">🎵 Nhạc nền & Phụ đề nhảy nhịp</div>
+                  <div class="u-fs12 u-fw600 u-c-text">🎵 Nhạc nền & Phụ đề nhảy nhịp</div>
                   <div class="u-muted-sm">Tự động hòa trộn BGM sôi động + Voiceover sắc nét + Phụ đề nổi bật.</div>
                 </div>
-                <div style="display:flex;gap:10px;align-items:center;">
+                <div class="fx fx-g10 fx-ac">
                   <select id="affiliateBgmSelect" class="form-control" style="width:200px;font-size:12px;">
                     <option value="">(Không dùng BGM)</option>
                   </select>
                 </div>
               </div>
 
-              <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                <button type="button" id="btnAffiliateStartRender" class="btn btn-primary btn-lg" onclick="startAffiliateRenderJob()" style="flex:1;background:linear-gradient(135deg, #10b981, #059669);border:none;box-shadow:0 4px 14px rgba(16,185,129,0.3);font-weight:700;">
+              <div class="fx fx-g10 fx-wrap">
+                <button type="button" id="btnAffiliateStartRender" class="btn btn-primary btn-lg" onclick="startAffiliateRenderJob()" style="flex:1;font-weight:700;">
                   🚀 Bắt Đầu Tạo & Xuất Video Tiếp Thị 9:16
                 </button>
                 <button type="button" class="btn btn-ghost" onclick="sendAffiliateToMainStudio()" title="Đưa toàn bộ phân cảnh sang tab Tạo Phim truyền thống để chỉnh sửa thêm">
@@ -748,11 +781,11 @@
 
     <!-- ─ Panel: Characters ────────────────────────────────────── -->
     <div class="panel" id="panel-characters">
-      <div class="card" style="margin-bottom:16px;">
+      <div class="card u-mb16">
         <div class="card-header">
           <div>
             <div class="card-title">👥 Quản Lý Hồ Sơ Nhân Vật & Tự Động Khóa Tham Chiếu</div>
-            <div style="font-size:12px;color:var(--muted);margin-top:2px;">
+            <div class="u-fs12 u-c-muted u-mt2">
               Khai báo tên, ảnh tham chiếu, mô tả ngoại hình và giọng nói riêng. Hệ thống sẽ <b>tự động nhận diện tên nhân vật</b> trong prompt/lời thoại của từng cảnh để liên kết ảnh và giọng nói!
             </div>
           </div>
@@ -769,7 +802,7 @@
         <input type="hidden" id="charEditId" value="">
         <div class="form-row cols-2">
           <div>
-            <label>Tên nhân vật <span style="color:var(--red)">*</span></label>
+            <label>Tên nhân vật <span class="u-c-red">*</span></label>
             <input type="text" id="charName" placeholder="Ví dụ: Lương Phong, Phụng Anh, Giang Trần...">
           </div>
           <div>
@@ -777,22 +810,22 @@
             <input type="text" id="charAliases" placeholder="Ví dụ: Lương Phong, luong phong, kiếm sĩ, swordsman">
           </div>
         </div>
-        <div class="form-row cols-2" style="margin-top:10px;">
+        <div class="form-row cols-2 u-mt10">
           <div>
             <div class="u-row-between">
-              <label style="margin-bottom:0;">Giọng nói riêng của nhân vật</label>
-              <button type="button" class="btn btn-ghost btn-sm" style="font-size:11px;padding:1px 6px;color:var(--accent);" onclick="testPlayVoice(document.getElementById('charVoice').value)">🔊 Nghe thử</button>
+              <label class="u-mb0">Giọng nói riêng của nhân vật</label>
+              <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="testPlayVoice(document.getElementById('charVoice').value)">🔊 Nghe thử</button>
             </div>
-            <select id="charVoice" style="margin-top:4px;">
+            <select class="u-mt4" id="charVoice">
               <!-- Dynamically populated from VOICES -->
             </select>
           </div>
           <div>
             <label>Ảnh mẫu tham chiếu (Character Lock / First Frame)</label>
-            <div style="display:flex;gap:8px;align-items:center;">
-              <div id="charAvatarPreviewBox" style="width:40px;height:40px;border-radius:6px;background:var(--bg2);display:flex;align-items:center;justify-content:center;overflow:hidden;border:1px solid var(--border);flex-shrink:0;">
-                <span id="charAvatarEmpty" style="font-size:18px;">👤</span>
-                <img loading="lazy" decoding="async" id="charAvatarImg" src="" style="width:100%;height:100%;object-fit:cover;display:none;">
+            <div class="fx fx-g8 fx-ac">
+              <div id="charAvatarPreviewBox" class="char-avatar-box">
+                <span id="charAvatarEmpty" class="char-avatar-empty">👤</span>
+                <img loading="lazy" decoding="async" id="charAvatarImg" src="">
               </div>
               <input type="text" id="charAvatarUrl" placeholder="URL ảnh hoặc chọn file từ máy..." style="flex:1;" oninput="updateCharAvatarPreview(this.value)">
               <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('charUploadInput').click()">📁 Chọn ảnh</button>
@@ -800,50 +833,53 @@
             </div>
           </div>
         </div>
-        <div class="form-row" style="margin-top:10px;">
+        <div class="form-row u-mt10">
           <div>
             <label>Mô tả ngoại hình điện ảnh (Visual Description - Dùng để đồng nhất tạo hình qua các prompt)</label>
             <textarea id="charDescription" rows="2" placeholder="Ví dụ: tall handsome swordsman, cold piercing gaze, wearing tattered dark hanfu robe and weathered bamboo conical hat covering eyes, carrying ancient silver sword, cinematic lighting"></textarea>
           </div>
         </div>
-        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;">
+        <div class="fx fx-g10 fx-jc-fe u-mt14">
           <button class="btn btn-ghost" onclick="closeCharForm()">Hủy</button>
           <button class="btn btn-primary" onclick="saveCharacterFromForm()">💾 Lưu hồ sơ nhân vật</button>
         </div>
       </div>
 
       <!-- Character List Grid -->
-      <div id="charListGrid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(340px, 1fr));gap:16px;">
+      <div id="charListGrid" class="char-grid">
         <div style="color:var(--muted);padding:20px;grid-column:1/-1;text-align:center;">Đang tải danh sách nhân vật...</div>
       </div>
     </div>
 
     <!-- ─ Panel: Monitor ──────────────────────────────────────── -->
     <div class="panel" id="panel-monitor">
-      <div id="monitorEmpty" class="card" style="text-align:center;padding:40px;">
-        <div style="font-size:40px;margin-bottom:12px;">📊</div>
-        <div style="color:var(--muted);">Chưa có job nào đang chạy. Tạo phim mới để bắt đầu!</div>
+      <div id="monitorEmpty" class="card empty-state">
+        <div class="empty-icon">📊</div>
+        <div class="empty-title">Chưa có job nào đang chạy</div>
+        <div class="empty-text">Tạo phim mới để bắt đầu — tiến độ từng cảnh sẽ hiện ở đây theo thời gian thực.</div>
+        <button class="btn btn-primary" onclick="showPanel('create')">🎞️ Tạo phim mới</button>
       </div>
       <div id="monitorContent" style="display:none;">
-
+      <div class="monitor-grid">
+      <div class="monitor-main">
         <!-- Job info bar -->
         <div class="card">
-          <div class="card-header" style="margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+          <div class="card-header u-mb8 fx-wrap fx-g8">
             <div class="card-title" id="monJobTitle">🎬 Đang sản xuất...</div>
             <div class="u-flex-wrap">
               <span id="monSseBadge" class="sse-badge live"><span class="sse-dot"></span> <span id="monSseText">Trực tiếp</span></span>
               <span id="monJobPill" class="pill running">⚙️ Đang chạy</span>
               <button class="btn btn-danger btn-sm" id="btnCancelJob" onclick="cancelCurrentJob()" title="Dừng hoặc hủy ngay tiến trình job đang chạy">🛑 Dừng Job</button>
-              <div style="display:inline-flex;gap:4px;align-items:center;">
+              <div class="fx-inline fx-g4 fx-ac">
                 <input type="number" id="resumeSceneIdx" value="1" min="1" style="width:55px;padding:3px 6px;font-size:12px;" title="Cảnh bắt đầu chạy tiếp">
                 <button class="btn btn-ghost btn-sm" onclick="resumeJobFromScene()" title="Chạy tiếp các cảnh từ cảnh N trở đi mà không render lại cảnh cũ">▶️ Chạy tiếp từ Cảnh</button>
               </div>
             </div>
           </div>
-          <div class="prog-wrap" style="margin-bottom:6px;">
+          <div class="prog-wrap u-mb6">
             <div class="prog-bar" id="monProgressBar" style="width:0%"></div>
           </div>
-          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);">
+          <div class="fx fx-jc-sb u-fs12 u-c-muted">
             <span id="monProgressLabel">0%</span>
             <span id="monJobId" style="font-family:monospace;"></span>
           </div>
@@ -851,11 +887,11 @@
 
         <!-- Pre-Export Scene Audit Card (Kiểm định tính toàn vẹn trước khi xuất phim) -->
         <div class="card" id="sceneAuditCard" style="display:none;border:1px solid var(--yellow);background:rgba(251,191,36,0.03);">
-          <div class="card-header" style="margin-bottom:8px;">
-            <div class="card-title" style="color:var(--yellow);font-size:15px;display:flex;align-items:center;gap:8px;">
+          <div class="card-header u-mb8">
+            <div class="card-title u-c-yellow u-fs15 fx fx-ac fx-g8">
               <span>📋 KIỂM ĐỊNH TÍNH TOÀN VẸN CẢNH (PRE-EXPORT SCENE AUDIT)</span>
             </div>
-            <span id="auditStatsBadge" class="pill" style="font-size:11px;">0/0 Cảnh hoàn thành</span>
+            <span id="auditStatsBadge" class="pill u-fs11">0/0 Cảnh hoàn thành</span>
           </div>
           <div id="auditNoticeBox" style="font-size:12.5px;color:var(--text);margin-bottom:12px;line-height:1.5;padding:10px 12px;border-radius:6px;background:rgba(0,0,0,0.3);border:1px solid var(--border);">
             Đang phân tích dữ liệu kiểm định...
@@ -876,7 +912,7 @@
               </tbody>
             </table>
           </div>
-          <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap;">
+          <div class="fx fx-g10 fx-jc-fe u-mt14 fx-wrap">
             <button class="btn btn-danger" onclick="cancelCurrentJob()">
               ❌ Hủy xuất phim
             </button>
@@ -891,12 +927,12 @@
 
         <!-- Task Matrix -->
         <div class="card">
-          <div class="card-header" style="margin-bottom:14px;">
+          <div class="card-header u-mb14">
             <div class="card-title">🗂️ Trạng thái từng cảnh (Batch Matrix)</div>
-            <div style="display:flex;gap:12px;align-items:center;">
+            <div class="fx fx-g12 fx-ac">
               <button id="btnToggleTaskMatrix" class="btn btn-ghost btn-sm" onclick="toggleTaskMatrix()" title="Thu gọn/mở rộng bảng trạng thái từng cảnh">🔽 Thu gọn</button>
               <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:0;" title="Tự động phân tích lý do Muse từ chối và viết lại prompt an toàn chuẩn Hollywood">
-                <input type="checkbox" id="chkAutoFixPrompt" checked style="accent-color:var(--accent);">
+                <input class="u-ac-accent" type="checkbox" id="chkAutoFixPrompt" checked>
                 <span>🪄 Tự động sửa Prompt các cảnh lỗi</span>
               </label>
               <button id="btnRetryFailed" class="btn btn-danger btn-sm" style="display:none;" onclick="retryFailedScenes()">
@@ -908,17 +944,19 @@
           <div id="taskMatrixCompact" class="task-matrix-compact" style="display:none;"></div>
         </div>
 
+      </div><!-- /monitor-main -->
+      <div class="monitor-side">
         <!-- Log console -->
         <div class="card">
-          <div class="card-title" style="margin-bottom:10px;">🖥️ Log thời gian thực</div>
+          <div class="card-title u-mb10">🖥️ Log thời gian thực</div>
           <div class="log-console" id="logConsole"><p>Đang chờ log...</p></div>
         </div>
 
         <!-- Video output -->
         <div class="card" id="outputCard" style="display:none;">
-          <div class="card-header" style="flex-wrap:wrap;gap:8px;">
+          <div class="card-header fx-wrap fx-g8">
             <div class="card-title">🎉 Video thành phẩm hoàn chỉnh</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <div class="fx fx-g8 fx-wrap">
               <a id="dlBtn" class="btn btn-success btn-sm" href="#" download>🎬 Tải MP4 Phim</a>
               <a id="dlSrtBtn" class="btn btn-ghost btn-sm" href="#" style="display:none;" download>📝 Tải Phụ đề SRT</a>
               <button class="btn btn-ghost btn-sm" onclick="downloadJobMetadata()" title="Tải toàn bộ cấu hình, prompt và thông số dự án dạng JSON">📊 Tải Metadata JSON</button>
@@ -932,14 +970,24 @@
 
         <!-- Clips output -->
         <div class="card" id="clipsCard" style="display:none;">
-          <div class="card-title" style="margin-bottom:14px;">📱 Clips hàng loạt</div>
+          <div class="card-title u-mb14">📱 Clips hàng loạt</div>
           <div class="clips-grid" id="clipsGrid"></div>
         </div>
+      </div><!-- /monitor-side -->
+      </div><!-- /monitor-grid -->
       </div>
     </div>
 
     <!-- ─ Panel: Video Nhanh ─────────────────────────────────────── -->
     <div class="panel" id="panel-quick-video">
+      <div class="panel-head">
+        <div>
+          <h2>⚡ Tạo Video Nhanh</h2>
+          <div class="panel-sub">Gửi thẳng tới muse2api · Không ghép âm thanh/phụ đề</div>
+        </div>
+      </div>
+      <div class="qv-grid">
+      <div class="qv-main">
       <div class="card">
         <div class="card-header">
           <div class="card-title">⚡ Tạo Video Nhanh</div>
@@ -947,10 +995,10 @@
         </div>
 
         <!-- Prompt -->
-        <div class="form-group" style="margin-top:14px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <label class="form-label" style="margin-bottom:0;">📝 Prompt (Tiếng Việt hoặc Tiếng Anh)</label>
-            <button class="btn btn-ghost btn-sm" type="button" id="qvEnhanceBtn" onclick="enhanceQvPrompt()" style="font-size:12px;padding:3px 8px;">
+        <div class="form-group u-mt14">
+          <div class="fx fx-jc-sb fx-ac u-mb6">
+            <label class="form-label u-mb0">📝 Prompt (Tiếng Việt hoặc Tiếng Anh)</label>
+            <button class="btn btn-ghost btn-sm u-fs12 u-p-3-8" type="button" id="qvEnhanceBtn" onclick="enhanceQvPrompt()">
               ✨ Tự động dịch & Nâng cấp Hollywood
             </button>
           </div>
@@ -960,7 +1008,7 @@
 
 
         <!-- Size + Duration row -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;">
+        <div class="gd gd-2 fx-g12 u-mt12">
           <div class="form-group">
             <label class="form-label">📐 Tỉ lệ khung hình</label>
             <select id="qvSize" class="form-control">
@@ -978,9 +1026,9 @@
         </div>
 
         <!-- Reference image -->
-        <div class="form-group" style="margin-top:12px;">
+        <div class="form-group u-mt12">
           <label class="form-label">🖼️ Ảnh tham chiếu (tùy chọn)</label>
-          <div style="display:flex;gap:8px;align-items:center;">
+          <div class="fx fx-g8 fx-ac">
             <input type="file" id="qvRefFile" accept="image/*" style="display:none;"
               onchange="handleQvRefUpload(this)">
             <button class="btn btn-ghost btn-sm" onclick="document.getElementById('qvRefFile').click()">
@@ -996,7 +1044,7 @@
         </div>
 
         <!-- Generate button -->
-        <div style="margin-top:16px;display:flex;gap:10px;align-items:center;">
+        <div class="u-mt16 fx fx-g10 fx-ac">
           <button class="btn btn-primary" id="qvGenerateBtn" onclick="generateQuickVideo()">
             🎬 Tạo Video Ngay
           </button>
@@ -1004,9 +1052,11 @@
         </div>
       </div>
 
+      </div><!-- /qv-main -->
+      <div class="qv-side">
       <!-- Result -->
-      <div class="card" id="qvResultCard" style="display:none;margin-top:14px;">
-        <div class="card-title" style="margin-bottom:12px;">🎞️ Kết quả</div>
+      <div class="card" id="qvResultCard" style="display:none;">
+        <div class="card-title u-mb12">🎞️ Kết quả</div>
 
         <!-- Progress bar -->
         <div id="qvProgressWrap" style="margin-bottom:14px;">
@@ -1019,7 +1069,7 @@
         <!-- Video player -->
         <div id="qvVideoWrap" style="display:none;">
           <video id="qvVideoPlayer" controls style="width:100%;max-width:720px;border-radius:8px;background:#000;display:block;"></video>
-          <div style="margin-top:10px;display:flex;gap:8px;">
+          <div class="u-mt10 fx fx-g8">
             <a id="qvDownloadLink" class="btn btn-ghost btn-sm" download="quick_video.mp4">
               ⬇️ Tải xuống
             </a>
@@ -1034,9 +1084,9 @@
       </div>
 
       <!-- History -->
-      <div class="card" id="qvHistoryCard" style="margin-top:14px;">
+      <div class="card" id="qvHistoryCard">
         <div class="card-header">
-          <div class="card-title" style="font-size:14px;">🕒 Video vừa tạo</div>
+          <div class="card-title u-fs14">🕒 Video vừa tạo</div>
           <button class="btn btn-ghost btn-sm" onclick="clearQvHistory()">🗑️ Xóa lịch sử</button>
         </div>
         <div id="qvHistoryGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:10px;">
@@ -1045,15 +1095,27 @@
           </div>
         </div>
       </div>
+      </div><!-- /qv-side -->
+      </div><!-- /qv-grid -->
     </div>
 
     <!-- ─ Panel: Library ─────────────────────────────────────── -->
     <div class="panel" id="panel-library">
+      <div class="panel-head">
+        <div>
+          <h2>🗂️ Thư viện phim</h2>
+          <div class="panel-sub">Danh sách job đã tạo — bấm ▶️ để xem lại tiến độ, ⬇️ để tải phim về.</div>
+        </div>
+        <div class="panel-head-actions">
+          <button class="btn btn-ghost btn-sm" onclick="loadLibrary()">🔄 Làm mới</button>
+        </div>
+      </div>
       <div class="card">
         <div class="card-header">
           <div class="card-title">🗂️ Thư viện dự án</div>
           <button class="btn btn-ghost btn-sm" onclick="loadLibrary()">🔄 Làm mới</button>
         </div>
+        <div class="table-wrap">
         <table class="job-table" id="jobsTable">
           <thead>
             <tr>
@@ -1069,6 +1131,7 @@
             <tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px;">Đang tải...</td></tr>
           </tbody>
         </table>
+        </div>
       </div>
     </div>
 
@@ -1078,11 +1141,11 @@
       <!-- Header & Project Selector -->
       <div class="sd-header-bar">
         <div>
-          <div style="font-size:18px;font-weight:700;display:flex;align-items:center;gap:8px;">
+          <div class="u-fs18 u-fw700 fx fx-ac fx-g8">
             <span>🎬</span> Shot Desk Studio
             <span class="sd-status-badge sd-status-ready" id="sdProjectVersionBadge">v1.0</span>
           </div>
-          <div style="font-size:12px;color:var(--muted);margin-top:3px;">
+          <div class="u-fs12 u-c-muted u-mt3">
             Chuẩn làm phim AI thế hệ mới: Frames tham chiếu • Chống trôi nhân vật • Review Desk • Timeline Hậu kỳ
           </div>
         </div>
@@ -1096,13 +1159,13 @@
           <button type="button" class="btn btn-primary btn-sm" onclick="document.getElementById('sdZipFileInput').click()">
             📥 Nhập File ZIP
           </button>
-          <button type="button" class="btn btn-ghost btn-sm" style="color:var(--accent);border-color:rgba(56,189,248,0.4);" onclick="loadShotDeskSampleProject()" title="Nạp nhanh dự án mẫu 'Bức Thư Chưa Gửi' kèm frames">
+          <button type="button" class="btn btn-ghost btn-sm" style="color:var(--accent-ink);border-color:var(--accent-ring);" onclick="loadShotDeskSampleProject()" title="Nạp nhanh dự án mẫu 'Bức Thư Chưa Gửi' kèm frames">
             ⚡ Nạp Dự Án Mẫu
           </button>
           <button type="button" class="btn btn-ghost btn-sm" onclick="exportCurrentShotDeskZip()" title="Đóng gói và tải về toàn bộ dự án kèm clips">
             📤 Tải ZIP Dự Án
           </button>
-          <button type="button" class="btn btn-ghost btn-sm" style="color:var(--red);" onclick="deleteCurrentShotDeskProject()" title="Xóa dự án khỏi hệ thống">
+          <button type="button" class="btn btn-ghost btn-sm u-c-red" onclick="deleteCurrentShotDeskProject()" title="Xóa dự án khỏi hệ thống">
             🗑️
           </button>
         </div>
@@ -1130,13 +1193,13 @@
       <div id="sdSubtabContent-matrix" class="sd-subtab-pane">
         <!-- Pinned Common Settings Deck (Cố định ở trên) -->
         <div id="sdMatrixStickyDeck" class="sd-sticky-common-deck">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px;">
+          <div class="fx fx-jc-sb fx-ac u-mb10 fx-wrap fx-g10">
             <div class="u-flex-wrap">
               <button class="btn btn-primary btn-sm" onclick="renderAllShotDeskShots()">
                 🚀 Render Toàn Bộ (Đa luồng)
               </button>
               <div style="display:inline-flex;align-items:center;gap:4px;background:var(--bg0);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:12px;">
-                <span style="color:var(--muted);">Đa luồng:</span>
+                <span class="u-c-muted">Đa luồng:</span>
                 <select id="sdConcurrentSelect" style="border:none;background:transparent;padding:2px 4px;font-size:12px;font-weight:700;color:var(--accent);width:auto;">
                   <option value="6" selected>⚡ 6 luồng (Toàn bộ 6 tài khoản)</option>
                   <option value="1">1 luồng (Tuần tự)</option>
@@ -1149,7 +1212,7 @@
                   <option value="12">12 luồng song song</option>
                 </select>
               </div>
-              <button class="btn btn-ghost btn-sm" style="color:var(--yellow);" onclick="retryFailedShotDeskShots()">
+              <button class="btn btn-ghost btn-sm u-c-yellow" onclick="retryFailedShotDeskShots()">
                 🔄 Render Lại Cảnh Lỗi
               </button>
               <button class="btn btn-ghost btn-sm" style="color:var(--muted);border-color:var(--border);" onclick="resetStuckShotDeskShots()" title="Giải phóng toàn bộ các cảnh bị kẹt ở trạng thái rendering nếu server bị restart">
@@ -1162,7 +1225,7 @@
                 🎬 Chuyển Sang Dựng Phim Timeline
               </button>
             </div>
-            <div id="sdMatrixStats" style="font-size:12px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap;">
+            <div class="u-fs12 u-c-muted fx fx-g12 fx-wrap" id="sdMatrixStats">
               <!-- Stats -->
             </div>
           </div>
@@ -1170,14 +1233,14 @@
           <!-- Filter Bar & Search Box & View Mode & Scroll Frame Toggle -->
           <div id="sdFilterBar" style="background:var(--bg1);border:1px solid var(--border);border-radius:8px;padding:8px 12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
             <!-- Filter Pills -->
-            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;" id="sdFilterPills">
+            <div class="fx fx-g6 fx-ac fx-wrap" id="sdFilterPills">
               <button class="sd-filter-pill is-active" data-filter="all" onclick="setShotDeskFilter('all')">
                 Tất cả <span class="sd-filter-count" id="sdFilterCnt-all">0</span>
               </button>
               <button class="sd-filter-pill" data-filter="unapproved" onclick="setShotDeskFilter('unapproved')" style="color:#f59e0b;border-color:rgba(245,158,11,0.35);">
                 ⏳ Chưa Duyệt <span class="sd-filter-count" id="sdFilterCnt-unapproved">0</span>
               </button>
-              <button class="sd-filter-pill" data-filter="review" onclick="setShotDeskFilter('review')" style="color:#c084fc;border-color:rgba(192,132,252,0.35);">
+              <button class="sd-filter-pill" data-filter="review" onclick="setShotDeskFilter('review')" style="color:var(--accent-ink);border-color:var(--accent-ring);">
                 👁️ Chờ Review <span class="sd-filter-count" id="sdFilterCnt-review">0</span>
               </button>
               <button class="sd-filter-pill" data-filter="ready" onclick="setShotDeskFilter('ready')">
@@ -1195,7 +1258,7 @@
             </div>
 
             <!-- Search & Jump to Shot & View Mode Switcher & Scroll Frame Toggle -->
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div class="fx fx-ac fx-g8 fx-wrap">
               <!-- View Mode Switcher: Storyboard Grid vs Detailed List -->
               <div style="display:inline-flex;align-items:center;background:var(--bg0);border:1px solid var(--border);border-radius:6px;padding:2px;gap:2px;">
                 <button id="sdViewBtn-grid" class="btn btn-ghost btn-sm" onclick="setShotDeskViewMode('grid')" title="Lưới Storyboard (4-6 cột, quét nhanh 60 cảnh trên 1 màn hình)" style="padding:3px 8px;font-size:11px;border-radius:4px;height:26px;">
@@ -1222,7 +1285,7 @@
               </button>
 
               <!-- Jump to shot -->
-              <div style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);">
+              <div class="fx-inline fx-ac fx-g4 u-fs12 u-c-muted">
                 <span>Nhảy tới:</span>
                 <select id="sdJumpSelect" onchange="jumpToShotDeskShot(this.value)" style="padding:3px 6px;font-size:12px;background:var(--bg0);border:1px solid var(--border);border-radius:6px;color:var(--text);">
                   <option value="">Chọn Shot...</option>
@@ -1265,16 +1328,16 @@
       <!-- Subtab 3: Timeline & Post-production -->
       <div id="sdSubtabContent-timeline" class="sd-subtab-pane" style="display:none;">
         <div class="card">
-          <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div class="card-header fx fx-jc-sb fx-ac fx-wrap fx-g12">
             <div>
               <div class="card-title">🎞️ Bàn Dựng Timeline Đa Tầng (Multi-track Timeline)</div>
-              <div style="font-size:12px;color:var(--muted);">
+              <div class="u-fs12 u-c-muted">
                 Ghép các Shot đã được Đạo diễn Phê Duyệt (Approved) • Áp dụng Transitions & Sound Bridge
               </div>
             </div>
             <div class="u-flex-10">
               <div class="sd-timecode-box" id="sdTimelineTimecode" title="Tổng thời lượng phim dự kiến (TC chuẩn SMPTE)">
-                <span style="font-size:11px;color:var(--muted);font-weight:600;">TC</span>
+                <span class="u-fs11 u-c-muted u-fw600">TC</span>
                 <span id="sdTimelineTcValue">00:00:00:00</span>
               </div>
               <button class="btn btn-outline btn-sm" onclick="openTimelineSequentialPlayer()" id="sdBtnPlaySequence" style="border-color:var(--accent);color:var(--accent);font-weight:600;display:inline-flex;align-items:center;gap:6px;" title="Xem thử toàn bộ phim ghép liên tục từ các cảnh đã hoàn thành">
@@ -1337,7 +1400,7 @@
 
             <div style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;padding-top:12px;border-top:1px solid var(--border);flex-wrap:wrap;gap:10px;">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:0;">
-                <input type="checkbox" id="sdAllowPartialExport" style="width:auto;">
+                <input class="u-w-auto" type="checkbox" id="sdAllowPartialExport">
                 <span>Cho phép xuất bản nháp nếu còn shot chưa duyệt (Allow Partial Draft)</span>
               </label>
 
@@ -1348,7 +1411,7 @@
 
             <!-- Real-time Compose Progress Bar -->
             <div id="sdComposeProgressContainer" style="display:none;margin-top:14px;padding:14px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.3);border-radius:8px;">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+              <div class="fx fx-jc-sb fx-ac u-mb6">
                 <span style="font-weight:600;font-size:13px;color:var(--primary);" id="sdComposeStepText">⏳ Đang khởi tạo tiến trình dựng...</span>
                 <span style="font-weight:700;font-size:14px;color:var(--primary);" id="sdComposePercentText">0%</span>
               </div>
@@ -1360,7 +1423,7 @@
 
           <!-- Final Result Video Output Card -->
           <div id="sdFinalMovieContainer" style="display:none;background:var(--bg0);border:1px solid rgba(52,211,153,0.4);border-radius:10px;padding:16px;">
-            <div style="font-weight:700;font-size:15px;color:var(--green);display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+            <div class="u-fw700 u-fs15 u-c-green fx fx-ac fx-g8 u-mb12">
               <span>🎉</span> Phim Hoàn Chỉnh Đã Sẵn Sàng!
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;">
@@ -1368,21 +1431,21 @@
                 <video id="sdFinalVideoPlayer" controls style="width:100%;max-height:380px;display:block;"></video>
               </div>
               <div class="u-col-12">
-                <div id="sdFinalVideoMeta" style="font-size:13px;color:var(--text);line-height:1.6;"></div>
+                <div class="u-fs13 u-c-text u-lh16" id="sdFinalVideoMeta"></div>
                 
                 <!-- Folder Path Info -->
                 <div style="background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:12px;">
-                  <div style="font-weight:600;color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:6px;">
+                  <div class="u-fw600 u-c-muted u-mb4 fx fx-ac fx-g6">
                     <span>📁 Thư mục lưu trữ phim trên máy tính:</span>
                   </div>
-                  <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+                  <div class="fx fx-ac fx-g8 u-mt6">
                     <input type="text" id="sdFinalFolderPath" readonly style="flex:1;font-size:12px;background:var(--bg0);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-family:monospace;cursor:text;" value="..." onclick="this.select()">
                     <button type="button" class="btn btn-ghost btn-sm" onclick="copyFinalFolderPath()" title="Sao chép đường dẫn">📋 Copy</button>
                     <button type="button" class="btn btn-primary btn-sm" onclick="openFinalFolderOnDisk()" title="Mở thư mục trong Windows Explorer">📂 Mở Thư Mục</button>
                   </div>
                 </div>
 
-                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+                <div class="fx fx-g8 fx-wrap u-mt4">
                   <a id="sdDownloadMp4Btn" href="#" download class="btn btn-primary btn-sm">⬇️ Tải Video MP4</a>
                   <a id="sdDownloadSrtBtn" href="#" download class="btn btn-ghost btn-sm">⬇️ Tải File SRT</a>
                   <button type="button" class="btn btn-ghost btn-sm" onclick="exportCurrentShotDeskZip()">📦 Tải Trọn Gói Dự Án ZIP</button>
@@ -1398,15 +1461,22 @@
 
     <!-- ─ Panel: Settings ───────────────────────────────────── -->
     <div class="panel" id="panel-settings">
-      <div class="config-banner">
-        <span style="font-size:24px;">💡</span>
+      <div class="panel-head">
         <div>
-          <strong>Hướng dẫn kết nối</strong><br>
-          <span style="color:var(--muted);font-size:12px;">Cấu hình URL và API Key của server <code>muse2api</code> đang chạy. Nhập danh sách tài khoản qua Chrome Extension của repo.</span>
+          <h2>⚙️ Cài đặt</h2>
+          <div class="panel-sub">Kết nối Muse2API và khóa API Studio — phím tắt <span class="kbd">Alt</span>+<span class="kbd">O</span></div>
         </div>
       </div>
+      <div class="config-banner">
+        <span class="u-fs24">💡</span>
+        <div>
+          <strong>Hướng dẫn kết nối</strong><br>
+          <span class="u-c-muted u-fs12">Cấu hình URL và API Key của server <code>muse2api</code> đang chạy. Nhập danh sách tài khoản qua Chrome Extension của repo.</span>
+        </div>
+      </div>
+      <div class="settings-grid">
       <div class="card">
-        <div class="card-title" style="margin-bottom:16px;">⚙️ Kết nối Muse2API</div>
+        <div class="card-title u-mb16">⚙️ Kết nối Muse2API</div>
         <div class="form-row cols-2">
           <div>
             <label>URL Muse2API Server</label>
@@ -1423,13 +1493,14 @@
             <input type="number" id="cfgConcurrent" value="12" min="1" max="30" oninput="updateConcurrent(this.value)" onchange="updateConcurrent(this.value)">
           </div>
         </div>
-        <div style="display:flex;gap:10px;">
+        <div class="fx fx-g10">
           <button class="btn btn-primary" onclick="saveConfig()">💾 Lưu cấu hình</button>
           <button class="btn btn-ghost" onclick="checkApiHealth()">🔍 Kiểm tra kết nối</button>
           <span id="cfgTestResult" style="align-self:center;font-size:12px;color:var(--muted);"></span>
         </div>
+      </div>
       <div class="card">
-        <div class="card-title" style="margin-bottom:16px;">🔑 Khóa API Studio (X-API-Key)</div>
+        <div class="card-title u-mb16">🔑 Khóa API Studio (X-API-Key)</div>
         <p style="color:var(--muted);font-size:12px;margin:0 0 12px;">Khi server đặt <code>STUDIO_API_KEY</code>, trình duyệt phải gửi key này theo mỗi yêu cầu API. Key chỉ lưu trên trình duyệt của bạn (localStorage, key <code>ams-api-key</code>), không gửi đi đâu khác ngoài server Studio này. Không nhầm với API Key Muse2API ở trên.</p>
         <div class="form-row cols-2">
           <div>
@@ -1441,11 +1512,12 @@
             <span id="studioApiKeyStatus" style="align-self:center;font-size:12px;color:var(--muted);">Đang kiểm tra…</span>
           </div>
         </div>
-        <div style="display:flex;gap:10px;">
+        <div class="fx fx-g10">
           <button class="btn btn-primary" id="btnSaveStudioApiKey">💾 Lưu key</button>
           <button class="btn btn-ghost" id="btnClearStudioApiKey">🚪 Xóa key / Đăng xuất</button>
         </div>
       </div>
+      </div><!-- /settings-grid -->
     </div>
 
   </main>
@@ -1457,14 +1529,14 @@
 
 <!-- Floating Multi-Shot Batch Action Bar -->
 <div id="sdBatchActionBar" class="sd-batch-toolbar">
-  <div style="display:flex;align-items:center;gap:8px;">
+  <div class="fx fx-ac fx-g8">
     <span style="font-weight:700;font-size:13px;color:#fff;">Đã chọn:</span>
     <span id="sdBatchCount" style="background:var(--purple);color:#fff;font-weight:800;font-size:12px;padding:2px 8px;border-radius:12px;">0</span>
-    <span style="font-size:12px;color:var(--muted);">cảnh</span>
+    <span class="u-fs12 u-c-muted">cảnh</span>
   </div>
   <div style="height:20px;width:1px;background:rgba(255,255,255,0.2);"></div>
-  <div style="display:flex;align-items:center;gap:8px;">
-    <button class="btn btn-primary btn-sm" onclick="renderSelectedShots()" style="box-shadow:0 0 12px rgba(168,85,247,0.4);" title="Render đồng loạt các cảnh đã chọn">
+  <div class="fx fx-ac fx-g8">
+    <button class="btn btn-primary btn-sm" onclick="renderSelectedShots()" style="box-shadow:0 0 12px var(--accent-ring);" title="Render đồng loạt các cảnh đã chọn">
       🚀 Render Cảnh Đã Chọn
     </button>
     <button class="btn btn-outline btn-sm" onclick="approveSelectedShots()" style="border-color:var(--green);color:var(--green);" title="Phê duyệt hàng loạt các cảnh đã chọn">
@@ -1473,7 +1545,7 @@
     <button class="btn btn-outline btn-sm" onclick="autoHealSelectedShots()" style="border-color:var(--yellow);color:var(--yellow);" title="AI tự sửa prompt cho các shot bị lệch kiểm định">
       ⚡ AI Sửa Prompt
     </button>
-    <button class="btn btn-ghost btn-sm" onclick="clearSelectedShots()" style="color:var(--muted);font-size:11.5px;">
+    <button class="btn btn-ghost btn-sm u-c-muted u-fs115" onclick="clearSelectedShots()">
       Bỏ chọn
     </button>
   </div>
@@ -1482,24 +1554,24 @@
 <!-- Floating Persistent Render HUD (Cinema Dock) -->
 <div id="sdPersistentRenderDock" class="sd-render-hud">
   <div class="sd-hud-pulse"></div>
-  <div style="display:flex;flex-direction:column;gap:2px;">
-    <div style="display:flex;align-items:center;gap:8px;">
+  <div class="fx fx-col fx-g2">
+    <div class="fx fx-ac fx-g8">
       <span style="font-weight:700;font-size:12.5px;color:#fff;" id="sdHudTitle">Đang Render Cảnh...</span>
       <span style="font-size:11px;color:var(--accent);font-family:'JetBrains Mono',monospace;" id="sdHudRatio">0/0</span>
       <span style="font-size:11px;font-weight:700;color:var(--green);font-family:'JetBrains Mono',monospace;" id="sdHudPercent">0%</span>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;">
+    <div class="fx fx-ac fx-g8">
       <div class="sd-hud-bar-wrap">
         <div id="sdHudProgressBar" class="sd-hud-bar-fill" style="width:0%;"></div>
       </div>
-      <span style="font-size:10px;color:var(--muted);" id="sdHudDetails">0 luồng active</span>
+      <span class="u-fs10 u-c-muted" id="sdHudDetails">0 luồng active</span>
     </div>
   </div>
-  <div style="display:flex;align-items:center;gap:6px;margin-left:6px;">
+  <div class="fx fx-ac fx-g6 u-ml6">
     <button class="btn btn-ghost btn-sm" id="sdHudJumpLatestBtn" onclick="jumpToLatestRenderedShot()" style="font-size:11px;padding:3px 8px;border-radius:20px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#fff;" title="Xem ngay shot vừa hoàn thành trong Review Desk">
       ⚡ Xem Shot Mới
     </button>
-    <button class="btn btn-ghost btn-sm" onclick="toggleRenderHudManual(false)" style="font-size:12px;padding:2px 6px;color:var(--muted);" title="Thu nhỏ">
+    <button class="btn btn-ghost btn-sm u-fs12 u-p-2-6 u-c-muted" onclick="toggleRenderHudManual(false)" title="Thu nhỏ">
       ✕
     </button>
   </div>
@@ -1547,15 +1619,15 @@
 <div id="apiKeyModal" class="modal-backdrop" style="display:none;">
   <div class="modal-window" style="max-width:480px;">
     <div class="modal-header">
-      <div style="font-weight:700;font-size:16px;color:var(--accent);">🔑 Nhập Khóa API Studio</div>
+      <div class="u-fw700 u-fs16 u-c-accent">🔑 Nhập Khóa API Studio</div>
       <button class="btn btn-ghost btn-sm" id="btnCloseApiKeyModal">✕</button>
     </div>
     <div class="modal-body">
       <p style="color:var(--muted);font-size:13px;margin:0 0 12px;">Server đã bật xác thực (<code>STUDIO_API_KEY</code>). Nhập khóa để tiếp tục dùng Studio. Khóa chỉ lưu trên trình duyệt này (localStorage) — không dùng chung máy công cộng.</p>
       <label>Khóa API Studio (X-API-Key)</label>
-      <input type="password" id="apiKeyModalInput" placeholder="Dán khóa X-API-Key vào đây" autocomplete="off" style="width:100%;">
+      <input class="u-w100" type="password" id="apiKeyModalInput" placeholder="Dán khóa X-API-Key vào đây" autocomplete="off">
       <div id="apiKeyModalError" style="color:#f87171;font-size:12px;min-height:16px;margin-top:6px;"></div>
-      <div style="display:flex;gap:10px;margin-top:12px;">
+      <div class="fx fx-g10 u-mt12">
         <button class="btn btn-primary" id="btnSaveApiKeyModal">💾 Lưu key</button>
         <button class="btn btn-ghost" id="btnSkipApiKeyModal">Dùng không cần key</button>
       </div>

@@ -72,10 +72,11 @@
         '<button type="button" class="wizard-step-btn is-active" data-wizard-step="1"><span class="wizard-num">1</span>Thông tin phim</button>' +
         '<button type="button" class="wizard-step-btn" data-wizard-step="2"><span class="wizard-num">2</span>Danh sách cảnh</button>' +
         '<button type="button" class="wizard-step-btn" data-wizard-step="3"><span class="wizard-num">3</span>Render</button>' +
-        '<span style="flex:1"></span>' +
+        '<span class="fx-f1b"></span>' +
         '<button type="button" class="wizard-step-btn" data-wizard-nav="prev">← Trước</button>' +
         '<button type="button" class="wizard-step-btn" data-wizard-nav="next">Sau →</button>';
-      panelCreate.insertBefore(nav, panelCreate.firstChild);
+      const head = panelCreate.querySelector(':scope > .panel-head');
+      panelCreate.insertBefore(nav, head ? head.nextSibling : panelCreate.firstChild);
       const steps = [document.createElement('div'), document.createElement('div'), document.createElement('div')];
       steps.forEach((el, i) => { el.className = 'wizard-step' + (i === 0 ? ' is-active' : ''); el.dataset.step = String(i + 1); });
       steps[0].appendChild(cards[0]);            // 1: Thong tin du an & Cai dat
@@ -103,12 +104,47 @@
     const origShowPanel = window.showPanel;
     window.showPanel = function (name) {
       const r = origShowPanel.apply(this, arguments);
+      document.body.dataset.panel = name; // topbar: nut San xuat chi hien o panel Tao phim
       const p = document.getElementById('panel-' + name);
       if (p) p.classList.add('panel-loaded');
       if (name === 'create' && typeof window.__showWizardStep === 'function') window.__showWizardStep(1);
       return r;
     };
+    // panel mac dinh luc load trang
+    document.body.dataset.panel = document.querySelector('.panel.active')?.id?.replace('panel-', '') || 'create';
   }
+
+  /* ── Topbar: chip ten project dong bo tu o Ten du an (them 2026-11-08) ── */
+  const syncTopbarProject = () => {
+    const chip = document.getElementById('topbarProjectName');
+    const input = document.getElementById('projectTitle');
+    if (chip && input) chip.textContent = input.value.trim() || 'Chưa đặt tên';
+  };
+  document.getElementById('projectTitle')?.addEventListener('input', syncTopbarProject);
+  syncTopbarProject();
+
+  /* ── Phim tat desktop (them 2026-11-08) ──────────────────────────────
+     Alt+chu cai chuyen panel; Ctrl+Enter san xuat o panel Tao phim.
+     Dung Alt+CHU (khong dung so): app.js da bat phim 1/2/3 tran de doi
+     subtab Shot Desk, nen phim so se kich hoat ca hai handler. Khong bat
+     phim khi dang go trong input/textarea/select. */
+  const PANEL_KEYS = { c: 'create', a: 'affiliate', k: 'shot-desk', n: 'characters', m: 'monitor', q: 'quick-video', l: 'library', o: 'settings', p: 'prompt-sheet' };
+  document.addEventListener('keydown', (e) => {
+    const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName) || e.target.isContentEditable;
+    if (e.altKey && !e.ctrlKey && !e.metaKey && PANEL_KEYS[(e.key || '').toLowerCase()]) {
+      e.preventDefault();
+      const target = PANEL_KEYS[e.key.toLowerCase()];
+      if (target === 'prompt-sheet') { if (typeof window.openPromptSheetModal === 'function') window.openPromptSheetModal(); }
+      else if (typeof window.showPanel === 'function') window.showPanel(target);
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key === 'Enter' && !typing) {
+      if (document.getElementById('panel-create')?.classList.contains('active') && typeof window.startMovieCreation === 'function') {
+        e.preventDefault();
+        window.startMovieCreation();
+      }
+    }
+  });
 
   /* ── Tim kiem Shot Desk: debounce 180ms (chi o input, khong doi ham goc) ── */
   const sdSearch = $('#sdSearchInput');
@@ -128,7 +164,7 @@
       const tb = document.getElementById('jobsBody');
       if (tb && document.getElementById('panel-library')?.classList.contains('active')) {
         tb.innerHTML = Array.from({ length: 5 }, () =>
-          '<tr><td colspan="6"><div class="sk" style="height:18px">&nbsp;</div></td></tr>').join('');
+          '<tr><td colspan="6"><div class="sk sk-bar">&nbsp;</div></td></tr>').join('');
       }
       return origLoadLibrary.apply(this, arguments);
     };

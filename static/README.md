@@ -99,7 +99,7 @@ Khong co trinh duyet headless trong VM nay nen chua chay kiem tra UI bang browse
 can kiem tra thu cong theo checklist tren truoc khi dua len production.
 
 ## TODO / Chua lam (ly do)
-- Con nhieu `style="..."` inline (dac biet trong template JS cua `app.js`, ~594 cho)
+- Con `style="..."` inline: dot redesign 2026-11-08 da dua 898 -> 417 cho (xem muc Redesign o cuoi file); phan con lai chu yeu la trang thai display, do rong dong % va mau 1 lan trong template JS
   va `onclick="..."` (~250 cho): chi doi nhung cho chac chan (nav sidebar, 1 so
   class lap lai o body). Doi hang loat trong template JS de vo `esc()`/handler
   va kho kiem chung khong co browser — nen lam theo dot rieng co test UI.
@@ -192,3 +192,146 @@ can kiem tra thu cong theo checklist tren truoc khi dua len production.
 - Endpoint `POST /api/jobs/{job_id}/consistency-check` kiểm tra lại req đã lưu của 1 job.
 - Neo lại nhân vật: trong chuỗi sequential, cứ mỗi 8 scene (mốc 8/16/24...) thì dùng ảnh keyframe/character reference thay cho Last Frame để reset drift (`CONSISTENCY_ANCHOR_EVERY = 8` trong `consistency.py`); scene không có ảnh neo thì giữ nguyên Last Frame.
 - Giới hạn: phát hiện shot cầu nối chỉ là heuristic từ khóa thời gian/địa điểm (sáng/trưa/chiều/tối/đêm, trong nhà/ngoài trời, danh từ địa điểm), chưa hiểu ngữ nghĩa sâu nên có thể báo thừa/thiếu — chỉ dùng làm gợi ý.
+---
+
+## Redesign 2026-11-08 — desktop-first (nhanh `feature/ui-redesign`)
+
+> Chi sua `static/` (HTML/CSS/JS), khong sua backend, khong commit/push.
+> Inventory ID day du: `../docs-ui-redesign-inventory.md` (goc repo).
+
+### Dinh huong (doi so voi ban goc: desktop-first, khong mobile-first)
+- Uu tien man hinh lon (1440px+, toi uu 1920x1080): bo cuc rong nhieu cot,
+  mat do cao nhung thoang, it cuon. Mobile chi giu muc toi thieu: khong vo
+  layout, van dung duoc (drawer <=1024px + bottom-nav <=768px cua PR #1 giu
+  nguyen, khong mo rong).
+- Accent DUY NHAT indigo `#6366f1` (light: `#4f46e5`); cac mau sky/violet/pink
+  cu (`#38bdf8`, `#a855f7`, `#c084fc`, `#ec4899`, `rgba(56,189,248,…)`,
+  `rgba(168,85,247,…)`) da doi het sang ho indigo trong `css/app.css`,
+  `css/ui.css`, `index.html`, `js/app.js`. Xanh/vang/do chi con la mau ngu
+  nghia trang thai; mau hong/xanh la trong `CHAR_COLORS` (avatar nhan vat)
+  va bang mau loai canh affiliate (data) duoc giu lai co chu dich.
+- Dark-first sau hon (`#0a0a0c`), light theme day du (cung accent).
+
+### Bo cuc moi
+- **Topbar (60px):** logo 1 mau, chip ten project hien tai (`#topbarProjectName`,
+  dong bo tu o Ten du an), trang thai Muse2API, nut **🚀 San xuat** chi hien
+  o panel Tao phim (`body[data-panel="create"]`, goi `startMovieCreation()`).
+- **Sidebar (272px, thu gon duoc):** icon + nhan day du, muc active co vach
+  accent trai + nen accent mo; moi muc co ghi chu phim tat (`Alt+C/A/K/N/M/Q/L/O/P`).
+- **Tao phim (wizard 3 buoc giu nguyen):** them tieu de panel + nut Luu/Mo
+  Project; buoc 1 chia 2 cot **(1) Thong tin phim | (2) Nhan vat & khoa** vs
+  **(3) Am thanh & giong doc | (4) Xuat phim** (`>=1440px`); Style Locks +
+  Chaining gom vao muc **Nang cao** (`<details>`, mac dinh thu gon); nut
+  Phan ra nhip giu ngoai; Truong bat buoc co dau `*` (Ten du an, Ten san
+  pham affiliate); buoc 2: cong cu trai 400px + danh sach canh phai rong;
+  nut San xuat to, dinh day (`position: sticky`, `Ctrl+Enter`).
+- **Monitor:** 2 cot `>=1440px` (job/audit/matrix trai, log + video + clips
+  phai, cot phai dinh). **Video Nhanh:** form trai, ket qua + lich su phai
+  (`>=1280px`). **Cai dat:** 2 card canh nhau (`>=1100px`); sua luon loi
+  cu: card dau tien thieu the dong `</div>`.
+- **Thu vien:** bang dac, header dinh khi cuon, hang hover ro, cot tien do
+  co thanh tien trinh; empty state moi. **Affiliate:** banner + badge 1 mau
+  accent, nut tao/render dung `.btn-primary`/`.btn-success` (bo gradient
+  hong/tim). **Nhan vat:** luoi card giu nguyen, avatar dung class.
+- **Empty state** dung chung (`.empty-state`): Monitor, Affiliate, Scene
+  list (placeholder trong `#sceneList`, JS `renderScenes()` se thay bang
+  danh sach that), Thu vien (hang `Chua co job nao`).
+- **Toast:** chuyen tu `bottom-right` sang **top-right** (duoi topbar) de
+  khong che nut San xuat dinh day; style chuyen sang class
+  (`.toast-container`, `.toast`, `.toast-error`, `.toast-warning`).
+- **Focus/hover/ban phim:** `:focus-visible` outline accent 2px toan app;
+  nut co hover nang nhe; phim tat moi (xem duoi).
+
+### Phim tat moi (them o cuoi `js/ui.js`, khong dung so)
+- `Alt+C` Tao phim · `Alt+A` Affiliate · `Alt+K` Shot Desk · `Alt+N` Nhan vat ·
+  `Alt+M` Monitor · `Alt+Q` Video Nhanh · `Alt+L` Thu vien · `Alt+O` Cai dat ·
+  `Alt+P` Sheet Prompt Mau · `Ctrl+Enter` (hoac `Cmd+Enter`) San xuat khi
+  dang o panel Tao phim. Khong bat phim khi dang go trong input/textarea/select.
+- Ly do dung Alt+CHU: `app.js` da bat phim `1/2/3` tran de doi subtab Shot Desk
+  (khong kiem tra modifier), nen phim so se kich hoat ca hai handler.
+  `Alt+D` tranh dung vi Chrome dung de focus thanh dia chi.
+
+### Thay doi JS (toi thieu, co ghi chu trong code)
+- `js/ui.js`: wizard nav chen sau `.panel-head` (truoc day chen dau panel);
+  skeleton thu vien + spacer wizard dung class; them dong bo ten project
+  len topbar + `body[data-panel]` + phim tat tren.
+- `js/app.js`: `showToast()` dung class thay `cssText`; `loadLibrary()` dung
+  class (`.job-id`, `.job-prog`, `.job-meta`, `.job-actions`, `.empty-row`);
+  empty-filter Shot Desk dung class `.sd-empty-msg`.
+- **Bug fix kem theo (khong phai redesign):**
+  1. `sendAffiliateToMainStudio()` dung `movieTitle`/`aspectRatio` (ID da
+     khong con trong HTML tu truoc) -> doi sang `projectTitle` /
+     `globalAspectRatio`; truoc day nut "Nap Vao Studio" am tham khong dat
+     ten/ti le phim.
+  2. Them `<input type="hidden" id="globalStylePreset" value="">` (panel Tao
+     phim): `aiStandardizeScript()` doc `.value` khong guard o `app.js:1381`
+     -> truoc day bam "AI Tu Dong Chuyen The" se vo `TypeError`.
+- **ID doi ten: KHONG CO.** Xem `../docs-ui-redesign-inventory.md`.
+
+### Inline style: 898 -> 417 (cung cach dem `grep -o 'style="[^"]*"'`)
+- Chuyen 437 cho sang utility class (`.fx`, `.fx-g*`, `.u-fs*`, `.u-c-*`,
+  `.u-mt*`, `.u-mb*`, `.u-p-*`, …) o cuoi `css/ui.css`, bang script co
+  denylist (khong dung vao style trang thai `display:none/block`, style
+  dong `${...}`, element JS dang toggle, nut co class `.btn` khi doi
+  display). Con lai 417 cho, chu yeu: trang thai display do JS toggle
+  (52), do rong dong `%` (42), mau nen/gradient rieng le trong template JS
+  (124, gom mau loai canh + mau trang thai), style 1 lan khong lap
+  (position/size px). `onclick="..."` giu nguyen toan bo (khong doi co che
+  goi ham).
+
+### Kiem chung da chay (2026-11-08, so that)
+- `node --check` ca 2 file JS: OK. `python -m py_compile app.py`: OK.
+- `pytest` (venv `/tmp/studio-venv2`, bo 2 file loi san): **43 passed**.
+  `test_bottom_sub.py` + `test_sub.py` loi collection ca tren HEAD goc
+  (thieu `workspace/_shot_desk_projects/.../final`) — loi co san, khong phai
+  do redesign. (Chay server that can `env -u ..._PROXY ... -u NO_PROXY`
+  vi `NO_PROXY` chua `[::1]` lam `httpx.AsyncClient()` vo o lifespan —
+  van de moi truong, co san truoc redesign.)
+- Server that: `/` 200, `css/app.css` 200, `css/ui.css` 200, `js/app.js` 200,
+  `js/ui.js` 200; HTML tra ve giong het file; script doi chieu: **190/225
+  ID JS co trong HTML, 0 ID trung**; 35 ID con lai do JS tu tao dong hoac
+  guarded (xem inventory). `/api/health` tra `studio:true`
+  (muse2api:false do chua cau hinh key — dung nhu moi truong test).
+- HTML parser: 0 loi can bang tag (ca loi thieu `</div>` cu o panel Cai dat
+  da sua). CSS: so `{`/`}` can bang ca 2 file.
+- **CHUA kiem chung bang trinh duyet that:** VM khong co Chromium/Firefox/
+  Playwright (`which chromium`, `python -m playwright` deu khong co) —
+  khong the chup anh man hinh hay click thu. Can kiem tra tay theo
+  checklist duoi truoc khi merge.
+
+### Checklist kiem tra tay tren trinh duyet that (cho Tien)
+Desktop 1920x1080 (Chrome/Edge) + laptop 1440x900:
+- [ ] Mo trang: sidebar day du nhan, topbar co chip ten project, nut San xuat
+      chi hien o panel Tao phim; doi ten project -> chip doi theo.
+- [ ] Tao phim: buoc 1 hien 2 cot (thong tin/khoa trai, am thanh/xuat phai);
+      mo muc Nang cao thay Style Locks + Chaining; buoc 2: cong cu trai,
+      danh sach canh phai; nut San xuat dinh day khi cuon.
+- [ ] Alt+C/A/K/N/M/Q/L/O/P chuyen panel; Ctrl+Enter o panel Tao phim goi
+      san xuat (chi bam khi muon chay that).
+- [ ] Monitor (mo job cu): cot phai (log/video) dinh khi cuon; Thu vien:
+      header bang dinh, hang hover, nut tai/xem/xoa.
+- [ ] Shot Desk: mo project mau, doi subtab 1/2/3, loc pill, mo Review Desk;
+      phim `1/2/3` cu van doi subtab (khong bi phim tat moi pha).
+- [ ] Affiliate: nhap ten san pham -> nut tao kich ban (mau indigo); mo
+      Sheet Prompt Mau (Alt+P) dong/mo binh thuong.
+- [ ] Dark/light: bam 🌙/☀️, tai lai trang van nho theme; light khong chu
+      trang tren nen sang o card chinh.
+- [ ] Ban phim: Tab di chuyen qua cac nut/field thay duoc outline accent;
+      modal API key mo bang Escape dong duoc.
+- [ ] Nhan vat: mo form them nhan vat, anh dai dien hien dung.
+- Mobile (Android, Chrome): mo trang, bam ☰ mo drawer, chon muc, drawer
+  dong; khong tran ngang; khong can bottom-nav cung dung duoc.
+- [ ] Kiem tra chuc nang cu khong doi: Tao phim 1-2 canh that (neu co key),
+      Video Nhanh 1 clip, luu/mo project JSON.
+
+### Luu y merge
+- Nhanh nay se **conflict voi PR #2 (timeline), #3 (affiliate), #4
+  (consistency-max)** vi cung sua `index.html`/`js/app.js`/`css/*`.
+  Thu tu goi y: merge PR #2/#3/#4 truoc (hoac quyet dinh bo), roi rebase
+  nhanh nay va giai conflict theo tung file — phan CSS utility + HTML
+  structure cua redesign nen giu, phan logic moi cua cac PR kia giu
+  nguyen, chi map lai class/ID neu can. Khong merge thang khi chua chay
+  checklist trinh duyet that o tren.
+- Han che con biet: mau chu `#fff` tren nen toi trong 1 so template JS
+  (card ket qua affiliate, modal) van cung; light theme chua phu het mau
+  cung trong template JS (ghi tu PR #1, chua giai quyet o dot nay).
