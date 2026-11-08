@@ -134,7 +134,9 @@ function applyGlobalAspectRatio(val, forceAll = false) {
 }
 
 function updateConcurrent(val) {
-  const n = Math.max(1, Math.min(30, parseInt(val) || 1));
+  // Backend MovieRequest.max_concurrent chỉ nhận 1–12 (audit #6): kẹp ở
+  // đây để mọi đường set (input, cấu hình, localStorage cũ) đều ≤ 12.
+  const n = Math.max(1, Math.min(12, parseInt(val) || 1));
   cfg.concurrent = n;
   const el1 = document.getElementById('maxConcurrent');
   const el2 = document.getElementById('cfgConcurrent');
@@ -155,6 +157,8 @@ function loadCfg() {
     Object.assign(cfg, saved);
   } catch {}
   if (!cfg.concurrent || cfg.concurrent < 1) cfg.concurrent = 6;
+  // localStorage cũ có thể còn giá trị 13–30 (trước audit #6) -> kẹp về ≤ 12.
+  if (cfg.concurrent > 12) cfg.concurrent = 12;
   if (!cfg.aspectRatio) cfg.aspectRatio = '16:9';
   document.getElementById('cfgApiUrl').value = cfg.apiUrl;
   document.getElementById('cfgApiKey').value = cfg.apiKey;
@@ -213,12 +217,17 @@ async function checkApiHealth() {
         hint.textContent = `⚡ Có ${data.accounts} tài khoản Muse — Tự động chia đều chạy song song qua ${data.accounts} tài khoản!`;
       }
 
-      // Tự động cập nhật input Render song song và cấu hình nếu chưa chỉnh thủ công
+      // Tự động cập nhật input Render song song và cấu hình nếu chưa chỉnh thủ công.
+      // Backend chỉ nhận max_concurrent ≤ 12 (audit #6): không bao giờ tự
+      // đẩy concurrent vượt 12 dù có nhiều tài khoản Muse.
       const maxConcInput = document.getElementById('maxConcurrent');
-      if (maxConcInput && (!maxConcInput.value || parseInt(maxConcInput.value) < data.accounts)) {
-        maxConcInput.value = data.accounts;
-        maxConcInput.max = Math.max(16, data.accounts);
-        updateConcurrent(data.accounts);
+      const safeConc = Math.max(1, Math.min(12, data.accounts || 6));
+      if (maxConcInput) {
+        maxConcInput.max = 12;
+        if (!maxConcInput.value || parseInt(maxConcInput.value) < safeConc) {
+          maxConcInput.value = safeConc;
+          updateConcurrent(safeConc);
+        }
       }
 
       // Cập nhật select Shot Desk
@@ -442,7 +451,7 @@ function getSceneFromDOM(id) {
     prompt:               el.querySelector('.scene-prompt')?.value || '',
     voiceover:            el.querySelector('.scene-voice')?.value || '',
     voice:                el.querySelector('.scene-voice-sel')?.value || '',
-    duration:             parseInt(el.querySelector('.scene-duration')?.value) || 5,
+    duration:             Math.max(1, Math.min(60, parseInt(el.querySelector('.scene-duration')?.value) || 5)),
     size:                 el.querySelector('.scene-size')?.value || '16:9',
     title:                el.querySelector('.scene-title-input')?.value || '',
     reference_image:      el.querySelector('.scene-ref-img-val')?.value.trim() || el.querySelector('.scene-ref-img')?.value.trim() || '',
@@ -718,9 +727,7 @@ function renderSceneItemHtml(s, i) {
       <div class="form-row cols-2 u-mb10">
         <div>
           <label>Thoi luong video (giay)</label>
-          <select class="scene-duration">
-            ${[5,6,8,10].map(d => `<option value="${d}" ${d==s.duration?'selected':''}>${d}s</option>`).join('')}
-          </select>
+          <input type="number" class="scene-duration" min="1" max="60" step="1" value="${s.duration}" title="Thời lượng cảnh (1–60 giây)" oninput="onSceneContentInput(${s.id})">
         </div>
         <div>
           <label>Ti le khung hinh</label>
@@ -1550,7 +1557,8 @@ function parseProfessionalMarkdownScript(text) {
 // buildMoviePayload() để nút "Kiểm tra đồng nhất" (ui.js) dùng chung
 // đúng 1 bản payload với startMovieCreation, tránh lệch nhau.
 function buildMoviePayload() {
-  const concurrent = parseInt(document.getElementById('maxConcurrent').value) || cfg.concurrent || 12;
+  // Kẹp phòng thủ lần cuối trước khi gửi: backend chỉ nhận 1–12 (audit #6).
+  const concurrent = Math.max(1, Math.min(12, parseInt(document.getElementById('maxConcurrent').value) || cfg.concurrent || 12));
   cfg.concurrent = concurrent;
 
   const globalVoice = document.getElementById('voiceSelect')?.value || 'vi-VN-HoaiMyNeural';
@@ -1602,6 +1610,22 @@ function buildMoviePayload() {
   return payload;
 }
 
+// Định dạng lỗi API thành câu đọc được: FastAPI validation trả
+// {"detail": [{"loc": [...], "msg": "..."}]}, các lỗi khác trả
+// {"detail": "..."} hoặc {"error": "..."} (audit #6).
+function formatApiError(data, res) {
+  const detail = data && data.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(d => {
+      const field = Array.isArray(d.loc) ? d.loc.filter(x => x !== 'body').join('.') : '';
+      return field ? `${field}: ${d.msg || d.type || 'không hợp lệ'}` : (d.msg || d.type || 'không hợp lệ');
+    }).join(' | ');
+  }
+  if (data && data.error) return data.error;
+  return `Máy chủ trả HTTP ${res ? res.status : 'lỗi'} mà không có nội dung lỗi.`;
+}
+
 async function startMovieCreation() {
   syncScenesFromDOM();
 
@@ -1642,6 +1666,10 @@ async function startMovieCreation() {
       window.showConsistencyReport({ passed: false, errors: data.errors || 0, warnings: data.warnings || 0, checks: data.checks }, { allowProceed: false });
       return;
     }
+    // Lỗi chung (vd 422 validation FastAPI {"detail": [...]} khi
+    // max_concurrent > 12): báo đúng nội dung lỗi, KHÔNG chạy tiếp,
+    // KHÔNG set activeJobId, KHÔNG chuyển sang Monitor (audit #6).
+    if (!res.ok) throw new Error(formatApiError(data, res));
     if (data.error) throw new Error(data.error);
 
     activeJobId = data.job_id;
@@ -2031,6 +2059,7 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
           </div>
         </div>
         ${voiceoverText ? `<div class="cell-voiceover">🎙️ Lời thoại: ${esc(voiceoverText)}</div>` : ''}
+        ${info.tts_failed ? `<div style="background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.5);border-radius:6px;padding:6px 8px;margin-top:6px;font-size:11.5px;color:var(--yellow);font-weight:600;">⚠️ Cảnh này MẤT TIẾNG: lỗi TTS${info.tts_error ? ' — ' + esc(String(info.tts_error).slice(0, 80)) : ''} (đã dùng audio im lặng).</div>` : ''}
       </div>
     `;
   } else {

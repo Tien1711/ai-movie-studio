@@ -84,6 +84,10 @@ def require_muse_key() -> str:
 JOBS_LOCK = threading.Lock()
 # job_id -> asyncio.Task của pipeline đang chạy (để cancel thật, xem api_cancel_job).
 JOB_TASKS: Dict[str, "asyncio.Task"] = {}
+# job_id -> asyncio.Event hủy job (audit #8): film_pipeline /
+# retry_failed_pipeline tạo event, truyền vào run_batch (kiểm tra trước
+# mỗi cảnh + trong vòng poll); api_cancel_job set event này.
+JOB_CANCEL_EVENTS: Dict[str, "asyncio.Event"] = {}
 # Rate-limit: tối đa _RATE_LIMIT_REQUESTS request /api/* mỗi _RATE_LIMIT_WINDOW_S
 # cho mỗi IP (bộ nhớ tiến trình; không thêm dependency slowapi/redis).
 _RATE_LIMIT_REQUESTS = 300
@@ -609,10 +613,26 @@ def _spawn_job_task(job_id: str, coro) -> "asyncio.Task":
     return task
 
 
+def _mark_job_cancelled(job: Dict) -> None:
+    """Đánh dấu job + các cảnh chưa xong là cancelled (audit #8) để Monitor
+    không treo ở trạng thái "running" sau khi hủy."""
+    job["status"] = "cancelled"
+    for sc in list(job.get("scenes", {}).values()):
+        if isinstance(sc, dict) and sc.get("status") not in ("done", "error"):
+            sc["status"] = "cancelled"
+            sc["msg"] = "🛑 Đã hủy"
+
+
 # ── Background Pipeline ────────────────────────────────────────────────────
 async def film_pipeline(job: Dict, req: MovieRequest):
+    job_id = job["id"]
+    # Audit #8: cờ hủy dùng chung cho run_batch (kiểm tra trước mỗi cảnh +
+    # trong vòng poll). api_cancel_job set event này; task.cancel() vẫn là
+    # cơ chế dừng chính ở điểm await tiếp theo.
+    cancel_event = asyncio.Event()
+    with JOBS_LOCK:
+        JOB_CANCEL_EVENTS[job_id] = cancel_event
     try:
-        job_id = job["id"]
         # Timing từng giai đoạn (đo tốc độ render): render/poll/TTS do run_batch
         # điền, compose/total điền ở dưới. Job cũ thiếu field thì mặc định 0.
         pipe_t0 = time.monotonic()
@@ -701,6 +721,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             start_scene_idx=req.start_scene_idx or 1,
             voice_mode=req.voice_mode or "tts",
             timing=batch_timing,
+            cancel_event=cancel_event,
         )
 
         job["results"] = results
@@ -709,11 +730,13 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         _save_job_best_effort(job)
 
         # Kiểm tra nếu job đã bị người dùng hủy.
-        # TODO(batch_engine, ngoài phạm vi refactor app.py): run_batch/process_scene
-        # chưa kiểm tra job["cancelled"] định kỳ nên batch đang chạy vẫn chạy hết;
-        # api_cancel_job chỉ dừng được pipeline ở điểm await tiếp theo (task.cancel).
-        # Muốn dừng render sâu hơn cần truyền cờ cancelled vào batch_engine.
-        if job.get("cancelled") or job.get("status") == "cancelled":
+        # Audit #8: run_batch đã kiểm tra cancel_event trước mỗi cảnh +
+        # trong vòng poll nên batch dừng sớm; ở đây chỉ dọn trạng thái
+        # (các cảnh chưa xong -> "cancelled") rồi thoát, không hậu kỳ.
+        # GIỚI HẠN: ffmpeg đồng bộ trong asyncio.to_thread không bị giết
+        # khi cancel — cảnh đang ghép xong bước đó rồi mới dừng hẳn.
+        if job.get("cancelled") or job.get("status") == "cancelled" or cancel_event.is_set():
+            _mark_job_cancelled(job)
             job_log(job, "🛑 Job đã bị hủy bởi người dùng.")
             _save_job_best_effort(job)
             return
@@ -726,10 +749,15 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             if r["status"] == "done":
                 _scene(job, idx).update({
                     "status": "done",
-                    "msg": "✅ Hoàn thành",
+                    # Audit #9: cảnh TTS lỗi vẫn "done" (video có, audio im
+                    # lặng) nhưng msg + cờ tts_failed phải nói rõ để Monitor
+                    # thấy ngay cảnh nào mất tiếng.
+                    "msg": "✅ Hoàn thành ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)" if r.get("tts_failed") else "✅ Hoàn thành",
                     "video_url": f"/api/jobs/{job_id}/scenes/{idx}/video",
                     "last_frame_url": r.get("last_frame_url"),
                     "error": None,
+                    "tts_failed": bool(r.get("tts_failed")),
+                    "tts_error": r.get("tts_error"),
                 })
                 ok_count += 1
             else:
@@ -739,6 +767,13 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     "error": r.get("error", ""),
                 })
                 job["failed_scenes"].append(idx)
+
+        # Audit #9: TTS lỗi vẫn giữ fallback im lặng cho scene đó, nhưng job
+        # phải cảnh báo rõ — liệt kê scene mất tiếng trong log Monitor.
+        job["tts_failed_scenes"] = [r["index"] for r in results if r.get("tts_failed")]
+        if job["tts_failed_scenes"]:
+            job_log(job, "⚠️ Cảnh báo TTS: cảnh " + ", ".join(f"#{i}" for i in job["tts_failed_scenes"]) +
+                    " mất tiếng (lỗi synthesis, đã dùng audio im lặng) — kiểm tra lại giọng đọc trước khi xuất phim!")
 
         # Kiểm định tính toàn vẹn của tất cả các cảnh (Scene Audit)
         audit = audit_movie_scenes(scenes_dicts, results)
@@ -767,7 +802,8 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             return
 
         # Kiểm tra hủy lần nữa trước khi vào hậu kỳ (cancel có thể đến trong lúc render).
-        if job.get("cancelled") or job.get("status") == "cancelled":
+        if job.get("cancelled") or job.get("status") == "cancelled" or cancel_event.is_set():
+            _mark_job_cancelled(job)
             job_log(job, "🛑 Job đã bị hủy bởi người dùng.")
             _save_job_best_effort(job)
             return
@@ -846,6 +882,19 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                 pass
             _save_job_best_effort(job)
 
+    except asyncio.CancelledError:
+        # CancelledError là BaseException nên except Exception không bắt được
+        # (audit #8): cập nhật timing/log/trạng thái rồi raise lại để task
+        # giữ trạng thái cancelled.
+        job["status"] = "cancelled"
+        job_log(job, "🛑 Job đã bị hủy (task cancel) — dừng render.")
+        try:
+            if "timing" in job:
+                job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
+        except Exception:
+            pass
+        _save_job_best_effort(job)
+        raise
     except Exception as e:
         job["status"] = "error"
         job_log(job, f"❌ Lỗi xử lý pipeline: {e}")
@@ -855,6 +904,10 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         except Exception:
             pass
         _save_job_best_effort(job)
+    finally:
+        with JOBS_LOCK:
+            if JOB_CANCEL_EVENTS.get(job_id) is cancel_event:
+                JOB_CANCEL_EVENTS.pop(job_id, None)
 
 
 # ── API Routes ─────────────────────────────────────────────────────────────
@@ -987,6 +1040,11 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
     # JOBS_LOCK) trước khi spawn task — pipeline không kiểm tra lại ở đây: nếu
     # return sớm thì finally không chạy và cờ kẹt True vĩnh viễn (audit §1.6).
     job["is_retrying"] = True
+    # Audit #8: cờ hủy riêng cho đợt retry (đăng ký chung vào
+    # JOB_CANCEL_EVENTS để api_cancel_job set được).
+    retry_cancel_event = asyncio.Event()
+    with JOBS_LOCK:
+        JOB_CANCEL_EVENTS[job["id"]] = retry_cancel_event
 
     try:
         req: MovieRequest = job.get("req")
@@ -1040,7 +1098,15 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             max_concurrent=concurrent,
             progress_cb=retry_progress_cb,
             voice_mode=req.voice_mode or "tts",
+            cancel_event=retry_cancel_event,
         )
+
+        # Audit #8: hủy trong lúc retry -> dừng, không ghép lại phim.
+        if job.get("cancelled") or job.get("status") == "cancelled" or retry_cancel_event.is_set():
+            _mark_job_cancelled(job)
+            job_log(job, "🛑 Đợt render lại đã bị hủy bởi người dùng.")
+            _save_job_best_effort(job)
+            return
 
         # Cập nhật kết quả vào danh sách results chung
         current_results = {r["index"]: r for r in job.get("results", [])}
@@ -1048,14 +1114,24 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             idx = nr["index"]
             current_results[idx] = nr
             if nr["status"] == "done":
-                _set_scene(job, idx, {"status": "done", "msg": "✅ Hoàn thành (Sau khi thử lại)"})
+                _scene(job, idx).update({
+                    "status": "done",
+                    "msg": "✅ Hoàn thành (Sau khi thử lại)" + (" ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)" if nr.get("tts_failed") else ""),
+                    "tts_failed": bool(nr.get("tts_failed")),
+                    "tts_error": nr.get("tts_error"),
+                })
                 if idx in job["failed_scenes"]:
                     job["failed_scenes"].remove(idx)
             else:
-                _set_scene(job, idx, {"status": "error", "msg": f"❌ {nr.get('error', '')}"})
+                _scene(job, idx).update({"status": "error", "msg": f"❌ {nr.get('error', '')}"})
 
         all_results = sorted(list(current_results.values()), key=lambda x: x["index"])
         job["results"] = all_results
+        # Audit #9: đồng bộ lại danh sách cảnh mất tiếng sau khi thử lại.
+        job["tts_failed_scenes"] = [r["index"] for r in all_results if r.get("tts_failed")]
+        if job["tts_failed_scenes"]:
+            job_log(job, "⚠️ Cảnh báo TTS: cảnh " + ", ".join(f"#{i}" for i in job["tts_failed_scenes"]) +
+                    " mất tiếng (lỗi synthesis, đã dùng audio im lặng) — kiểm tra lại giọng đọc trước khi xuất phim!")
 
         # Kiểm định lại toàn bộ các cảnh sau khi thử lại
         all_scene_dicts = [s.model_dump() for s in req.scenes]
@@ -1104,6 +1180,9 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             _save_job_best_effort(job)
     finally:
         job["is_retrying"] = False
+        with JOBS_LOCK:
+            if JOB_CANCEL_EVENTS.get(job["id"]) is retry_cancel_event:
+                JOB_CANCEL_EVENTS.pop(job["id"], None)
 
 
 
@@ -1418,11 +1497,15 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
         if res.get("status") == "done":
             _scene(job, idx).update({
                 "status": "done",
-                "msg": "✅ Hoàn thành (Đã tạo lại)",
+                "msg": "✅ Hoàn thành (Đã tạo lại)" + (" ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)" if res.get("tts_failed") else ""),
                 "video_url": f"/api/jobs/{job_id}/scenes/{idx}/video",
                 "last_frame_url": res.get("last_frame_url"),
                 "error": None,
+                "tts_failed": bool(res.get("tts_failed")),
+                "tts_error": res.get("tts_error"),
             })
+            # Audit #9: đồng bộ lại danh sách cảnh mất tiếng.
+            job["tts_failed_scenes"] = [r["index"] for r in all_results if r.get("tts_failed")]
             if idx in job.get("failed_scenes", []):
                 job["failed_scenes"].remove(idx)
             job_log(job, f"🎉 [Cảnh {idx}] Render lại thành công!")
@@ -2006,8 +2089,12 @@ def api_cancel_job(job_id: str):
         return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
     with JOBS_LOCK:
         task = JOB_TASKS.get(job_id)
+        cancel_event = JOB_CANCEL_EVENTS.get(job_id)
         job["cancelled"] = True
         job["status"] = "cancelled"
+    # Set cờ hủy để run_batch dừng ở cảnh/poll tiếp theo (audit #8).
+    if cancel_event is not None:
+        cancel_event.set()
     # Cancel thật task pipeline (nếu còn chạy): task dừng ở điểm await tiếp theo,
     # pipeline kiểm tra cờ cancelled ở các mốc giai đoạn rồi thoát.
     if task is not None and not task.done():
