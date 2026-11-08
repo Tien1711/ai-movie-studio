@@ -291,12 +291,15 @@ def _tts_cache_store(cache_path: Path, src_path: str) -> None:
         print(f"[TTS Cache] Lưu cache thất bại (bỏ qua): {exc}")
 
 
-async def generate_tts(text: str, voice: str, output_path: str) -> float:
+async def generate_tts_with_status(text: str, voice: str, output_path: str):
     """
-    Sinh file audio TTS qua hệ thống đa engine tts_manager (VieNeu-TTS, OmniVoice, Edge-TTS).
-    Hỗ trợ voice riêng từng nhân vật (per-scene voice).
-    Có cơ chế dự phòng an toàn (silent fallback) để không bao giờ làm gián đoạn việc sinh video.
-    Trả về thời lượng thực tế chính xác của file âm thanh.
+    Như generate_tts nhưng trả thêm trạng thái lỗi:
+    (duration, tts_failed, tts_error).
+    - tts_failed=True khi synthesis lỗi và phải dùng silent fallback
+      (audit #9): audio trả về là im lặng, cảnh sẽ KHÔNG có tiếng —
+      caller phải đánh dấu scene tts_failed + cảnh báo rõ trong
+      Monitor/log thay vì để job chạy tiếp trong im lặng.
+    - Vẫn GIỮ fallback im lặng để không gián đoạn việc sinh video.
     Cache: text+voice trùng hash thì trả file cache, không gọi lại provider
     (không cache text rỗng, voice đặc biệt, hay audio fallback im lặng).
     """
@@ -311,8 +314,8 @@ async def generate_tts(text: str, voice: str, output_path: str) -> float:
                 shutil.copy2(cache_path, output_path)
                 dur = await asyncio.to_thread(get_media_duration, output_path)
                 if dur and dur > 0.3:
-                    return dur
-                return max(2.0, len(clean) / 15.0)
+                    return dur, False, ""
+                return max(2.0, len(clean) / 15.0), False, ""
         dur = await synthesize_voice(text=text, voice=voice, output_path=output_path)
         if use_cache and cache_path is not None and dur and dur > 0:
             try:
@@ -320,10 +323,11 @@ async def generate_tts(text: str, voice: str, output_path: str) -> float:
                     _tts_cache_store(cache_path, output_path)
             except OSError:
                 pass
-        return dur
+        return dur, False, ""
     except Exception as e:
-        print(f"[TTS Fallback] Lỗi tts_manager ({e}), đang tạo audio dự phòng...")
-        estimated_dur = max(2.0, len(text.strip()) / 15.0)
+        err = str(e)
+        print(f"[TTS Fallback] Lỗi tts_manager ({err}), đang tạo audio dự phòng...")
+        estimated_dur = max(2.0, len((text or "").strip()) / 15.0)
         try:
             from tts_manager import create_silent_audio_fallback
             # create_silent_audio_fallback trả None khi ffmpeg fail (audit §1.12):
@@ -334,19 +338,33 @@ async def generate_tts(text: str, voice: str, output_path: str) -> float:
             )
             if fb_dur is None:
                 print("[TTS Fallback] Silent fallback thất bại (không có file audio thật).")
-            return fb_dur if fb_dur is not None else estimated_dur
+            return (fb_dur if fb_dur is not None else estimated_dur), True, err
         except Exception:
-            return estimated_dur
+            return estimated_dur, True, err
 
 
-async def generate_multi_voice_tts(
+async def generate_tts(text: str, voice: str, output_path: str) -> float:
+    """
+    Sinh file audio TTS qua hệ thống đa engine tts_manager (VieNeu-TTS, OmniVoice, Edge-TTS).
+    Hỗ trợ voice riêng từng nhân vật (per-scene voice).
+    Có cơ chế dự phòng an toàn (silent fallback) để không bao giờ làm gián đoạn việc sinh video.
+    Trả về thời lượng thực tế chính xác của file âm thanh.
+    Giữ nguyên signature cũ (chỉ trả duration) để test/code khác không vỡ;
+    muốn biết TTS có lỗi hay không thì dùng generate_tts_with_status.
+    """
+    dur, _failed, _err = await generate_tts_with_status(text, voice, output_path)
+    return dur
+
+
+async def generate_multi_voice_tts_with_status(
     segments: list,
     output_path: str,
     tmp_dir: str,
-) -> float:
+):
     """
-    Sinh audio nhiều nhân vật, mỗi đoạn 1 giọng riêng, ghép lại thành 1 file.
-    segments: [{"text": "...", "voice": "vi-VN-HoaiMyNeural"}, ...]
+    Như generate_multi_voice_tts nhưng trả (total_duration, tts_failed, tts_error).
+    tts_failed=True khi ÍT NHẤT 1 đoạn lỗi synthesis và phải dùng silent
+    fallback (audit #9) — đoạn đó im lặng trong file ghép cuối.
     """
     import shutil
     import subprocess
@@ -359,21 +377,29 @@ async def generate_multi_voice_tts(
     # giới hạn concurrency bằng semaphore để không spawn quá nhiều engine.
     sem_tts = asyncio.Semaphore(4)
 
-    async def _one_seg(i: int, seg: dict) -> float:
+    async def _one_seg(i: int, seg: dict):
         seg_path = os.path.join(tmp_dir, f"seg_{i:03d}.mp3")
         async with sem_tts:
-            return await generate_tts(seg["text"], seg["voice"], seg_path)
+            return await generate_tts_with_status(seg["text"], seg["voice"], seg_path)
 
-    durations = await asyncio.gather(
+    seg_results = await asyncio.gather(
         *[_one_seg(i, seg) for i, seg in enumerate(segments)]
     )
+    durations = [r[0] for r in seg_results]
+    failed_parts = []
+    for i, r in enumerate(seg_results):
+        if r[1]:
+            who = (segments[i].get("character") or segments[i].get("speaker") or f"đoạn {i + 1}").strip()
+            failed_parts.append(f"{who}: {r[2]}")
+    tts_failed = bool(failed_parts)
+    tts_error = "; ".join(failed_parts)
     seg_files = [os.path.join(tmp_dir, f"seg_{i:03d}.mp3") for i in range(len(segments))]
     total_duration = float(sum(durations))
 
     if len(seg_files) == 1:
         shutil.copy2(seg_files[0], output_path)
         actual_dur = await get_media_duration_async(output_path)
-        return actual_dur if actual_dur > 0.3 else total_duration
+        return (actual_dur if actual_dur > 0.3 else total_duration), tts_failed, tts_error
 
     # Ghép nhiều đoạn bằng ffmpeg concat (chống lỗi đường dẫn Windows)
     concat_list = os.path.join(tmp_dir, "concat.txt")
@@ -399,7 +425,24 @@ async def generate_multi_voice_tts(
         except: pass
 
     actual_dur = await get_media_duration_async(output_path)
-    return actual_dur if actual_dur > 0.3 else total_duration
+    return (actual_dur if actual_dur > 0.3 else total_duration), tts_failed, tts_error
+
+
+async def generate_multi_voice_tts(
+    segments: list,
+    output_path: str,
+    tmp_dir: str,
+) -> float:
+    """
+    Sinh audio nhiều nhân vật, mỗi đoạn 1 giọng riêng, ghép lại thành 1 file.
+    segments: [{"text": "...", "voice": "vi-VN-HoaiMyNeural"}, ...]
+    Giữ nguyên signature cũ (chỉ trả duration); muốn biết TTS có lỗi hay
+    không thì dùng generate_multi_voice_tts_with_status.
+    """
+    total, _failed, _err = await generate_multi_voice_tts_with_status(
+        segments, output_path, tmp_dir
+    )
+    return total
 
 
 
@@ -609,10 +652,14 @@ async def poll_video_task(
     headers: dict,
     scene_idx: int,
     progress_cb: Optional[Callable] = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> str:
     """
     Poll trạng thái task video thích ứng & không spam API:
     - Không giới hạn thời gian chờ quá sớm (hỗ trợ queue nhiều tài khoản).
+    - cancel_event: được set khi người dùng hủy job (audit #8) — vòng poll
+      kiểm tra mỗi lượt và raise CancelledError để dừng ngay thay vì poll
+      đủ 600s.
     """
     start_time = time.time()
     max_wait_seconds = 600  # 10 phút tối đa (đảm bảo đủ thời gian render video AI & xoay vòng tài khoản)
@@ -620,6 +667,9 @@ async def poll_video_task(
     consecutive_net_errors = 0
 
     while time.time() - start_time < max_wait_seconds:
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError(
+                f"[Cảnh {scene_idx}] Job đã bị hủy trong lúc chờ video.")
         attempt += 1
         elapsed = int(time.time() - start_time)
 
@@ -869,6 +919,7 @@ async def process_scene(
     progress_cb: Optional[Callable] = None,
     style_locks: Optional[Dict[str, str]] = None,
     voice_mode: str = "tts",
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> Dict[str, Any]:
     """
     Pipeline xử lý 1 cảnh độc lập với cơ chế kiểm soát retry thông minh (Non-Spamming):
@@ -904,6 +955,8 @@ async def process_scene(
                 "last_frame_path": None,
                 "last_frame_url": None,
                 "error": None,
+                "tts_failed": False,
+                "tts_error": None,
             }
 
             headers = {
@@ -999,6 +1052,11 @@ async def process_scene(
         tts_task = None  # khởi tạo trước vòng retry để except handler luôn cancel được (§1.10)
         for attempt in range(1, max_attempts + 1):
             try:
+                # Audit #8: kiểm tra cờ hủy trước mỗi attempt — không bắt đầu
+                # render cảnh mới khi job đã bị hủy.
+                if cancel_event is not None and cancel_event.is_set():
+                    raise asyncio.CancelledError(
+                        f"[Cảnh {idx}] Job đã bị hủy trước khi render cảnh.")
                 # Timing từng giai đoạn của scene (đo tốc độ render):
                 # render_s = wall time của attempt (submit + poll + tải + đồng bộ),
                 # poll_s = thời gian chờ API video, tts_s = thời gian sinh TTS
@@ -1018,17 +1076,21 @@ async def process_scene(
                         progress_cb(idx, msg_init)
 
                 # 1. Sinh TTS (Bỏ qua khi ở chế độ AI Voice)
+                # Audit #9: dùng bản _with_status để biết TTS có lỗi không —
+                # lỗi thì vẫn fallback im lặng nhưng phải đánh dấu scene.
+                tts_failed = False
+                tts_error = ""
                 if is_ai_voice:
                     tts_task = None
                 else:
                     if not await _is_complete_audio_file(audio_path):
                         if voice_segments and len(voice_segments) > 0:
                             tts_task = asyncio.create_task(
-                                generate_multi_voice_tts(voice_segments, audio_path, tmp_seg_dir)
+                                generate_multi_voice_tts_with_status(voice_segments, audio_path, tmp_seg_dir)
                             )
                         else:
                             tts_task = asyncio.create_task(
-                                generate_tts(voiceover, scene_voice, audio_path)
+                                generate_tts_with_status(voiceover, scene_voice, audio_path)
                             )
                     else:
                         tts_task = None
@@ -1082,18 +1144,35 @@ async def process_scene(
                 # 2. Poll kết quả
                 _poll_t0 = time.monotonic()
                 video_url = await poll_video_task(
-                    client, task_id, base_url, headers, idx, progress_cb
+                    client, task_id, base_url, headers, idx, progress_cb,
+                    cancel_event=cancel_event,
                 )
                 poll_s += time.monotonic() - _poll_t0
 
                 if tts_task:
-                    audio_duration = await tts_task
+                    audio_duration, tts_failed, tts_error = await tts_task
                     if tts_started is not None:
                         tts_s = time.monotonic() - tts_started
+                    if tts_failed:
+                        # Audit #9: TTS lỗi -> audio im lặng, cảnh mất tiếng.
+                        # Báo ngay qua progress (Monitor/log thấy liền) và
+                        # đánh dấu vào result để film_pipeline cảnh báo tiếp.
+                        print(f"[batch_engine Warning] TTS scene {idx} lỗi "
+                              f"({tts_error[:120]}): dùng audio im lặng — cảnh sẽ không có tiếng.")
+                        if progress_cb:
+                            warn_msg = (f"⚠️ TTS lỗi: {tts_error[:60]} — cảnh này "
+                                        f"sẽ không có tiếng (audio im lặng).")
+                            try:
+                                progress_cb(idx, warn_msg, {"tts_failed": True, "tts_error": tts_error})
+                            except TypeError:
+                                progress_cb(idx, warn_msg)
                     if audio_path and not await _is_complete_audio_file(audio_path):
                         print(f"[batch_engine Warning] TTS scene {idx} xong nhưng file audio "
                               f"không hoàn chỉnh — dùng duration ước lượng.")
                         audio_duration = max(2.0, len(voiceover) / 3.0)
+                        if not tts_failed and (voiceover or voice_segments):
+                            tts_failed = True
+                            tts_error = "file audio không hoàn chỉnh sau khi sinh TTS"
                 else:
                     if is_ai_voice:
                         text_len = len(voiceover) if voiceover else sum(len(s.get("text", "")) for s in voice_segments)
@@ -1200,6 +1279,8 @@ async def process_scene(
                         "last_frame_path": extracted_frame,
                         "last_frame_url": last_frame_url,
                         "error": None,
+                        "tts_failed": tts_failed,
+                        "tts_error": tts_error or None,
                         "timing": {
                             "render_s": round(time.monotonic() - attempt_t0, 3),
                             "poll_s": round(poll_s, 3),
@@ -1216,8 +1297,13 @@ async def process_scene(
                         "prompt": scene.get("prompt", ""),
                         "voiceover": full_voiceover,
                         "error": None,
+                        "tts_failed": tts_failed,
+                        "tts_error": tts_error or None,
                     }
-                    msg_text = "✅ Hoàn thành (Đã trích xuất Last Frame)" if extracted_frame else "✅ Hoàn thành!"
+                    if tts_failed:
+                        msg_text = "✅ Hoàn thành ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)"
+                    else:
+                        msg_text = "✅ Hoàn thành (Đã trích xuất Last Frame)" if extracted_frame else "✅ Hoàn thành!"
                     try:
                         progress_cb(idx, msg_text, extra_data)
                     except TypeError:
@@ -1332,6 +1418,20 @@ def summarize_batch_timing(results: List[Dict[str, Any]], wall_s: float) -> Dict
     }
 
 
+def _cancelled_result(scene: Any) -> Dict[str, Any]:
+    """Kết quả giả cho 1 cảnh chưa kịp render vì job bị hủy (audit #8)."""
+    idx = scene.get("index") if isinstance(scene, dict) else None
+    return {
+        "index": idx,
+        "status": "cancelled",
+        "error": "Job đã bị hủy bởi người dùng.",
+        "video_path": None,
+        "audio_path": None,
+        "voiceover": scene.get("voiceover", "") if isinstance(scene, dict) else "",
+        "audio_duration": int(scene.get("duration", 5)) if isinstance(scene, dict) else 5,
+    }
+
+
 async def run_batch(
     scenes: List[Dict[str, Any]],
     base_url: str,
@@ -1346,6 +1446,7 @@ async def run_batch(
     start_scene_idx: int = 1,
     voice_mode: str = "tts",
     timing: Optional[Dict[str, float]] = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> List[Dict[str, Any]]:
     """
     Chạy hàng loạt tất cả các cảnh với hỗ trợ kỹ thuật First/Last Frame Chaining & Fallback:
@@ -1355,6 +1456,12 @@ async def run_batch(
     - start_scene_idx: Cho phép chạy lại từ cảnh N mà không làm mất cảnh 1..N-1 đã hoàn thành.
     - timing: dict tùy chọn — run_batch điền timing từng giai đoạn vào đó
       (render_s/poll_s/tts_s; compose_s/total_s do film_pipeline điền sau).
+    - cancel_event: asyncio.Event được set khi người dùng hủy job (audit #8).
+      run_batch kiểm tra trước mỗi cảnh + trong vòng poll từng cảnh
+      (qua process_scene/poll_video_task); cảnh chưa render trả về
+      status "cancelled" thay vì chạy tiếp. GIỚI HẠN: ffmpeg đồng bộ chạy
+      trong asyncio.to_thread (ghép clip/last frame) không bị giết khi
+      cancel — cảnh đang chạy sẽ xong bước đó rồi mới dừng hẳn.
     """
     batch_t0 = time.monotonic()
 
@@ -1366,6 +1473,10 @@ async def run_batch(
     os.makedirs(os.path.join(output_dir, "audio"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "scenes"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "final"), exist_ok=True)
+
+    # Audit #8: job đã bị hủy trước khi batch bắt đầu -> không gọi API nữa.
+    if cancel_event is not None and cancel_event.is_set():
+        return _finish([_cancelled_result(s) for s in scenes])
 
     sem = asyncio.Semaphore(max_concurrent)
     sorted_scenes = sorted(
@@ -1414,8 +1525,13 @@ async def run_batch(
         if chain_mode == "sequential":
             results = []
             prev_last_frame = None
-            for s in sorted_scenes:
+            for si, s in enumerate(sorted_scenes):
                 idx = s["index"]
+                # Audit #8: dừng trước mỗi cảnh khi job đã bị hủy; các cảnh
+                # còn lại trả về status "cancelled" thay vì render tiếp.
+                if cancel_event is not None and cancel_event.is_set():
+                    results.extend(_cancelled_result(x) for x in sorted_scenes[si:])
+                    break
                 if idx < start_scene_idx and s.get("status") == "done" and s.get("video_path"):
                     results.append(s)
                     if s.get("last_frame_path"):
@@ -1452,7 +1568,7 @@ async def run_batch(
                     res = await process_scene(
                         client, s, sem, base_url, api_key,
                         output_dir, voice, progress_cb, style_locks=style_locks,
-                        voice_mode=voice_mode,
+                        voice_mode=voice_mode, cancel_event=cancel_event,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -1554,10 +1670,17 @@ async def run_batch(
                             progress_cb(idx, f"⚡ Cảnh {idx-1} lỗi ➔ Tự động chuyển Cảnh {idx} sang render Text-to-Video độc lập")
 
             try:
+                # Audit #8: không bắt đầu render cảnh mới khi job đã bị hủy
+                # (kiểm tra sau cả lúc chờ chain + stagger).
+                if cancel_event is not None and cancel_event.is_set():
+                    res = _cancelled_result(s)
+                    results_map[idx] = res
+                    done_events[idx].set()
+                    return res
                 res = await process_scene(
                     client, s, sem, base_url, api_key,
                     output_dir, voice, progress_cb, style_locks=style_locks,
-                    voice_mode=voice_mode,
+                    voice_mode=voice_mode, cancel_event=cancel_event,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1585,6 +1708,10 @@ async def run_batch(
         for scene_obj, item in zip(sorted_scenes, gathered):
             if isinstance(item, dict):
                 results.append(item)
+            elif isinstance(item, asyncio.CancelledError):
+                # Audit #8: worker bị hủy giữa chừng -> cảnh "cancelled"
+                # (không phải "error") để film_pipeline nhận diện và dừng.
+                results.append(_cancelled_result(scene_obj))
             else:  # BaseException lọt qua (vd CancelledError được gather bọc)
                 results.append({
                     "index": scene_obj["index"],
