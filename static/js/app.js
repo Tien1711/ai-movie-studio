@@ -1640,7 +1640,7 @@ function startMonitoring(jobId, title, totalScenes) {
           </div>
           <span class="pill queued">⌛ Đang chờ</span>
         </div>
-        <div class="cell-media" style="background:rgba(255,255,255,0.02);border:1px dashed var(--border);color:var(--muted);font-size:12px;">
+        <div class="cell-media" style="background:var(--bg2);border:1px dashed var(--border);color:var(--muted);font-size:12px;">
           ⌛ Đang xếp hàng chờ xử lý...
         </div>
         <div class="cell-prompt-box">
@@ -1930,7 +1930,7 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
   } else {
     // queued
     mediaHtml = `
-      <div class="cell-media" style="background:rgba(255,255,255,0.02);border:1px dashed var(--border);color:var(--muted);font-size:12px;">
+      <div class="cell-media" style="background:var(--bg2);border:1px dashed var(--border);color:var(--muted);font-size:12px;">
         ⌛ Đang xếp hàng chờ xử lý...
       </div>
     `;
@@ -5485,7 +5485,7 @@ function renderShotDeskReviewScreen(fromPolling = false) {
               </div>
             </div>
             <div class="fx fx-ac fx-g10">
-              <button class="sd-wave-widget" id="sdReviewWaveWidget" onclick="playReviewDeskAudio('${shot.audio_url}', this)" title="Nghe thoại kèm visualizer sóng âm sống động" style="padding:6px 12px;border-radius:6px;background:rgba(255,255,255,0.05);border:1px solid var(--border);cursor:pointer;color:var(--text);">
+              <button class="sd-wave-widget" id="sdReviewWaveWidget" onclick="playReviewDeskAudio('${shot.audio_url}', this)" title="Nghe thoại kèm visualizer sóng âm sống động" style="padding:6px 12px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);cursor:pointer;color:var(--text);">
                 <span class="sd-wave-icon" style="font-size:11px;margin-right:2px;">▶</span>
                 <span class="sd-wave-bars">
                   <span class="sd-wave-bar"></span><span class="sd-wave-bar"></span>
@@ -5558,7 +5558,7 @@ function renderShotDeskReviewScreen(fromPolling = false) {
           <div style="font-weight:700;font-size:12.5px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;">
             📝 Prompt Chi Tiết
           </div>
-          <div style="color:var(--text);font-family:monospace;line-height:1.5;background:rgba(255,255,255,0.02);padding:8px;border-radius:4px;">
+          <div style="color:var(--text);font-family:monospace;line-height:1.5;background:var(--bg2);padding:8px;border-radius:4px;">
             ${esc(shot.used_prompt || shot.prompt)}
           </div>
           ${shot.compliance_prompt ? `
@@ -5728,7 +5728,7 @@ function renderShotDeskTimelineScreen() {
     videoTrackHtml += `
       <div class="sd-clip-block" onclick="openReviewDeskForShot(${s.index})" style="${isApproved ? 'border-color:var(--green);background:rgba(52,211,153,0.08);' : 'opacity:0.65;'}cursor:pointer;" title="Bấm để mở Review Desk cho Shot ${s.index}">
         <div class="fx fx-ac fx-g8">
-          ${thumbUrl ? `<img loading="lazy" decoding="async" src="${thumbUrl}" style="width:34px;height:48px;object-fit:cover;border-radius:4px;border:1px solid rgba(255,255,255,0.15);flex-shrink:0;">` : ''}
+          ${thumbUrl ? `<img loading="lazy" decoding="async" src="${thumbUrl}" style="width:34px;height:48px;object-fit:cover;border-radius:4px;border:1px solid var(--border);flex-shrink:0;">` : ''}
           <div style="overflow:hidden;flex:1;">
             <div class="u-fw700 fx fx-jc-sb fx-ac">
               <span>Shot ${s.index}</span>
@@ -6725,7 +6725,7 @@ function openShotDeskEditModal(shotIndex) {
             </div>
           </div>
 
-          <div id="sdEditVoiceNote" style="font-size:11px;color:var(--muted);margin-top:10px;padding:6px 10px;background:rgba(255,255,255,0.03);border-radius:4px;border-left:3px solid var(--accent);display:none;"></div>
+          <div id="sdEditVoiceNote" style="font-size:11px;color:var(--muted);margin-top:10px;padding:6px 10px;background:var(--bg2);border-radius:4px;border-left:3px solid var(--accent);display:none;"></div>
         </div>
 
         <div class="form-row">
@@ -7090,71 +7090,71 @@ function openHotkeysCheatSheetModal() {
           Điều khiển duyệt cảnh và phê duyệt phim nhanh như DaVinci Resolve & Hollywood Suite:
         </div>
         <div class="gd gd-2 fx-g10 u-fs125">
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Phát / Dừng Video</span>
             <span class="sd-kbd">Space</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Phê Duyệt Shot</span>
             <span class="sd-kbd">V / Enter</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Shot Sau</span>
             <span class="sd-kbd">→ / D</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Shot Trước</span>
             <span class="sd-kbd">← / A</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Sửa Prompt Shot</span>
             <span class="sd-kbd">E</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Render Lại Shot</span>
             <span class="sd-kbd">R</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Lùi 1 Khung Hình</span>
             <span class="sd-kbd">J</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Phát / Dừng (J-K-L)</span>
             <span class="sd-kbd">K / Space</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Tiến 1 Khung Hình</span>
             <span class="sd-kbd">L</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Rạp Chiếu Phim</span>
             <span class="sd-kbd">T</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Bật/Tắt Lặp Clip</span>
             <span class="sd-kbd">Shift + L</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Xem Bảng Phím Tắt</span>
             <span class="sd-kbd">?</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Chuyển Sang Matrix</span>
             <span class="sd-kbd">1</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Chuyển Sang Review</span>
             <span class="sd-kbd">2</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Chuyển Sang Timeline</span>
             <span class="sd-kbd">3</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Đổi Lưới / Chi tiết</span>
             <span class="sd-kbd">G</span>
           </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.03);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--bg2);padding:8px 12px;border-radius:6px;border:1px solid var(--border);">
             <span>Bật/Tắt Khung Cuộn</span>
             <span class="sd-kbd">S</span>
           </div>

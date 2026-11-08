@@ -41,6 +41,16 @@
   --accent-sky: #6366f1;
   --purple: #6366f1;
   --bg0: #f4f4f5; --bg1: #ffffff; --bg2: #fafafa; --bg3: #e4e4e7;
+  /* Light theme MUST override text/border tokens too: dark defaults
+     (--text #fafafa, white-tinted borders) are invisible on white. */
+  --text: #18181b;
+  --text-secondary: #52525b;
+  --muted: #71717a;
+  --border: rgba(0, 0, 0, .12);
+  --border-light: rgba(0, 0, 0, .06);
+  --border-hover: rgba(0, 0, 0, .24);
+  --shadow: 0 4px 20px -2px rgba(0, 0, 0, .12);
+  --shadow-lg: 0 16px 40px -4px rgba(0, 0, 0, .18);
 }
 
 /* ── Base: kieu chu, focus, scrollbar desktop ── */
@@ -79,7 +89,7 @@ code, .mono { font-family: var(--font-mono); }
 .topbar-project::before { content: "🎞️"; }
 #topbarCreateBtn { display: none; }
 body[data-panel="create"] #topbarCreateBtn { display: inline-flex; }
-.muse-status-bar { display: flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 12px; background: rgba(255, 255, 255, .04); border: 1px solid var(--border); }
+.muse-status-bar { display: flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px; font-size: 12px; background: var(--bg2); border: 1px solid var(--border); }
 .muse-status-dot { color: var(--yellow); font-size: 10px; }
 .muse-accounts-badge { display: none; background: var(--accent-soft); color: var(--accent-ink); padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
 
@@ -97,6 +107,29 @@ body[data-panel="create"] #topbarCreateBtn { display: inline-flex; }
 body.sidebar-collapsed .sidebar .nav-kbd { display: none; }
 .sidebar-footer { font-size: 12px; }
 #sidebarConcurrent { color: var(--accent-ink); font-weight: 700; }
+
+/* ── Sidebar overlay + drawer (mobile <=1024px) ──────────────────────────
+   #sidebarOverlay nam TRUC TIEP trong .shell (grid) nhung KHONG DUOC la
+   grid item: position:fixed dua no ra khoi grid. Neu khong no chiem mat o
+   row 2 / col 2 cua <main> va day <main> xuong cot hep 272px (layout vo
+   nhu anh chup man hinh: noi dung chinh ep vao cot trai, ben phai trong).
+   Co che JS (ui.js): <=1024px nut toggle them/xoa body.sidebar-open;
+   overlay chi hien khi sidebar mo dang drawer, bam overlay thi dong.
+   Overlay bat dau duoi topbar de nut toggle van bam duoc khi drawer mo. */
+.sidebar-overlay {
+  position: fixed; top: var(--topbar-h); right: 0; bottom: 0; left: 0; z-index: 40;
+  display: none; background: rgba(0, 0, 0, .55);
+}
+body.sidebar-open .sidebar-overlay { display: block; }
+@media (max-width: 1024px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar {
+    position: fixed; top: var(--topbar-h); bottom: 0; left: 0;
+    width: var(--sidebar-w); z-index: 50; display: flex;
+    transform: translateX(-100%); transition: transform .2s ease;
+  }
+  body.sidebar-open .sidebar { transform: translateX(0); }
+}
 
 /* ── Card / nut / form ── */
 .card { border-radius: var(--radius); padding: 20px 22px; }
@@ -161,7 +194,27 @@ label { color: var(--text-secondary); }
 }
 /* Wizard: nav dinh tren, buoc 2 = cong cu trai + danh sach canh phai */
 .create-wizard-nav { position: sticky; top: 0; z-index: 20; background: var(--bg0); padding: 10px 0 12px; margin-bottom: 16px; border-bottom: 1px solid var(--border-light); }
+/* Step chi hien khi .is-active; step 2 giu rule grid o @media ben duoi
+   (specificity .wizard-step.is-active[data-step="2"] thang rule block chung). */
+.wizard-step { display: none; }
+.wizard-step.is-active { display: block; }
+.wizard-step-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  min-height: 36px; padding: 6px 14px;
+  background: var(--bg1); color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+}
+.wizard-step-btn .wizard-num {
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--bg3); color: var(--text);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 800; flex-shrink: 0;
+}
+.wizard-step-btn.is-active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wizard-step-btn.is-active .wizard-num { background: rgba(255, 255, 255, .25); color: #fff; }
 .wizard-step-btn:hover { border-color: var(--accent); color: var(--text); }
+.wizard-step-btn.is-active:hover { color: #fff; }
 .wizard-step-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (min-width: 1280px) {
   .wizard-step.is-active[data-step="2"] { display: grid; grid-template-columns: minmax(320px, 400px) minmax(0, 1fr); gap: 16px; align-items: start; }
@@ -390,7 +443,7 @@ label { color: var(--text-secondary); }
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--bg2);
 }
 .tm-compact-summary { font-size: 12px; font-weight: 700; color: var(--text); margin-right: 4px; }
 .tm-compact-pill {
@@ -398,7 +451,7 @@ label { color: var(--text-secondary); }
   padding: 3px 9px;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--bg2);
   color: var(--text);
   white-space: nowrap;
 }
