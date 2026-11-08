@@ -105,6 +105,20 @@ body[data-panel="create"] #topbarCreateBtn { display: inline-flex; }
 .nav-kbd { margin-left: auto; font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-family: var(--font-mono); flex-shrink: 0; }
 .nav-item .badge + .nav-kbd { margin-left: 6px; }
 body.sidebar-collapsed .sidebar .nav-kbd { display: none; }
+
+/* audit 2026-11-08 #11: thu gọn thật (desktop) — sidebar 272px -> 64px,
+   chỉ còn icon; nhãn/badge/tiêu đề mục/footer ẩn; tooltip giữ nguyên nhờ
+   title sẵn có trên từng .nav-item (ui.js bọc text vào .nav-label).
+   Trước đây rule duy nhất chỉ ẩn .nav-kbd nên sidebar vẫn rộng 272px. */
+@media (min-width: 1025px) {
+  body.sidebar-collapsed .shell { grid-template-columns: 64px minmax(0, 1fr); }
+  body.sidebar-collapsed .sidebar { overflow-x: hidden; }
+  body.sidebar-collapsed .sidebar .nav-section,
+  body.sidebar-collapsed .sidebar .nav-label,
+  body.sidebar-collapsed .sidebar .nav-item .badge,
+  body.sidebar-collapsed .sidebar-footer { display: none; }
+  body.sidebar-collapsed .sidebar .nav-item { justify-content: center; padding: 10px 0; margin: 2px 6px; }
+}
 .sidebar-footer { font-size: 12px; }
 #sidebarConcurrent { color: var(--accent-ink); font-weight: 700; }
 

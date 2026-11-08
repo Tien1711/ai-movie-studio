@@ -306,12 +306,12 @@
           </div>
           <div>
             <label>Cỡ chữ phụ đề</label>
-            <input type="number" id="fontSize" value="22" min="14" max="40">
+            <input type="number" id="fontSize" value="22" min="8" max="72">
           </div>
           <div>
             <label>Render song song (concurrent)</label>
             <input type="number" id="maxConcurrent" value="6" min="1" max="12" oninput="updateConcurrent(this.value)" onchange="updateConcurrent(this.value)">
-            <span id="concurrentHint" style="font-size:11px;color:var(--accent);display:block;margin-top:2px;">Tối đa theo số tài khoản Muse khả dụng</span>
+            <span id="concurrentHint" style="font-size:11px;color:var(--accent);display:block;margin-top:2px;">Tối đa N luồng song song (đặt ở ô Concurrent)</span>
           </div>
         </div>
         <div id="aiVoiceNoticeBar" style="display:none;background:rgba(245,158,11,0.08);border:1px dashed var(--yellow);border-radius:6px;padding:8px 12px;margin-top:8px;font-size:12px;color:var(--yellow);align-items:center;gap:8px;">
@@ -333,15 +333,15 @@
           </div>
           <div>
             <div class="u-row-between">
-              <label class="u-mb0">Âm lượng Nhạc nền: <b class="u-c-accent" id="lblMusicVol">25%</b></label>
+              <label class="u-mb0">Âm lượng Nhạc nền: <b class="u-c-accent" id="lblMusicVol">×0.25</b></label>
             </div>
-            <input class="u-mt8 u-ac-accent" type="range" id="musicVolume" min="0" max="1" step="0.05" value="0.25" oninput="document.getElementById('lblMusicVol').textContent=Math.round(this.value*100)+'%'">
+            <input class="u-mt8 u-ac-accent" type="range" id="musicVolume" min="0" max="2" step="0.05" value="0.25" oninput="document.getElementById('lblMusicVol').textContent=formatVolumeLabel(this.value)">
           </div>
           <div>
             <div class="u-row-between">
-              <label class="u-mb0">Âm lượng Lời thoại: <b class="u-c-green" id="lblVoiceVol">100%</b></label>
+              <label class="u-mb0">Âm lượng Lời thoại: <b class="u-c-green" id="lblVoiceVol">×1.0</b></label>
             </div>
-            <input class="u-mt8 u-ac-green" type="range" id="voiceVolume" min="0" max="2" step="0.1" value="1.0" oninput="document.getElementById('lblVoiceVol').textContent=Math.round(this.value*100)+'%'">
+            <input class="u-mt8 u-ac-green" type="range" id="voiceVolume" min="0" max="2" step="0.1" value="1.0" oninput="document.getElementById('lblVoiceVol').textContent=formatVolumeLabel(this.value)">
           </div>
         </div>
 
@@ -1411,12 +1411,12 @@
                 </select>
               </div>
               <div>
-                <label>Âm lượng Nhạc nền (BGM): <span id="sdMusicVolVal">25%</span></label>
-                <input type="range" id="sdMusicVol" min="0" max="1" step="0.05" value="0.25" oninput="document.getElementById('sdMusicVolVal').textContent=Math.round(this.value*100)+'%'">
+                <label>Âm lượng Nhạc nền (BGM): <span id="sdMusicVolVal">×0.25</span></label>
+                <input type="range" id="sdMusicVol" min="0" max="2" step="0.05" value="0.25" oninput="document.getElementById('sdMusicVolVal').textContent=formatVolumeLabel(this.value)">
               </div>
               <div>
-                <label>Âm lượng Thoại (Voice): <span id="sdVoiceVolVal">100%</span></label>
-                <input type="range" id="sdVoiceVol" min="0.5" max="2" step="0.1" value="1.0" oninput="document.getElementById('sdVoiceVolVal').textContent=Math.round(this.value*100)+'%'">
+                <label>Âm lượng Thoại (Voice): <span id="sdVoiceVolVal">×1.0</span></label>
+                <input type="range" id="sdVoiceVol" min="0.5" max="2" step="0.1" value="1.0" oninput="document.getElementById('sdVoiceVolVal').textContent=formatVolumeLabel(this.value)">
               </div>
             </div>
 
