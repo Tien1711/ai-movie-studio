@@ -1507,14 +1507,10 @@ function parseProfessionalMarkdownScript(text) {
 }
 
 // ── Start Movie Creation ────────────────────────────────────────────────
-async function startMovieCreation() {
-  syncScenesFromDOM();
-
-  if (scenes.length === 0) {
-    alert('Vui lòng thêm ít nhất 1 cảnh!');
-    return;
-  }
-
+// (Refactor 2026-11-07, Consistency Max) Payload tách riêng thành
+// buildMoviePayload() để nút "Kiểm tra đồng nhất" (ui.js) dùng chung
+// đúng 1 bản payload với startMovieCreation, tránh lệch nhau.
+function buildMoviePayload() {
   const concurrent = parseInt(document.getElementById('maxConcurrent').value) || cfg.concurrent || 12;
   cfg.concurrent = concurrent;
 
@@ -1530,6 +1526,7 @@ async function startMovieCreation() {
     export_mode: document.getElementById('exportMode').value,
     max_concurrent: concurrent,
     chain_mode: document.getElementById('chainMode')?.value || 'none',
+    consistency_mode: document.getElementById('consistencyMax')?.checked ? 'max' : 'standard',
     chain_fallback_mode: document.getElementById('chainFallbackMode')?.value || 'independent',
     bg_music_path: document.getElementById('bgMusicSelect')?.value || null,
     music_volume: parseFloat(document.getElementById('musicVolume')?.value || '0.25'),
@@ -1560,6 +1557,32 @@ async function startMovieCreation() {
       sheet_angle: s.sheet_angle || 'front',
     })),
   };
+  return payload;
+}
+
+async function startMovieCreation() {
+  syncScenesFromDOM();
+
+  if (scenes.length === 0) {
+    alert('Vui lòng thêm ít nhất 1 cảnh!');
+    return;
+  }
+
+  const payload = buildMoviePayload();
+
+  // Consistency Max: kiểm tra trước ở client để báo lỗi nhanh; server vẫn
+  // kiểm tra lại và trả 422 nếu có lỗi (không tin hoàn toàn client).
+  if (payload.consistency_mode === 'max' && typeof window.runConsistencyPreflight === 'function') {
+    const pre = await window.runConsistencyPreflight(payload);
+    if (pre && !pre.passed) {
+      if (typeof window.showConsistencyReport === 'function') {
+        window.showConsistencyReport(pre, { allowProceed: false });
+      } else {
+        alert('Preflight đồng nhất chưa đạt: ' + (pre.checks || []).filter(c => c.level === 'error').map(c => c.message).join(' | '));
+      }
+      return;
+    }
+  }
 
   document.getElementById('btnCreateMovie').disabled = true;
   document.getElementById('createStatus').textContent = '⏳ Đang gửi yêu cầu...';
@@ -1571,6 +1594,12 @@ async function startMovieCreation() {
       body: JSON.stringify(payload),
     });
     const data = await res.json();
+    // Server trả 422 kèm danh sách check khi preflight lỗi -> hiện báo cáo
+    // thay vì alert chung chung.
+    if (res.status === 422 && data.checks && typeof window.showConsistencyReport === 'function') {
+      window.showConsistencyReport({ passed: false, errors: data.errors || 0, warnings: data.warnings || 0, checks: data.checks }, { allowProceed: false });
+      return;
+    }
     if (data.error) throw new Error(data.error);
 
     activeJobId = data.job_id;
