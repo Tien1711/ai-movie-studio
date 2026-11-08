@@ -194,6 +194,14 @@ can kiem tra thu cong theo checklist tren truoc khi dua len production.
 - Giới hạn: phát hiện shot cầu nối chỉ là heuristic từ khóa thời gian/địa điểm (sáng/trưa/chiều/tối/đêm, trong nhà/ngoài trời, danh từ địa điểm), chưa hiểu ngữ nghĩa sâu nên có thể báo thừa/thiếu — chỉ dùng làm gợi ý.
 ---
 
+## Tốc độ render (2026-11-08)
+
+- **Timing từng giai đoạn:** mỗi job có `job["timing"] = {render_s, poll_s, tts_s, compose_s, total_s}` (lưu cùng `job_state.json`, trả về trong `GET /api/jobs/{id}`). `render_s` = wall time chạy batch, `poll_s`/`tts_s` = tổng thời gian chờ API / sinh TTS (hai số này chồng lấn nhau vì TTS chạy song song với poll, và chồng lấn giữa các scene ở chế độ song song — dùng để soi bottleneck, không cộng vào tổng). Panel Monitor hiện bảng nhỏ "Render X.Xs · Poll API X.Xs · TTS X.Xs · Ghép X.Xs · Tổng X.Xs" khi có số liệu.
+- **Ghép single-pass:** `merge_clips_advanced` mặc định ghép toàn bộ timeline bằng 1 lần gọi ffmpeg (chuỗi xfade cho dissolve/fade, concat cho bước cut; audio acrossfade/concat tương ứng). `COMPOSE_MODE=pairwise` ép dùng nhánh pairwise cũ (để benchmark đối chiếu); single-pass lỗi thì tự fallback pairwise. Benchmark: `scripts/bench_compose.py` (tự sinh clip, không cần API ngoài).
+- **Cache TTS:** `batch_engine.generate_tts` cache file audio theo hash SHA256 (text chuẩn hóa + voice + speed) tại `workspace/_tts_cache/`, tối đa 500 file hoặc 500MB (cái nào chạm trước), dọn LRU theo mtime. Không cache text rỗng, voice đặc biệt (`ai_voice`/`native`/`none`/`no_dub`) hay audio fallback im lặng.
+- **Giới hạn đã đo:** bottleneck lớn nhất của phim dài vẫn là chờ API video ngoài (poll) — ghép/xfade và TTS chỉ là phần nhỏ; xem số `poll_s` trên Monitor để xác nhận với từng job thật.
+---
+
 ## Redesign 2026-11-08 — desktop-first (nhanh `feature/ui-redesign`)
 
 > Chi sua `static/` (HTML/CSS/JS), khong sua backend, khong commit/push.

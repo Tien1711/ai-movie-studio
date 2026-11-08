@@ -600,6 +600,83 @@ def compose_scene_video(
             except Exception: pass
 
 
+def _merge_single_pass(
+    clips: List[str],
+    transitions: List[str],
+    sound_bridge_duration: float,
+    output_path: str,
+    progress_cb: Optional[Any] = None,
+) -> str:
+    """Ghép toàn bộ clip bằng MỘT lần gọi ffmpeg duy nhất (single-pass):
+    - Video: chuỗi xfade nối tiếp cho dissolve/fade; concat cho bước cut.
+    - Audio: chuỗi acrossfade nối tiếp cho dissolve/fade; concat cho bước cut.
+    Tổng thời lượng = sum(durations) - sum(overlaps), khớp 100% với
+    compute_timeline_offsets (3 clip 2s + 2 dissolve 0.5s -> đúng 5.0s).
+    Lỗi ở bất kỳ bước nào (khác fps/kích thước/sample-rate...) thì raise để
+    caller fallback về nhánh pairwise cũ — không bao giờ dừng đột ngột.
+    """
+    n = len(clips)
+    durations = [get_media_duration(c) for c in clips]
+    t_durs: List[float] = []
+    for i in range(1, n):
+        trans = (transitions[i - 1] or "dissolve").lower()
+        if trans in ("none", "cut", "match cut") or sound_bridge_duration <= 0.05:
+            t_durs.append(0.0)
+        else:
+            t_durs.append(max(0.1, min(sound_bridge_duration, min(durations[i - 1], durations[i]) * 0.4)))
+
+    if progress_cb:
+        progress_cb(40, f"Đang ghép single-pass xfade ({n} cảnh, 1 lần encode)...")
+
+    parts: List[str] = []
+    for i in range(n):
+        parts.append(f"[{i}:v]format=yuv420p,setpts=PTS-STARTPTS[v{i}in]")
+        parts.append(f"[{i}:a]aresample=44100,asetpts=PTS-STARTPTS[a{i}in]")
+
+    # Chuỗi video: xfade cho dissolve/fade, concat cho cut (giữ đúng độ dài).
+    cur_v = "v0in"
+    acc_dur = durations[0]
+    for i in range(1, n):
+        t = t_durs[i - 1]
+        if t > 0.05:
+            offset = max(0.0, acc_dur - t)
+            parts.append(
+                f"[{cur_v}][v{i}in]xfade=transition=fade:duration={t:.3f}:offset={offset:.3f}[x{i}]"
+            )
+        else:
+            parts.append(f"[{cur_v}][v{i}in]concat=n=2:v=1:a=0[x{i}]")
+        cur_v = f"x{i}"
+        acc_dur = acc_dur + durations[i] - t
+
+    # Chuỗi audio: acrossfade cho dissolve/fade, concat cho cut.
+    cur_a = "a0in"
+    for i in range(1, n):
+        t = t_durs[i - 1]
+        if t > 0.05:
+            parts.append(f"[{cur_a}][a{i}in]acrossfade=d={t:.3f}[a{i}]")
+        else:
+            parts.append(f"[{cur_a}][a{i}in]concat=n=2:v=0:a=1[a{i}]")
+        cur_a = f"a{i}"
+
+    fc = ";".join(parts)
+    inputs: List[str] = []
+    for c in clips:
+        inputs.extend(["-i", c])
+    cmd = [
+        FFMPEG, "-y",
+        *inputs,
+        "-filter_complex", fc,
+        "-map", f"[{cur_v}]",
+        "-map", f"[{cur_a}]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        output_path,
+    ]
+    _run(cmd, f"Ghép single-pass xfade ({n} cảnh)", timeout=600)
+    return output_path
+
+
 def merge_clips_advanced(
     clips: List[str],
     transitions: Optional[List[str]] = None,
@@ -615,8 +692,9 @@ def merge_clips_advanced(
     - Chuyển cảnh & Sound Bridge (Acrossfade + Dissolve) xử lý Single-Pass trong 1 lượt encode duy nhất
     - Loại bỏ hoàn toàn suy hao nén H.264 nhiều vòng (Generational Loss) và loại bỏ file tạm O(N^2)
     - Tự động fallback an toàn đảm bảo không bao giờ dừng đột ngột
-    - Dissolve/fade hoặc sound_bridge >= 0.05s dùng nhánh Pairwise xfade
-      (đúng độ dài timeline); chỉ cut thuần mới dùng concat.
+    - Dissolve/fade hoặc sound_bridge >= 0.05s dùng nhánh Single-Pass xfade
+      (1 lần encode, đúng độ dài timeline); chỉ cut thuần mới dùng concat.
+      COMPOSE_MODE=pairwise ép dùng nhánh pairwise cũ để đối chiếu.
     """
     if not clips:
         raise ValueError("Danh sách clip trống")
@@ -695,7 +773,19 @@ def merge_clips_advanced(
         except Exception as sp_err:
             print(f"[merge_clips_advanced] Concat Filter gặp exception ({sp_err}), chuyển sang Pairwise Fallback...")
 
-    # ── Chiến lược 3: Pairwise Fallback Dự Phòng An Toàn Tuyệt Đối ──
+    # ── Chiến lược 3: Single-Pass xfade (mặc định) — 1 lần gọi ffmpeg duy
+    # nhất cho toàn bộ timeline, thay cho pairwise O(n²) encode lại toàn bộ
+    # phần đã ghép ở mỗi bước. COMPOSE_MODE=pairwise ép dùng nhánh cũ
+    # (để benchmark đối chiếu); single-pass lỗi thì fallback pairwise.
+    if os.environ.get("COMPOSE_MODE", "single").strip().lower() != "pairwise":
+        try:
+            return _merge_single_pass(
+                clips, transitions, sound_bridge_duration, output_path, progress_cb
+            )
+        except Exception as sp_err:
+            print(f"[merge_clips_advanced] Single-pass xfade thất bại ({sp_err}), fallback Pairwise...")
+
+    # ── Chiến lược 3b: Pairwise Fallback Dự Phòng An Toàn Tuyệt Đối ──
     out_dir = os.path.dirname(os.path.abspath(output_path))
     current_merged = clips[0]
     total_steps = n - 1

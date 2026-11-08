@@ -14,11 +14,14 @@ Mỗi Worker độc lập: Sinh TTS + Gửi Muse2API + Poll + Tải video.
 
 import asyncio
 import base64
+import hashlib
 import mimetypes
 import os
 import re
+import shutil
 import time
 import subprocess
+import uuid
 import httpx
 import edge_tts
 import aiofiles
@@ -235,16 +238,89 @@ def get_media_duration(file_path: str) -> float:
     return 5.0
 
 
+# ── TTS cache: cache file audio theo hash (text chuẩn hóa + voice + speed) ──
+# Lần 2 trùng hash thì trả file cache luôn, không gọi lại provider.
+# File cache là byte y hệt lần synthesis đầu (không đổi giọng/âm thanh).
+# Giới hạn: tối đa 500 file HOẶC 500MB (cái nào chạm trước), dọn LRU theo mtime.
+_TTS_CACHE_DIR = Path(__file__).resolve().parent / "workspace" / "_tts_cache"
+_TTS_CACHE_MAX_FILES = 500
+_TTS_CACHE_MAX_BYTES = 500 * 1024 * 1024
+_TTS_CACHE_VERSION = "tts-cache-v1"
+
+
+def _tts_cache_key(text: str, voice: str, speed: float = 1.0) -> str:
+    """Hash SHA256 của (text chuẩn hóa + voice + speed)."""
+    norm_text = " ".join((text or "").split())
+    raw = f"{_TTS_CACHE_VERSION}\n{voice}\n{speed}\n{norm_text}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest() + ".mp3"
+
+
+def _tts_cache_prune() -> None:
+    """Dọn cache khi vượt giới hạn: xóa file cũ nhất (LRU theo mtime)."""
+    try:
+        if not _TTS_CACHE_DIR.is_dir():
+            return
+        entries = [(p, p.stat()) for p in _TTS_CACHE_DIR.glob("*.mp3")]
+        total_bytes = sum(s.st_size for _, s in entries)
+        if len(entries) <= _TTS_CACHE_MAX_FILES and total_bytes <= _TTS_CACHE_MAX_BYTES:
+            return
+        entries.sort(key=lambda ps: ps[1].st_mtime)  # cũ nhất trước
+        # Duyệt trên bản snapshot: xóa trong lúc lặp list gốc sẽ bỏ sót phần tử.
+        for p, s in list(entries):
+            if len(entries) <= _TTS_CACHE_MAX_FILES and total_bytes <= _TTS_CACHE_MAX_BYTES:
+                break
+            try:
+                p.unlink()
+                total_bytes -= s.st_size
+                entries.remove((p, s))
+            except OSError:
+                pass
+    except Exception as exc:
+        print(f"[TTS Cache] Prune thất bại (bỏ qua): {exc}")
+
+
+def _tts_cache_store(cache_path: Path, src_path: str) -> None:
+    """Lưu file audio vào cache (ghi temp + os.replace để không race)."""
+    try:
+        _TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _TTS_CACHE_DIR / f".tmp_{uuid.uuid4().hex[:8]}.mp3"
+        shutil.copy2(src_path, tmp)
+        os.replace(tmp, cache_path)
+        _tts_cache_prune()
+    except Exception as exc:
+        print(f"[TTS Cache] Lưu cache thất bại (bỏ qua): {exc}")
+
+
 async def generate_tts(text: str, voice: str, output_path: str) -> float:
     """
     Sinh file audio TTS qua hệ thống đa engine tts_manager (VieNeu-TTS, OmniVoice, Edge-TTS).
     Hỗ trợ voice riêng từng nhân vật (per-scene voice).
     Có cơ chế dự phòng an toàn (silent fallback) để không bao giờ làm gián đoạn việc sinh video.
     Trả về thời lượng thực tế chính xác của file âm thanh.
+    Cache: text+voice trùng hash thì trả file cache, không gọi lại provider
+    (không cache text rỗng, voice đặc biệt, hay audio fallback im lặng).
     """
     try:
         from tts_manager import synthesize_voice
-        return await synthesize_voice(text=text, voice=voice, output_path=output_path)
+        clean = (text or "").strip()
+        use_cache = bool(clean) and voice not in ("ai_voice", "native", "none", "no_dub")
+        cache_path = None
+        if use_cache:
+            cache_path = _TTS_CACHE_DIR / _tts_cache_key(clean, voice)
+            if cache_path.exists() and cache_path.stat().st_size > 0:
+                shutil.copy2(cache_path, output_path)
+                dur = await asyncio.to_thread(get_media_duration, output_path)
+                if dur and dur > 0.3:
+                    return dur
+                return max(2.0, len(clean) / 15.0)
+        dur = await synthesize_voice(text=text, voice=voice, output_path=output_path)
+        if use_cache and cache_path is not None and dur and dur > 0:
+            try:
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    _tts_cache_store(cache_path, output_path)
+            except OSError:
+                pass
+        return dur
     except Exception as e:
         print(f"[TTS Fallback] Lỗi tts_manager ({e}), đang tạo audio dự phòng...")
         estimated_dur = max(2.0, len(text.strip()) / 15.0)
@@ -923,6 +999,15 @@ async def process_scene(
         tts_task = None  # khởi tạo trước vòng retry để except handler luôn cancel được (§1.10)
         for attempt in range(1, max_attempts + 1):
             try:
+                # Timing từng giai đoạn của scene (đo tốc độ render):
+                # render_s = wall time của attempt (submit + poll + tải + đồng bộ),
+                # poll_s = thời gian chờ API video, tts_s = thời gian sinh TTS
+                # (TTS chạy song song với poll nên poll_s/tts_s chồng lấn nhau,
+                # không cộng trực tiếp vào render_s).
+                attempt_t0 = time.monotonic()
+                tts_started = None
+                tts_s = 0.0
+                poll_s = 0.0
                 if attempt > 1:
                     if progress_cb:
                         progress_cb(idx, f"🔄 Đang thử lại lần {attempt}/{max_attempts}...")
@@ -947,6 +1032,8 @@ async def process_scene(
                             )
                     else:
                         tts_task = None
+                if tts_task is not None:
+                    tts_started = time.monotonic()
 
                 payload = {"prompt": prompt, "duration": duration, "size": size, "timeout": 600}
                 ref_img = scene.get("reference_image") or scene.get("image")
@@ -993,12 +1080,16 @@ async def process_scene(
                     progress_cb(idx, f"⏳ Task ID: {task_id[:12]}... đang render")
 
                 # 2. Poll kết quả
+                _poll_t0 = time.monotonic()
                 video_url = await poll_video_task(
                     client, task_id, base_url, headers, idx, progress_cb
                 )
+                poll_s += time.monotonic() - _poll_t0
 
                 if tts_task:
                     audio_duration = await tts_task
+                    if tts_started is not None:
+                        tts_s = time.monotonic() - tts_started
                     if audio_path and not await _is_complete_audio_file(audio_path):
                         print(f"[batch_engine Warning] TTS scene {idx} xong nhưng file audio "
                               f"không hoàn chỉnh — dùng duration ước lượng.")
@@ -1109,6 +1200,11 @@ async def process_scene(
                         "last_frame_path": extracted_frame,
                         "last_frame_url": last_frame_url,
                         "error": None,
+                        "timing": {
+                            "render_s": round(time.monotonic() - attempt_t0, 3),
+                            "poll_s": round(poll_s, 3),
+                            "tts_s": round(tts_s, 3),
+                        },
                     }
                 )
 
@@ -1211,6 +1307,31 @@ async def process_scene(
         return result
 
 
+def summarize_batch_timing(results: List[Dict[str, Any]], wall_s: float) -> Dict[str, float]:
+    """Gộp timing từng scene thành timing của cả batch.
+    - render_s: wall time toàn bộ run_batch (submit + poll + tải + đồng bộ).
+    - poll_s / tts_s: TỔNG thời gian chờ API / sinh TTS của các scene.
+      Hai số này chồng lấn nhau (TTS chạy song song với poll) và ở chế độ
+      song song còn chồng lấn giữa các scene — nên poll_s/tts_s có thể lớn
+      hơn render_s; chúng dùng để soi bottleneck, KHÔNG cộng vào total.
+    - compose_s / total_s: do film_pipeline điền sau (ghép + tổng pipeline).
+    Scene nào thiếu timing (lỗi setup, job cũ) thì tính là 0.
+    """
+    def _t(r: Dict[str, Any], key: str) -> float:
+        try:
+            return float((r.get("timing") or {}).get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "render_s": round(wall_s, 3),
+        "poll_s": round(sum(_t(r, "poll_s") for r in results), 3),
+        "tts_s": round(sum(_t(r, "tts_s") for r in results), 3),
+        "compose_s": 0.0,
+        "total_s": 0.0,
+    }
+
+
 async def run_batch(
     scenes: List[Dict[str, Any]],
     base_url: str,
@@ -1224,6 +1345,7 @@ async def run_batch(
     style_locks: Optional[Dict[str, str]] = None,
     start_scene_idx: int = 1,
     voice_mode: str = "tts",
+    timing: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Chạy hàng loạt tất cả các cảnh với hỗ trợ kỹ thuật First/Last Frame Chaining & Fallback:
@@ -1231,7 +1353,16 @@ async def run_batch(
     - chain_mode == 'none': Chạy song song (nếu cảnh nào có chain_from_previous=True thì đợi cảnh trước).
     - chain_fallback_mode: 'independent' (render độc lập), 'fallback_image' (dùng keyframe), 'stop' (tạm dừng).
     - start_scene_idx: Cho phép chạy lại từ cảnh N mà không làm mất cảnh 1..N-1 đã hoàn thành.
+    - timing: dict tùy chọn — run_batch điền timing từng giai đoạn vào đó
+      (render_s/poll_s/tts_s; compose_s/total_s do film_pipeline điền sau).
     """
+    batch_t0 = time.monotonic()
+
+    def _finish(res: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if timing is not None:
+            timing.update(summarize_batch_timing(res, time.monotonic() - batch_t0))
+        return res
+
     os.makedirs(os.path.join(output_dir, "audio"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "scenes"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "final"), exist_ok=True)
@@ -1277,7 +1408,7 @@ async def run_batch(
                 "— dừng batch, không render tiếp."
             )
         if not health_ok:
-            return _health_error_results(health_err)
+            return _finish(_health_error_results(health_err))
 
         # ── Kỹ thuật Chaining: Tuần tự toàn bộ phim (Seamless Sequential Chaining) ──
         if chain_mode == "sequential":
@@ -1341,7 +1472,7 @@ async def run_batch(
                 else:
                     prev_last_frame = None
             results.sort(key=lambda x: x.get("index") if isinstance(x.get("index"), int) else -1)
-            return results
+            return _finish(results)
 
         # ── Kỹ thuật Chaining theo từng phân cảnh (Selective Chaining with Async Events) ──
         done_events: Dict[int, asyncio.Event] = {s["index"]: asyncio.Event() for s in sorted_scenes}
@@ -1466,4 +1597,4 @@ async def run_batch(
 
     # Sắp xếp đúng thứ tự
     results.sort(key=lambda x: x.get("index") if isinstance(x.get("index"), int) else -1)
-    return results
+    return _finish(results)

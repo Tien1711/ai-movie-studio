@@ -612,14 +612,20 @@ def _spawn_job_task(job_id: str, coro) -> "asyncio.Task":
 async def film_pipeline(job: Dict, req: MovieRequest):
     try:
         job_id = job["id"]
+        # Timing từng giai đoạn (đo tốc độ render): render/poll/TTS do run_batch
+        # điền, compose/total điền ở dưới. Job cũ thiếu field thì mặc định 0.
+        pipe_t0 = time.monotonic()
+        job["timing"] = {"render_s": 0.0, "poll_s": 0.0, "tts_s": 0.0, "compose_s": 0.0, "total_s": 0.0}
         if not MUSE_API_KEY:
             # Không key -> config error rõ ràng trên job, không gọi gateway bằng key giả.
             job["status"] = "error"
             job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render.")
+            job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
             _save_job_best_effort(job)
             return
         if job.get("cancelled") or job.get("status") == "cancelled":
             job_log(job, "🛑 Job đã bị hủy trước khi bắt đầu.")
+            job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
             _save_job_best_effort(job)
             return
         # Phòng thủ cho chế độ Đồng nhất tối đa: job tạo trước khi có preflight
@@ -679,6 +685,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         scenes_dicts = [s.model_dump() for s in req.scenes]
 
         # ── Batch render hàng loạt ──
+        batch_timing: Dict[str, float] = {}
         results = await run_batch(
             scenes=scenes_dicts,
             base_url=MUSE_API_URL,
@@ -692,9 +699,13 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             style_locks=req.style_locks,
             start_scene_idx=req.start_scene_idx or 1,
             voice_mode=req.voice_mode or "tts",
+            timing=batch_timing,
         )
 
         job["results"] = results
+        job["timing"].update({k: batch_timing.get(k, 0.0) for k in ("render_s", "poll_s", "tts_s")})
+        job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
+        _save_job_best_effort(job)
 
         # Kiểm tra nếu job đã bị người dùng hủy.
         # TODO(batch_engine, ngoài phạm vi refactor app.py): run_batch/process_scene
@@ -762,6 +773,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
 
         # ── Hậu kỳ ──
         try:
+            compose_t0 = time.monotonic()
             job_log(job, "🎞️ Đang hậu kỳ: ghép video, lồng tiếng, hòa âm nhạc nền, xử lý phụ đề...")
             job["progress"] = 80
             _save_job_best_effort(job)
@@ -818,17 +830,29 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     job_log(job, f"⚠️ Đã xuất bản nháp (Draft - thiếu {audit['failed_count']} cảnh)! → {rel}")
                 else:
                     job_log(job, f"🎉 Xuất phim thành công 100%! → {rel}")
+            job["timing"]["compose_s"] = round(time.monotonic() - compose_t0, 3)
+            job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
             _save_job_best_effort(job)
 
 
         except Exception as e:
             job["status"] = "error"
             job_log(job, f"❌ Lỗi hậu kỳ: {e}")
+            try:
+                job["timing"]["compose_s"] = round(time.monotonic() - compose_t0, 3)
+                job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
+            except Exception:
+                pass
             _save_job_best_effort(job)
 
     except Exception as e:
         job["status"] = "error"
         job_log(job, f"❌ Lỗi xử lý pipeline: {e}")
+        try:
+            if "timing" in job:
+                job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
+        except Exception:
+            pass
         _save_job_best_effort(job)
 
 
