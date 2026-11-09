@@ -2002,10 +2002,18 @@ function updateMonitor(data, jobId) {
     document.getElementById('dlBtn').href = dlUrl;
     const srtBtn = document.getElementById('dlSrtBtn');
     if (srtBtn) {
-      srtBtn.style.display = 'inline-flex';
-      srtBtn.href = `/api/jobs/${jobId}/subtitles`;
+      // Fix 2 phụ đề (2026-11-09): chỉ hiện nút tải SRT khi job thật sự có
+      // file SRT riêng (chế độ srt_only). Job burn_in đã khắc phụ đề vào
+      // video — hiện nút tải sẽ khiến trình phát tự nạp file SRT cùng tên
+      // chồng lên chữ đã khắc thành 2 phụ đề.
+      if (data.srt_file) {
+        srtBtn.style.display = 'inline-flex';
+        srtBtn.href = `/api/jobs/${jobId}/subtitles`;
+      } else {
+        srtBtn.style.display = 'none';
+      }
     }
-    showAffiliateFinishedVideo(data.final_video, data.title || (data.req && data.req.title) || "Video Tiếp Thị", `/api/jobs/${jobId}/subtitles`);
+    showAffiliateFinishedVideo(data.final_video, data.title || (data.req && data.req.title) || "Video Tiếp Thị", data.srt_file ? `/api/jobs/${jobId}/subtitles` : null);
     if (wasHidden) {
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
@@ -6726,7 +6734,16 @@ function displayShotDeskFinalMovie(videoUrl, srtUrl, duration, folderPath) {
   }
 
   if (mp4Btn) mp4Btn.href = videoUrl;
-  if (srtBtn && srtUrl) srtBtn.href = srtUrl;
+  if (srtBtn) {
+    // Fix 2 phụ đề: chỉ hiện nút tải SRT khi thật sự có file SRT riêng
+    // (chế độ srt_only). Job burn_in đã khắc phụ đề vào video.
+    if (srtUrl) {
+      srtBtn.style.display = 'inline-flex';
+      srtBtn.href = srtUrl;
+    } else {
+      srtBtn.style.display = 'none';
+    }
+  }
 }
 
 async function openFinalFolderOnDisk() {
@@ -8162,9 +8179,14 @@ function showAffiliateFinishedVideo(finalVideoUrl, title, srtUrl) {
     const dlUrl = finalVideoUrl.replace('/video/', '/download/');
     if (dlBtn) dlBtn.href = dlUrl;
     if (dlBtnBig) dlBtnBig.href = dlUrl;
-    if (srtUrl && dlSrt) {
-      dlSrt.style.display = 'inline-flex';
-      dlSrt.href = srtUrl;
+    if (dlSrt) {
+      // Fix 2 phụ đề: ẩn nút khi job không có file SRT riêng (burn_in).
+      if (srtUrl) {
+        dlSrt.style.display = 'inline-flex';
+        dlSrt.href = srtUrl;
+      } else {
+        dlSrt.style.display = 'none';
+      }
     }
   }
 }
@@ -8232,7 +8254,7 @@ async function initAffiliateStudio() {
       const jobs = await jobsResp.json();
       const lastDone = jobs.find(j => j.status === 'done' && j.final_video);
       if (lastDone) {
-        showAffiliateFinishedVideo(lastDone.final_video, lastDone.title, `/api/jobs/${lastDone.id}/subtitles`);
+        showAffiliateFinishedVideo(lastDone.final_video, lastDone.title, lastDone.srt_file ? `/api/jobs/${lastDone.id}/subtitles` : null);
       }
     }
   } catch (e) {}

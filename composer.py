@@ -32,6 +32,59 @@ from typing import List, Dict, Any, Optional, Tuple
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
+# ── Chuẩn khung hình (fix lag/đứng hình, 2026-11-09) ────────────────────────
+# Clip AI trả về có fps trộn lẫn (24/25/30, có khi VFR) và timebase khác nhau.
+# xfade bắt buộc 2 đầu vào cùng timebase (không thì lỗi "First input link
+# main timebase ... do not match"), còn concat demuxer stream-copy nối clip
+# khác fps sẽ lệch timeline + đứng hình ở chỗ nối. Vì vậy MỌI clip đều được
+# chuẩn hóa về CFR 30fps trước khi ghép (TikTok/Reels chuẩn 30fps).
+TARGET_FPS = 30
+
+
+def _probe_fps(clip: str) -> Optional[float]:
+    """Đo fps (r_frame_rate) của clip; None nếu đo không được.
+    Thử ffprobe trước, fallback sang `ffmpeg -i` (binary đi kèm
+    imageio-ffmpeg — luôn có sẵn, còn ffprobe có thể không có trên PATH
+    ở máy người dùng)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
+             clip],
+            capture_output=True, text=True, timeout=30,
+        )
+        import json as _json
+        data = _json.loads(out.stdout or "{}")
+        streams = data.get("streams") or []
+        if streams:
+            num, _, den = (streams[0].get("r_frame_rate") or "0/1").partition("/")
+            den_f = float(den or 1)
+            if den_f:
+                return float(num) / den_f
+    except Exception:
+        pass
+    try:
+        res = subprocess.run([FFMPEG, "-i", clip], capture_output=True,
+                             text=True, timeout=30)
+        m = re.search(r"Video:.*?,\s(\d+(?:\.\d+)?)\s*fps", res.stderr or "")
+        if m:
+            return float(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _clips_share_fps(clips: List[str]) -> bool:
+    """True khi mọi clip cùng fps (cho phép sai số nhỏ) — đủ an toàn để
+    concat stream-copy / concat filter (2 nhánh này yêu cầu cùng fps và
+    timebase, không re-encode). Clip đo không được thì coi là KHÔNG cùng
+    (đi nhánh encode cho chắc)."""
+    fps_list = [_probe_fps(c) for c in clips]
+    if any(f is None for f in fps_list):
+        return False
+    base = fps_list[0]
+    return all(abs(f - base) < 0.5 for f in fps_list)
+
 QUALITY_PROFILES = {
     "draft": {
         "scale_9_16": "scale=480:854",
@@ -480,6 +533,10 @@ def compose_scene_video(
         crf = "22"
         preset = "fast"
 
+    # Chuẩn hóa về CFR 30fps TRƯỚC scale/pad (fix lag/đứng hình): clip AI có
+    # fps trộn (24/25/30/VFR) — không chuẩn hóa thì xfade lỗi timebase và
+    # concat stream-copy lệch timeline ở chỗ nối.
+    vf_filters.append(f"fps={TARGET_FPS}")
     vf_filters.append(f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
     vf_str = ",".join(vf_filters) if vf_filters else "null"
 
@@ -630,7 +687,12 @@ def _merge_single_pass(
 
     parts: List[str] = []
     for i in range(n):
-        parts.append(f"[{i}:v]format=yuv420p,setpts=PTS-STARTPTS[v{i}in]")
+        # fps + settb=AVTB: ép mọi đầu vào về cùng CFR 30fps và cùng timebase
+        # (xfade bắt buộc cùng timebase — clip AI 24fps có timebase 1/12288,
+        # 30fps có 1/15360, không ép thì lỗi "timebase do not match" và phải
+        # fallback pairwise; defense in depth cho clip không qua
+        # compose_scene_video).
+        parts.append(f"[{i}:v]fps={TARGET_FPS},settb=AVTB,format=yuv420p,setpts=PTS-STARTPTS[v{i}in]")
         parts.append(f"[{i}:a]aresample=44100,asetpts=PTS-STARTPTS[a{i}in]")
 
     # Chuỗi video: xfade cho dissolve/fade, concat cho cut (giữ đúng độ dài).
@@ -709,10 +771,17 @@ def merge_clips_advanced(
 
     sound_bridge_duration = _as_float(sound_bridge_duration, "sound_bridge_duration")
     # Chỉ dùng concat thuần khi TẤT CẢ transitions là cut/none VÀ không có
-    # sound bridge: dissolve/fade hoặc bridge >= 0.05s phải đi nhánh xfade.
+    # sound bridge VÀ mọi clip cùng fps: concat (demuxer lẫn filter) nối
+    # trực tiếp theo timestamp — clip khác fps/timebase sẽ lệch timeline
+    # và đứng hình ở chỗ nối (tái hiện 2026-11-09: 3 clip 24/30/25fps nối
+    # bằng stream-copy ra 15.71s thay vì 15.0s + 1.29s đứng hình).
+    # Clip khác fps thì bỏ qua 2 nhánh concat, đi thẳng single-pass xfade
+    # (đã chuẩn hóa fps) bên dưới.
+    same_fps = _clips_share_fps(clips)
     all_cuts = (
         all((t or "none").lower() in ("none", "cut", "match cut") for t in transitions)
         and sound_bridge_duration < 0.05
+        and same_fps
     )
 
     # ── Chiến lược 1: Concat Demuxer siêu tốc (Zero Re-encoding khi toàn bộ là Cut) ──
@@ -826,7 +895,11 @@ def merge_clips_advanced(
                         except Exception: pass
             else:
                 offset = max(0.1, d1 - t_dur)
-                fc = f"[1:v]format=yuva420p,fade=t=in:st=0:d={t_dur:.2f}:alpha=1,setpts=PTS-STARTPTS+{offset:.2f}/TB[v1];[0:v]format=yuva420p[v0];[v0][v1]overlay=eof_action=pass[v];[0:a][1:a]acrossfade=d={t_dur:.2f}[a]"
+                # fps + settb=AVTB cho cả 2 đầu vào (như single-pass): pairwise
+                # overlay cũng yêu cầu cùng fps/timebase, clip AI trộn fps mà
+                # không ép sẽ ra file thiếu khung hình (tái hiện: 14s chỉ có
+                # 120 frame ≈ 8.6fps).
+                fc = f"[1:v]fps={TARGET_FPS},settb=AVTB,format=yuva420p,fade=t=in:st=0:d={t_dur:.2f}:alpha=1,setpts=PTS-STARTPTS+{offset:.2f}/TB[v1];[0:v]fps={TARGET_FPS},settb=AVTB,format=yuva420p[v0];[v0][v1]overlay=eof_action=pass[v];[0:a][1:a]acrossfade=d={t_dur:.2f}[a]"
                 cmd = [
                     FFMPEG, "-y",
                     "-i", current_merged,
@@ -1375,16 +1448,39 @@ def compose_full_movie(
         clean_title = re.sub(r'_+', '_', clean_title).strip('_')
         safe_title = clean_title[:45] if clean_title else "movie"
 
+        # ── 2 PHỤ ĐỀ (fix 2026-11-09) ─────────────────────────────────────
+        # Trước đây: burn_in vừa khắc phụ đề VÀO video vừa để file .srt cùng
+        # tên ({safe_title}_{ts}.srt) ngay cạnh file mp4 ({safe_title}_{ts}.mp4)
+        # trong final/ — trình phát nào tự nạp phụ đề cùng tên (VLC, trình
+        # phát trên điện thoại, CapCut...) sẽ hiện thêm 1 lớp phụ đề nữa
+        # chồng lên chữ đã khắc → 2 phụ đề. Sửa:
+        #   - "burn_in": SRT chỉ là file trung gian để khắc → ghi vào _tmp,
+        #     KHÔNG để cạnh mp4, KHÔNG trả về srt_path (UI cũng ẩn nút tải).
+        #   - "srt_only": SRT là sản phẩm chính → giữ trong final/ như cũ.
+        #   - "none": không tạo SRT.
         srt_filename = f"{safe_title}_{ts}.srt"
-        srt_path = os.path.join(final_dir, srt_filename)
-        create_srt(
-            ok_results,
-            srt_path,
-            clip_durations=clip_durations,
-            media_paths=scene_clips,
-            timeline_offsets=timeline_offsets,
-        )
-        print(f"[Hậu kỳ] Đã tạo file SRT phụ đề chuẩn âm thanh: {srt_path}")
+        if subtitle_mode == "srt_only":
+            srt_path = os.path.join(final_dir, srt_filename)
+            create_srt(
+                ok_results,
+                srt_path,
+                clip_durations=clip_durations,
+                media_paths=scene_clips,
+                timeline_offsets=timeline_offsets,
+            )
+            print(f"[Hậu kỳ] Đã tạo file SRT phụ đề chuẩn âm thanh: {srt_path}")
+        elif subtitle_mode == "burn_in":
+            srt_path = os.path.join(tmp_dir, srt_filename)
+            create_srt(
+                ok_results,
+                srt_path,
+                clip_durations=clip_durations,
+                media_paths=scene_clips,
+                timeline_offsets=timeline_offsets,
+            )
+            print(f"[Hậu kỳ] Đã tạo file SRT tạm để khắc phụ đề: {srt_path}")
+        else:
+            srt_path = None
 
         # Bước 3: Ghép tất cả clip với hiệu ứng chuyển cảnh
         merged = os.path.join(tmp_dir, f"merged_{ts}.mp4")
@@ -1431,8 +1527,11 @@ def compose_full_movie(
         return {
             "video_path": final_path,
             "video_filename": final_video_name,
-            "srt_path": srt_path if subtitle_mode in ("burn_in", "srt_only") else None,
-            "srt_filename": srt_filename if subtitle_mode in ("burn_in", "srt_only") else None,
+            # Chỉ "srt_only" mới trả file SRT (burn_in đã khắc vào video, file
+            # SRT chỉ nằm trong _tmp để khắc; "none" thì không có SRT) — tránh
+            # trình phát tự nạp phụ đề cùng tên chồng lên chữ đã khắc.
+            "srt_path": srt_path if subtitle_mode == "srt_only" else None,
+            "srt_filename": srt_filename if subtitle_mode == "srt_only" else None,
             "duration": round(total_movie_duration, 2),
             "audit": audit,
             "scenes_used": [r["index"] for r in ok_results],
