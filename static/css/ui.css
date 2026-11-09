@@ -482,3 +482,15 @@ label { color: var(--text-secondary); }
 .cm-scene { font-size: 11px; font-weight: 700; color: var(--accent); margin-left: 6px; }
 .cm-suggest { margin-top: 6px; font-size: 12px; color: var(--muted); }
 .cm-note { margin-top: 4px; font-size: 12px; color: var(--muted); }
+
+/* ── G3: Preset nền tảng + banner báo render xong (nhóm quản lý phim) ── */
+.preset-bar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:10px 14px; border:1px solid var(--border); border-radius:8px; background:var(--bg2); margin-bottom:12px; }
+.preset-bar .btn[data-preset] { border:1px solid var(--border); }
+.preset-bar .btn[data-preset]:hover { border-color:var(--accent); color:var(--accent); }
+.mon-done-banner { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 14px; border-radius:8px; margin-bottom:12px; font-size:13px; font-weight:600; }
+.mon-done-banner.ok { background:rgba(52,211,153,.15); border:1px solid var(--green); color:#bbf7d0; }
+.mon-done-banner.err { background:rgba(239,68,68,.15); border:1px solid #ef4444; color:#fecaca; }
+.mon-done-banner.cancel { background:rgba(251,191,36,.12); border:1px solid var(--yellow); color:#fde68a; }
+/* G3: checkbox trong card tùy chọn — không kế thừa input{width:100%} toàn cục. */
+.ui-pref-check { width:16px !important; height:16px; min-height:0; flex:0 0 auto; margin-top:2px; padding:0; accent-color:var(--accent); }
+.ui-pref-label > span:last-child { flex:1; }
