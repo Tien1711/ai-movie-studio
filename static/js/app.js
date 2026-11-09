@@ -8,7 +8,13 @@ let cfg = {
   apiKey: 'm2a_your_secret_key',
   concurrent: 12,
   aspectRatio: '16:9',
+  // G3: mở trang với form trống (mặc định BẬT — không nạp 5 cảnh mẫu Kiếm
+  // Hiệp lúc mở trang; nút sample vẫn nạp lại 1 click). Tắt -> về hành vi
+  // cũ (nạp sample). notifyRender mặc định TẮT.
+  startEmpty: true,
+  notifyRender: false,
 };
+let defaultSceneDuration = 5; // G3: preset nền tảng đổi mặc định này.
 let scenes = [];   // { id, title, prompt, voiceover, duration, size }
 let sceneIdCounter = 0;
 let activeJobId = null;
@@ -133,6 +139,33 @@ function applyGlobalAspectRatio(val, forceAll = false) {
   }
 }
 
+// ── G3: Preset nhanh theo nền tảng ───────────────────────────────────────
+// Mỗi preset set sẵn: khung hình + thời lượng cảnh + chất lượng + chế độ
+// xuất. Quality đã kiểm tra enum backend ("preview" | "720p" | "1080p",
+// app.py MovieRequest/ProjectSaveRequest) — 1080p của YouTube hợp lệ.
+// TikTok/Reels: 9:16, 720p, xuất clip ngắn từng cảnh (batch_clips).
+// YouTube: 16:9, 1080p, xuất phim dài hoàn chỉnh (full).
+const PLATFORM_PRESETS = {
+  tiktok: { label: 'TikTok', aspect: '9:16', duration: 5, quality: '720p', exportMode: 'batch_clips' },
+  reels: { label: 'Reels', aspect: '9:16', duration: 8, quality: '720p', exportMode: 'batch_clips' },
+  youtube: { label: 'YouTube', aspect: '16:9', duration: 8, quality: '1080p', exportMode: 'full' },
+};
+
+function applyPlatformPreset(key) {
+  const p = PLATFORM_PRESETS[key];
+  if (!p) return;
+  defaultSceneDuration = p.duration;
+  applyGlobalAspectRatio(p.aspect, true);
+  const q = document.getElementById('exportQuality');
+  if (q) q.value = p.quality;
+  const m = document.getElementById('exportMode');
+  if (m) m.value = p.exportMode;
+  syncScenesFromDOM();
+  scenes.forEach(s => { s.duration = p.duration; });
+  renderScenes();
+  showToast(`🎯 Preset ${p.label}: ${p.aspect}, cảnh ${p.duration}s, ${p.quality}, xuất ${p.exportMode === 'batch_clips' ? 'clip ngắn từng cảnh' : 'phim dài hoàn chỉnh'}.`);
+}
+
 // audit 2026-11-08 #13: âm lượng hiển thị dạng ×N (vd ×0.25, ×1.0, ×2.0),
 // không dùng % — slider tới 2.0 mà hiện "200%" là sai đơn vị.
 function formatVolumeLabel(v) {
@@ -168,6 +201,10 @@ function loadCfg() {
   // localStorage cũ có thể còn giá trị 13–30 (trước audit #6) -> kẹp về ≤ 12.
   if (cfg.concurrent > 12) cfg.concurrent = 12;
   if (!cfg.aspectRatio) cfg.aspectRatio = '16:9';
+  // G3: cài đặt mới — localStorage cũ không có key -> giữ mặc định
+  // (startEmpty=true, notifyRender=false), không ghi đè.
+  if (cfg.startEmpty === undefined || cfg.startEmpty === null) cfg.startEmpty = true;
+  if (cfg.notifyRender === undefined || cfg.notifyRender === null) cfg.notifyRender = false;
   document.getElementById('cfgApiUrl').value = cfg.apiUrl;
   document.getElementById('cfgApiKey').value = cfg.apiKey;
   document.getElementById('cfgConcurrent').value = cfg.concurrent;
@@ -175,6 +212,50 @@ function loadCfg() {
   document.getElementById('sidebarConcurrent').textContent = `Concurrent: ${cfg.concurrent}`;
   const ratioEl = document.getElementById('globalAspectRatio');
   if (ratioEl && cfg.aspectRatio) ratioEl.value = cfg.aspectRatio;
+  const seEl = document.getElementById('cfgStartEmpty');
+  if (seEl) seEl.checked = !!cfg.startEmpty;
+  const nrEl = document.getElementById('cfgNotifyRender');
+  if (nrEl) nrEl.checked = !!cfg.notifyRender;
+}
+
+// G3: lưu toàn bộ cfg (kể cả startEmpty/notifyRender) xuống localStorage.
+function persistCfg() {
+  try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch {}
+}
+
+// G3: ô tick trong panel Cài đặt (form trống / thông báo render xong).
+function saveUiPrefs() {
+  cfg.startEmpty = document.getElementById('cfgStartEmpty')?.checked ?? true;
+  cfg.notifyRender = document.getElementById('cfgNotifyRender')?.checked ?? false;
+  persistCfg();
+  // Chỉ xin quyền Notification khi người dùng BẬT cài đặt này (mặc định
+  // tắt, không xin ồn ào lúc mở trang).
+  if (cfg.notifyRender) maybeRequestNotifyPermission();
+  showToast('✅ Đã lưu tùy chọn giao diện.');
+}
+
+// G3: chỉ gọi khi người dùng vừa bật "Thông báo khi render xong".
+function maybeRequestNotifyPermission() {
+  if (!('Notification' in window)) {
+    showToast('Trình duyệt này không hỗ trợ thông báo hệ thống — chỉ hiện banner + toast trong Studio.', 'warning');
+    return;
+  }
+  if (Notification.permission === 'default') {
+    Notification.requestPermission().then(p => {
+      if (p !== 'granted') showToast('Chưa cấp quyền thông báo — chỉ hiện banner + toast trong Studio.', 'warning');
+    }).catch(() => {});
+  }
+}
+
+// G3: Browser Notification — chỉ gửi khi cài đặt đã bật VÀ trình duyệt đã
+// cấp quyền (không tự xin quyền ở đây).
+function showBrowserNotification(title, body) {
+  try {
+    if (!cfg.notifyRender) return;
+    if (!('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    new Notification(title, { body });
+  } catch {}
 }
 
 function saveConfig() {
@@ -182,6 +263,7 @@ function saveConfig() {
   cfg.apiKey = document.getElementById('cfgApiKey').value.trim();
   const c = parseInt(document.getElementById('cfgConcurrent').value) || 12;
   updateConcurrent(c);
+  persistCfg();
   document.getElementById('cfgTestResult').textContent = '✅ Đã lưu cấu hình!';
   setTimeout(() => { document.getElementById('cfgTestResult').textContent = ''; }, 2000);
 }
@@ -379,7 +461,7 @@ function onVoiceSelectChanged() {
   }
 }
 
-function addScene(prompt = '', voiceover = '', duration = 5, size = '', title = '', voice = '', voiceSegments = [], reference_image = '', reference_image_name = '', chain_from_previous = false, sheet_angle = 'front') {
+function addScene(prompt = '', voiceover = '', duration = defaultSceneDuration, size = '', title = '', voice = '', voiceSegments = [], reference_image = '', reference_image_name = '', chain_from_previous = false, sheet_angle = 'front') {
   const id = ++sceneIdCounter;
   const globalRatio = document.getElementById('globalAspectRatio')?.value || cfg.aspectRatio || '16:9';
   const finalSize = size || globalRatio;
@@ -1715,6 +1797,10 @@ function startMonitoring(jobId, title, totalScenes) {
   document.getElementById('outputCard').style.display = 'none';
   document.getElementById('clipsCard').style.display = 'none';
   document.getElementById('sceneAuditCard').style.display = 'none';
+  // G3: job mới -> ẩn banner báo xong của job trước, reset cờ đã báo.
+  const doneBanner = document.getElementById('monDoneBanner');
+  if (doneBanner) doneBanner.style.display = 'none';
+  if (jobId) delete __notifiedJobs[jobId];
   document.getElementById('logConsole').innerHTML = '';
   const cancelBtn = document.getElementById('btnCancelJob');
   if (cancelBtn) cancelBtn.style.display = 'inline-flex';
@@ -1814,6 +1900,10 @@ function updateMonitor(data, jobId) {
 
   bar.style.width = data.progress + '%';
   lbl.textContent = data.progress + '%';
+
+  // G3: job kết thúc (xong / lỗi / dừng) -> banner + toast + Browser
+  // Notification (chỉ 1 lần/job, xem notifyJobTerminal).
+  notifyJobTerminal(data, jobId);
 
   if (data.status === 'done') {
     pill.className = 'pill done';
@@ -1934,6 +2024,44 @@ function updateMonitor(data, jobId) {
           </div>
         </div>`).join('');
     }
+  }
+}
+
+// ── G3: Báo render xong ─────────────────────────────────────────────────
+// updateMonitor được gọi lặp lại (SSE + HTTP polling) với cùng 1 trạng
+// thái kết thúc nên phải chặn báo trùng: mỗi job chỉ báo 1 lần/trạng thái.
+let __notifiedJobs = {}; // jobId -> status terminal đã báo ('done'|'error'|'cancelled')
+
+function notifyJobTerminal(data, jobId) {
+  const st = data.status;
+  if (st !== 'done' && st !== 'error' && st !== 'cancelled') return;
+  if (!jobId || __notifiedJobs[jobId] === st) return;
+  __notifiedJobs[jobId] = st;
+  const title = (data.title || (data.req && data.req.title)
+    || document.getElementById('projectTitle')?.value || '').trim();
+
+  const banner = document.getElementById('monDoneBanner');
+  if (banner) {
+    const ok = st === 'done';
+    banner.style.display = 'flex';
+    banner.className = 'mon-done-banner ' + (ok ? 'ok' : st === 'error' ? 'err' : 'cancel');
+    const txt = banner.querySelector('.mon-done-text');
+    if (txt) {
+      txt.textContent = ok
+        ? `✅ Render xong: "${title || 'phim'}" — video thành phẩm đã sẵn sàng bên dưới.`
+        : st === 'error'
+          ? `❌ Render thất bại: "${title || 'phim'}" — xem log bên dưới để biết chi tiết.`
+          : `🛑 Job đã dừng: "${title || 'phim'}".`;
+    }
+  }
+  if (st === 'done') {
+    showToast(`✅ Render xong: ${title || 'phim'}`, 'info', 8000);
+    showBrowserNotification('✅ Render xong', title ? `"${title}" đã render xong.` : 'Phim của bạn đã render xong.');
+  } else if (st === 'error') {
+    showToast(`❌ Render thất bại: ${title || 'phim'}`, 'error', 8000);
+    showBrowserNotification('❌ Render thất bại', title ? `"${title}" render lỗi — mở Monitor xem chi tiết.` : 'Render lỗi — mở Monitor xem chi tiết.');
+  } else {
+    showToast(`🛑 Job đã dừng: ${title || 'phim'}`, 'warning', 8000);
   }
 }
 
@@ -3332,7 +3460,11 @@ async function executeBeatBreakdown() {
   await loadVoices();
   await loadCharacterLibrary();
   await loadCharacters();
-  loadSampleStoryboard();
+  // G3: mặc định MỞ TRANG VỚI FORM TRỐNG (cfg.startEmpty=true) — không nạp
+  // sẵn 5 cảnh mẫu Kiếm Hiệp; các nút sample vẫn nạp lại 1 click. Tắt cài
+  // đặt "Mở trang với form trống" trong Cài đặt để về hành vi cũ.
+  if (cfg.startEmpty) resetFilmState();
+  else loadSampleStoryboard();
   checkApiHealth();
   // Auto refresh library every 30s if panel is visible
   setInterval(() => {
@@ -3994,7 +4126,8 @@ async function saveCurrentProject() {
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    alert(`✅ Đã lưu Project "${name}" thành công!`);
+    // G3: server trả về số bản version vừa lưu (giữ tối đa 20 bản/phim).
+    alert(`✅ Đã lưu Project "${name}" thành công!${data.version ? ` (bản #${data.version} — giữ tối đa 20 bản)` : ''}`);
   } catch (e) {
     alert(`Lỗi lưu project: ${e.message}`);
   }
@@ -4036,6 +4169,7 @@ async function openProjectsModal() {
                     <td class="u-fs11 u-c-muted">${new Date(p.saved_at * 1000).toLocaleString('vi-VN')}</td>
                     <td>
                       <button class="btn btn-primary btn-sm" onclick="loadProjectByName('${esc(p.name)}'); this.closest('.modal-backdrop').remove();">📂 Mở</button>
+                      <button class="btn btn-ghost btn-sm" onclick="openProjectVersionsModal('${esc(p.name)}')" title="Xem lịch sử các bản đã lưu (tối đa 20 bản) và khôi phục về bản cũ">🕘 Lịch sử${p.versions_count ? ` (${p.versions_count})` : ''}</button>
                       <button class="btn btn-ghost btn-sm u-c-red" onclick="deleteProjectByName('${esc(p.name)}', this)">🗑️</button>
                     </td>
                   </tr>
@@ -4164,6 +4298,83 @@ async function deleteProjectByName(name, btnEl) {
     showToast(`🗑️ Đã xóa project "${name}"`);
   } catch (e) {
     alert(`Lỗi xóa project: ${e.message}`);
+  }
+}
+
+// ── G3: Lịch sử version project ──────────────────────────────────────────
+// Liệt kê các bản snapshot đã lưu (mới nhất trước, tối đa 20 bản/phim) và
+// khôi phục về bản cũ. Khôi phục dùng chung applyProjectData nên ghi đè
+// TUYỆT ĐỐI như mở project (không rò lock/nhân vật/giọng phim trước).
+async function openProjectVersionsModal(name) {
+  try {
+    const res = await apiFetch(`/api/projects/${encodeURIComponent(name)}/versions`);
+    const list = await res.json();
+    if (list.error) throw new Error(list.error);
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.innerHTML = `
+      <div class="modal-window">
+        <div class="modal-header">
+          <div class="u-fw700 u-fs16 u-c-accent">🕘 LỊCH SỬ BẢN LƯU — ${esc(name)}</div>
+          <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="u-fs12 u-c-muted u-mb10">Mỗi lần bấm "Lưu Project" tạo 1 bản snapshot. Giữ tối đa 20 bản/phim — bản cũ nhất tự xóa khi vượt. Khôi phục sẽ thay thế toàn bộ nội dung hiện tại bằng bản đã chọn.</div>
+          ${list.length === 0 ? `
+            <div style="color:var(--muted);text-align:center;padding:30px;">Chưa có bản lưu nào. Hãy bấm "Lưu Project" để tạo bản đầu tiên!</div>
+          ` : `
+            <table class="audit-table">
+              <thead>
+                <tr>
+                  <th>Bản</th>
+                  <th>Tiêu đề phim</th>
+                  <th>Số cảnh</th>
+                  <th>Thời gian lưu</th>
+                  <th style="width:130px;">Hành động</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${list.map((v, i) => `
+                  <tr>
+                    <td class="u-fw700 u-c-accent">#${v.version}${i === 0 ? ' <span class="pill running">mới nhất</span>' : ''}</td>
+                    <td>${esc(v.title || name)}</td>
+                    <td><span class="pill running">${v.scenes_count} cảnh</span></td>
+                    <td class="u-fs11 u-c-muted">${new Date(v.saved_at * 1000).toLocaleString('vi-VN')}</td>
+                    <td>
+                      <button class="btn btn-primary btn-sm" onclick="restoreProjectVersion('${esc(name)}', ${v.version}, this)">↩️ Khôi phục</button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" onclick="this.closest('.modal-backdrop').remove()">Đóng</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  } catch (e) {
+    alert(`Lỗi mở lịch sử version: ${e.message}`);
+  }
+}
+
+async function restoreProjectVersion(name, version, btnEl) {
+  if (!confirm(`↩️ Khôi phục project "${name}" về bản #${version}?\nNội dung hiện tại chưa lưu sẽ bị thay thế hoàn toàn (tiêu đề, kịch bản, cảnh, nhân vật, khóa, giọng, nhạc...).\nBản đã khôi phục sẽ được ghi thêm thành 1 bản mới nên vẫn undo được.`)) {
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/projects/${encodeURIComponent(name)}/versions/${version}/restore`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    applyProjectData(data.project);
+    showPanel('create');
+    btnEl?.closest('.modal-backdrop')?.remove();
+    showToast(`↩️ Đã khôi phục "${name}" về bản #${version} (${scenes.length} cảnh).`, 'info', 5000);
+  } catch (e) {
+    alert(`Lỗi khôi phục version: ${e.message}`);
   }
 }
 

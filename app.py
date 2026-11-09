@@ -2995,6 +2995,10 @@ def api_shot_desk_export_zip(project_id: str):
 PROJECTS_DIR = WORKSPACE / "_projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# G3 — Lịch sử version project: giữ tối đa 20 snapshot/phim, bản cũ nhất
+# tự xóa khi vượt.
+MAX_PROJECT_VERSIONS = 20
+
 
 class ProjectSaveRequest(BaseModel):
     name: str = Field(max_length=100)
@@ -3027,12 +3031,116 @@ def api_save_project(req: ProjectSaveRequest):
     filepath = PROJECTS_DIR / f"{clean_name}.json"
     data = req.model_dump()
     data["saved_at"] = time.time()
+    # G3 — Lịch sử version: mỗi lần Lưu append 1 snapshot của đúng nội dung
+    # vừa lưu vào cùng file project (key "versions"), giữ tối đa 20 bản,
+    # bản cũ nhất tự xóa khi vượt. Lưu trong cùng file để không đổi format
+    # file / không sinh thêm file cạnh nó; project cũ (không có "versions")
+    # vẫn mở bình thường, bản lưu đầu tiên sau nâng cấp tạo versions=[v1].
+    existing = _read_project_json(filepath)
+    versions = list(existing.get("versions", [])) if isinstance(existing, dict) else []
+    versions = [v for v in versions if isinstance(v, dict)]
+    next_version = max((v.get("version", 0) for v in versions), default=0) + 1
+    versions.append(_project_version_snapshot(data, next_version))
+    versions = versions[-MAX_PROJECT_VERSIONS:]
+    data["versions"] = versions
     try:
         _atomic_write_json(filepath, data)
     except Exception as exc:
         logger.exception("Không lưu được project %s", clean_name)
         return JSONResponse({"error": f"Không lưu được project: {exc}"}, status_code=500)
-    return {"success": True, "name": clean_name, "message": f"Đã lưu project '{clean_name}'"}
+    return {"success": True, "name": clean_name, "version": next_version,
+            "versions_count": len(versions),
+            "message": f"Đã lưu project '{clean_name}' (bản #{next_version})"}
+
+
+def _read_project_json(filepath: Path):
+    """Đọc file project JSON, trả None khi chưa có / hỏng (không raise)."""
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _project_version_snapshot(data: Dict[str, Any], version: int) -> Dict[str, Any]:
+    """1 snapshot version: metadata + toàn bộ nội dung project (trừ key
+    "versions" để không lồng nhau). Khôi phục = ghi đè tuyệt đối bằng
+    snapshot.data, cùng đường khôi phục như applyProjectData ở frontend."""
+    snap = {k: v for k, v in data.items() if k != "versions"}
+    return {
+        "version": version,
+        "saved_at": data.get("saved_at", time.time()),
+        "title": data.get("title", ""),
+        "scenes_count": len(data.get("scenes", []) or []),
+        "data": snap,
+    }
+
+
+def _clean_project_name(name: str) -> str:
+    return "".join(c for c in name if c.isalnum() or c in ("-", "_")).strip()
+
+
+def _project_filepath_or_error(name: str):
+    """Trả (filepath, None) khi hợp lệ + file tồn tại, ngược lại
+    (None, JSONResponse lỗi). Dùng chung cho endpoints versions."""
+    clean_name = _clean_project_name(name)
+    if not clean_name or ".." in name:
+        return None, JSONResponse({"error": "Tên project không hợp lệ"}, status_code=400)
+    filepath = (PROJECTS_DIR / f"{clean_name}.json").resolve()
+    if not filepath.is_relative_to(PROJECTS_DIR.resolve()) or not filepath.exists() or not filepath.is_file():
+        return None, JSONResponse({"error": f"Không tìm thấy project '{name}'"}, status_code=404)
+    return filepath, None
+
+
+@app.get("/api/projects/{name}/versions")
+def api_list_project_versions(name: str):
+    """Liệt kê các bản snapshot của 1 project (mới nhất trước)."""
+    filepath, err = _project_filepath_or_error(name)
+    if err is not None:
+        return err
+    data = _read_project_json(filepath)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": f"File project '{name}' bị hỏng"}, status_code=500)
+    versions = [v for v in data.get("versions", []) if isinstance(v, dict)]
+    return [
+        {"version": v.get("version"), "saved_at": v.get("saved_at"),
+         "title": v.get("title", ""), "scenes_count": v.get("scenes_count", 0)}
+        for v in sorted(versions, key=lambda v: v.get("version", 0), reverse=True)
+    ]
+
+
+@app.post("/api/projects/{name}/versions/{version}/restore")
+def api_restore_project_version(name: str, version: int):
+    """Khôi phục project về 1 bản snapshot cũ (ghi đè tuyệt đối nội dung
+    hiện tại bằng snapshot.data). Bản đã khôi phục được ghi thêm thành 1
+    version mới nên vẫn undo được bằng cách khôi phục lại bản trước đó."""
+    filepath, err = _project_filepath_or_error(name)
+    if err is not None:
+        return err
+    data = _read_project_json(filepath)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": f"File project '{name}' bị hỏng"}, status_code=500)
+    versions = [v for v in data.get("versions", []) if isinstance(v, dict)]
+    snap = next((v for v in versions if v.get("version") == version), None)
+    if snap is None or not isinstance(snap.get("data"), dict):
+        return JSONResponse(
+            {"error": f"Không tìm thấy bản #{version} của project '{name}'"},
+            status_code=404)
+    restored = copy.deepcopy(snap["data"])
+    restored["saved_at"] = time.time()
+    next_version = max((v.get("version", 0) for v in versions), default=0) + 1
+    versions.append(_project_version_snapshot(restored, next_version))
+    versions = versions[-MAX_PROJECT_VERSIONS:]
+    restored["versions"] = versions
+    try:
+        _atomic_write_json(filepath, restored)
+    except Exception as exc:
+        logger.exception("Không khôi phục được project %s bản #%s", name, version)
+        return JSONResponse({"error": f"Không khôi phục được project: {exc}"}, status_code=500)
+    return {"success": True, "name": _clean_project_name(name),
+            "restored_version": version, "version": next_version,
+            "message": f"Đã khôi phục project '{name}' về bản #{version}",
+            "project": restored}
 
 
 @app.get("/api/projects")
@@ -3049,9 +3157,10 @@ def api_list_projects():
                     "title": data.get("title", f.stem),
                     "scenes_count": len(data.get("scenes", [])),
                     "saved_at": data.get("saved_at", os.path.getmtime(f)),
+                    "versions_count": len(data.get("versions", [])),
                 })
         except Exception:
-            items.append({"name": f.stem, "title": f.stem, "scenes_count": 0, "saved_at": os.path.getmtime(f)})
+            items.append({"name": f.stem, "title": f.stem, "scenes_count": 0, "saved_at": os.path.getmtime(f), "versions_count": 0})
     return items
 
 

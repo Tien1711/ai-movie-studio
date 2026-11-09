@@ -105,6 +105,17 @@
         </div>
       </div>
 
+      <!-- G3: Preset nhanh theo nền tảng (KHÔNG dùng class .card: wizard
+           3 bước gom các .card con trực tiếp của panel-create vào từng bước,
+           preset phải đứng ngoài wizard để luôn thấy ở mọi bước) -->
+      <div class="preset-bar">
+        <span class="u-fw700">🎯 Preset nhanh theo nền tảng:</span>
+        <button type="button" class="btn btn-sm" data-preset="tiktok" onclick="applyPlatformPreset('tiktok')" title="TikTok: 9:16, cảnh 5s, 720p, xuất clip ngắn từng cảnh">📱 TikTok 9:16</button>
+        <button type="button" class="btn btn-sm" data-preset="reels" onclick="applyPlatformPreset('reels')" title="Reels: 9:16, cảnh 8s, 720p, xuất clip ngắn từng cảnh">📸 Reels 9:16</button>
+        <button type="button" class="btn btn-sm" data-preset="youtube" onclick="applyPlatformPreset('youtube')" title="YouTube: 16:9, cảnh 8s, 1080p, xuất phim dài hoàn chỉnh">▶️ YouTube 16:9</button>
+        <span class="u-fs11 u-c-muted">Set sẵn khung hình + thời lượng cảnh + chất lượng + chế độ xuất phù hợp.</span>
+      </div>
+
       <!-- Project config -->
       <div class="card">
         <div class="card-header fx-wrap fx-g10">
@@ -874,6 +885,11 @@
         <button class="btn btn-primary" onclick="showPanel('create')">🎞️ Tạo phim mới</button>
       </div>
       <div id="monitorContent" style="display:none;">
+      <!-- G3: banner báo render xong / thất bại / đã dừng -->
+      <div id="monDoneBanner" class="mon-done-banner" style="display:none;">
+        <span class="mon-done-text"></span>
+        <button class="btn btn-ghost btn-sm" onclick="this.parentElement.style.display='none'" title="Đóng thông báo">✕</button>
+      </div>
       <div class="monitor-grid">
       <div class="monitor-main">
         <!-- Job info bar -->
@@ -1538,6 +1554,19 @@
           <button class="btn btn-primary" id="btnSaveStudioApiKey">💾 Lưu key</button>
           <button class="btn btn-ghost" id="btnClearStudioApiKey">🚪 Xóa key / Đăng xuất</button>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-title u-mb16">📋 Tùy chọn mở trang &amp; Thông báo</div>
+        <label class="ui-pref-label" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--text);margin-bottom:10px;">
+          <input type="checkbox" id="cfgStartEmpty" class="ui-pref-check" checked onchange="saveUiPrefs()">
+          <span><b>Mở trang với form trống</b> <span class="u-c-muted">(mặc định bật)</span><br>
+          <span class="u-fs11 u-c-muted">Bật: mở trang không nạp sẵn 5 cảnh mẫu Kiếm Hiệp — form trống để tạo phim mới. Các nút sample vẫn nạp lại chỉ 1 click. Tắt: về hành vi cũ (tự nạp 5 cảnh mẫu lúc mở trang).</span></span>
+        </label>
+        <label class="ui-pref-label" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--text);">
+          <input type="checkbox" id="cfgNotifyRender" class="ui-pref-check" onchange="saveUiPrefs()">
+          <span><b>Thông báo khi render xong</b> <span class="u-c-muted">(mặc định tắt)</span><br>
+          <span class="u-fs11 u-c-muted">Bật: khi job hoàn thành/thất bại, ngoài banner + toast trong Monitor sẽ gửi thêm thông báo hệ thống của trình duyệt. Trình duyệt sẽ hỏi quyền thông báo 1 lần duy nhất lúc bạn bật ô này.</span></span>
+        </label>
       </div>
       </div><!-- /settings-grid -->
     </div>
