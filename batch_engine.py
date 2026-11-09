@@ -908,6 +908,186 @@ async def generate_keyframe_image(
         raise RuntimeError(f"Muse2API trả về HTTP {r.status_code}: {r.text[:300]}")
 
 
+def build_scene_prompt(
+    scene: Dict[str, Any],
+    style_locks: Optional[Dict[str, str]] = None,
+    voice: str = "vi-VN-HoaiMyNeural",
+    voice_mode: str = "tts",
+) -> Dict[str, Any]:
+    """Chuẩn bị prompt + thoại cho 1 cảnh — KHÔNG gọi API, KHÔNG chạm file.
+
+    Đây đúng là phần "setup prompt" của process_scene, tách ra để
+    prefetch_scene() dùng chung 1 nguồn duy nhất (không copy logic):
+    Character Block + thoại Việt đi qua clean_script_prompt /
+    apply_style_locks / sanitize_prompt_heuristics NGUYÊN VĂN, không
+    paraphrase; mệnh đề lip-sync / AI-voice ghép y hệt process_scene.
+    Hàm này KHÔNG sửa scene (không gán scene["prompt"], không đụng
+    reference_image / last_frame) nên gọi sớm cho cảnh N+1 trong lúc
+    cảnh N đang poll là an toàn với chain sequential.
+    """
+    raw_prompt = scene.get("prompt", "")
+    voiceover = scene.get("voiceover", "")
+    scene_voice = scene.get("voice") or voice
+    scene_voice_mode = scene.get("voice_mode") or voice_mode or "tts"
+    is_ai_voice = bool(
+        scene_voice_mode in ("ai_voice", "native", "none", "no_dub")
+        or scene_voice in ("ai_voice", "native", "none", "no_dub")
+    )
+    voice_segments = scene.get("voice_segments") or []
+
+    original_prompt = scene.get("original_prompt") or raw_prompt
+    # Tự động bóc tách kịch bản thô (loại bỏ [Màu sắc], [Âm thanh], [Lồng tiếng])
+    cleaned_prompt, ext_voice = clean_script_prompt(raw_prompt)
+    if not voiceover and ext_voice:
+        voiceover = ext_voice
+
+    # Áp dụng khóa phong cách (Style, Lighting, Color, Camera)
+    styled_prompt = apply_style_locks(cleaned_prompt, style_locks)
+    enhanced_prompt = styled_prompt
+
+    # Tự động tiền kiểm tra & làm sạch an toàn
+    prompt = sanitize_prompt_heuristics(styled_prompt)
+
+    spk_names = []
+    if voice_segments:
+        for seg in voice_segments:
+            cname = (seg.get("character") or seg.get("speaker") or "").strip()
+            if cname and cname not in spk_names:
+                spk_names.append(cname)
+    if not spk_names and scene.get("character"):
+        spk_names.append(scene.get("character").strip())
+
+    p_lower = prompt.lower()
+    has_dialogue = bool(voiceover or voice_segments)
+
+    if is_ai_voice:
+        # 🤖 CHẾ ĐỘ ĐƯA THOẠI VÀO PROMPT ĐỂ AI TỰ SINH TIẾNG NHÂN VẬT & ÂM THANH
+        if voice_segments and len(voice_segments) > 0:
+            dialogue_parts = []
+            for seg in voice_segments:
+                cname = (seg.get("character") or seg.get("speaker") or "").strip()
+                txt = (seg.get("text") or "").strip()
+                if cname and txt:
+                    dialogue_parts.append(f"{cname} says '{txt}'")
+                elif txt:
+                    dialogue_parts.append(f"character says '{txt}'")
+            dialogue_clause = ", ".join(dialogue_parts)
+            prompt = f"{prompt}, audible sound design and native speech: characters speaking naturally with synchronized realistic vocal audio and clear ambient atmosphere: {dialogue_clause}"
+        elif voiceover:
+            spk_clause = f"the character {spk_names[0]}" if spk_names else "the character"
+            prompt = f"{prompt}, audible sound design and native speech: {spk_clause} speaking with natural voice '{voiceover}', synchronized realistic vocal audio and clear ambient atmosphere"
+        else:
+            prompt = f"{prompt}, realistic synchronized sound design, clear natural ambient audio and Foley sound effects"
+    else:
+        # 🎙️ CHẾ ĐỘ LỒNG TIẾNG TTS: Bổ sung chỉ thị khẩu hình (Lip-sync Articulation)
+        if has_dialogue and not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation", "talking with"]):
+            spk_clause = f"the character {', '.join(spk_names)}" if spk_names else "the character"
+            prompt = f"{prompt}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue"
+
+    return {
+        "raw_prompt": raw_prompt,
+        "voiceover": voiceover,
+        "enhanced_prompt": enhanced_prompt,
+        "original_prompt": original_prompt,
+        "prompt": prompt,
+        "is_ai_voice": is_ai_voice,
+        "scene_voice": scene_voice,
+        "scene_voice_mode": scene_voice_mode,
+        "voice_segments": voice_segments,
+        "spk_names": spk_names,
+        "has_dialogue": has_dialogue,
+    }
+
+
+async def prefetch_scene(
+    scene: Dict[str, Any],
+    output_dir: str,
+    voice: str = "vi-VN-HoaiMyNeural",
+    style_locks: Optional[Dict[str, str]] = None,
+    voice_mode: str = "tts",
+    cancel_event: Optional[asyncio.Event] = None,
+) -> Dict[str, Any]:
+    """Chuẩn bị trước cho 1 cảnh trong lúc cảnh khác đang chờ API video.
+
+    Chỉ làm 2 việc KHÔNG phụ thuộc video cảnh trước, nên KHÔNG BAO GIỜ
+    phá chain sequential (luật liền mạch tuyệt đối):
+      1. Chuẩn bị prompt (build_scene_prompt — thuần xử lý chuỗi).
+      2. Sinh TTS cho thoại của cảnh này (ghi file audio scene_NNN.mp3).
+    TUYỆT ĐỐI KHÔNG: gọi API video, đụng reference_image / last_frame,
+    trích frame, ghép clip. Prompt + kết quả TTS được cache vào scene
+    ("_prefetched_prompt" / "_prefetched_tts") để process_scene dùng lại
+    thay vì làm lại — TTS chỉ sinh đúng 1 lần cho mỗi cảnh.
+    Trả về dict có cùng "hình dạng" kết quả TTS để process_scene dùng
+    chung nhánh xử lý sau poll: audio_duration / tts_failed / tts_error /
+    tts_s (thời gian TTS thật, để job["timing"] vẫn cộng đúng) và cờ
+    tts_started (False khi audio đã có sẵn từ trước hoặc ở chế độ
+    AI Voice thì không sinh TTS).
+    """
+    idx = scene.get("index")
+    cancelled_result: Dict[str, Any] = {
+        "index": idx, "prefetched": False, "cancelled": True,
+        "tts_started": False, "audio_duration": None,
+        "tts_failed": False, "tts_error": "", "tts_s": 0.0,
+    }
+    if cancel_event is not None and cancel_event.is_set():
+        return cancelled_result
+    try:
+        built = build_scene_prompt(scene, style_locks, voice, voice_mode)
+    except Exception as pref_err:
+        return {
+            "index": idx, "prefetched": False, "cancelled": False,
+            "tts_started": False, "audio_duration": None,
+            "tts_failed": False, "tts_error": f"Lỗi chuẩn bị prompt: {pref_err}",
+            "tts_s": 0.0,
+        }
+    scene["_prefetched_prompt"] = built
+    result: Dict[str, Any] = {
+        "index": idx, "prefetched": True, "cancelled": False,
+        "tts_started": False, "audio_duration": None,
+        "tts_failed": False, "tts_error": "", "tts_s": 0.0,
+    }
+    if built["is_ai_voice"]:
+        return result
+    os.makedirs(os.path.join(output_dir, "audio"), exist_ok=True)
+    audio_path = os.path.join(output_dir, "audio", f"scene_{idx:03d}.mp3")
+    tmp_seg_dir = os.path.join(output_dir, "audio", f"segs_{idx:03d}")
+    if cancel_event is not None and cancel_event.is_set():
+        return cancelled_result
+    try:
+        if await _is_complete_audio_file(audio_path):
+            return result
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+    if cancel_event is not None and cancel_event.is_set():
+        return cancelled_result
+    tts_t0 = time.monotonic()
+    voice_segments = built["voice_segments"]
+    if voice_segments and len(voice_segments) > 0:
+        audio_duration, tts_failed, tts_error = await generate_multi_voice_tts_with_status(
+            voice_segments, audio_path, tmp_seg_dir
+        )
+    else:
+        audio_duration, tts_failed, tts_error = await generate_tts_with_status(
+            built["voiceover"], built["scene_voice"], audio_path
+        )
+    result.update({
+        "tts_started": True,
+        "audio_duration": audio_duration,
+        "tts_failed": tts_failed,
+        "tts_error": tts_error,
+        "tts_s": round(time.monotonic() - tts_t0, 3),
+    })
+    scene["_prefetched_tts"] = {
+        "audio_duration": audio_duration,
+        "tts_failed": tts_failed,
+        "tts_error": tts_error,
+        "tts_s": result["tts_s"],
+    }
+    return result
+
+
 async def process_scene(
     client: httpx.AsyncClient,
     scene: Dict[str, Any],
@@ -920,6 +1100,7 @@ async def process_scene(
     style_locks: Optional[Dict[str, str]] = None,
     voice_mode: str = "tts",
     cancel_event: Optional[asyncio.Event] = None,
+    prefetch_task: Optional[asyncio.Task] = None,
 ) -> Dict[str, Any]:
     """
     Pipeline xử lý 1 cảnh độc lập với cơ chế kiểm soát retry thông minh (Non-Spamming):
@@ -928,22 +1109,37 @@ async def process_scene(
     - Hỗ trợ chế độ AI Voice: Đưa lời thoại vào prompt để AI tự tạo tiếng nhân vật & âm thanh gốc.
     - Nếu gặp lỗi kiểm duyệt: Chỉ thử lại TỐI ĐA 1 LẦN với prompt đã làm sạch triệt để.
     - Tuyệt đối không retry mù quáng hay lặp vô tận.
+    - prefetch_task: task prefetch_scene() đã chạy trước cho cảnh này
+      (prompt + TTS chuẩn bị trong lúc cảnh trước đang poll) — dùng kết
+      quả của nó thay vì sinh TTS lại; task được await sau poll như
+      tts_task thường, nên TTS prefetched vẫn chồng lấn với poll.
     """
     async with sem:
         # ── Setup scene: BỌC TOÀN BỘ trong try (§1.9) ──
         try:
             idx = scene["index"]
-            raw_prompt = scene.get("prompt", "")
-            voiceover = scene.get("voiceover", "")
             duration = int(scene.get("duration", 5))
             size = scene.get("size", "16:9")
-            scene_voice = scene.get("voice") or voice
-            scene_voice_mode = scene.get("voice_mode") or voice_mode or "tts"
-            is_ai_voice = bool(
-                scene_voice_mode in ("ai_voice", "native", "none", "no_dub")
-                or scene_voice in ("ai_voice", "native", "none", "no_dub")
-            )
-            voice_segments = scene.get("voice_segments") or []
+
+            # Prompt + thoại: dùng bản prefetch đã chuẩn bị sẵn (nếu có),
+            # nếu không thì tính bằng cùng 1 hàm build_scene_prompt —
+            # Character Block + thoại Việt nguyên văn, không paraphrase.
+            _prefetched = scene.get("_prefetched_prompt") if isinstance(scene.get("_prefetched_prompt"), dict) else None
+            if _prefetched is not None:
+                built = _prefetched
+            else:
+                built = build_scene_prompt(scene, style_locks, voice, voice_mode)
+            raw_prompt = built["raw_prompt"]
+            voiceover = built["voiceover"]
+            scene_voice = built["scene_voice"]
+            scene_voice_mode = built["scene_voice_mode"]
+            is_ai_voice = built["is_ai_voice"]
+            voice_segments = built["voice_segments"]
+            spk_names = built["spk_names"]
+            has_dialogue = built["has_dialogue"]
+            original_prompt = built["original_prompt"]
+            enhanced_prompt = built["enhanced_prompt"]
+            prompt = built["prompt"]
 
             result: Dict[str, Any] = {
                 "index": idx,
@@ -967,56 +1163,6 @@ async def process_scene(
             audio_path = os.path.join(output_dir, "audio", f"scene_{idx:03d}.mp3") if not is_ai_voice else None
             video_path = os.path.join(output_dir, "scenes", f"scene_{idx:03d}.mp4")
             tmp_seg_dir = os.path.join(output_dir, "audio", f"segs_{idx:03d}")
-
-            original_prompt = scene.get("original_prompt") or raw_prompt
-            # Tự động bóc tách kịch bản thô (loại bỏ [Màu sắc], [Âm thanh], [Lồng tiếng])
-            cleaned_prompt, ext_voice = clean_script_prompt(raw_prompt)
-            if not voiceover and ext_voice:
-                voiceover = ext_voice
-                result["voiceover"] = voiceover
-
-            # Áp dụng khóa phong cách (Style, Lighting, Color, Camera)
-            styled_prompt = apply_style_locks(cleaned_prompt, style_locks)
-            enhanced_prompt = styled_prompt
-
-            # Tự động tiền kiểm tra & làm sạch an toàn
-            prompt = sanitize_prompt_heuristics(styled_prompt)
-
-            spk_names = []
-            if voice_segments:
-                for seg in voice_segments:
-                    cname = (seg.get("character") or seg.get("speaker") or "").strip()
-                    if cname and cname not in spk_names:
-                        spk_names.append(cname)
-            if not spk_names and scene.get("character"):
-                spk_names.append(scene.get("character").strip())
-
-            p_lower = prompt.lower()
-            has_dialogue = bool(voiceover or voice_segments)
-
-            if is_ai_voice:
-                # 🤖 CHẾ ĐỘ ĐƯA THOẠI VÀO PROMPT ĐỂ AI TỰ SINH TIẾNG NHÂN VẬT & ÂM THANH
-                if voice_segments and len(voice_segments) > 0:
-                    dialogue_parts = []
-                    for seg in voice_segments:
-                        cname = (seg.get("character") or seg.get("speaker") or "").strip()
-                        txt = (seg.get("text") or "").strip()
-                        if cname and txt:
-                            dialogue_parts.append(f"{cname} says '{txt}'")
-                        elif txt:
-                            dialogue_parts.append(f"character says '{txt}'")
-                    dialogue_clause = ", ".join(dialogue_parts)
-                    prompt = f"{prompt}, audible sound design and native speech: characters speaking naturally with synchronized realistic vocal audio and clear ambient atmosphere: {dialogue_clause}"
-                elif voiceover:
-                    spk_clause = f"the character {spk_names[0]}" if spk_names else "the character"
-                    prompt = f"{prompt}, audible sound design and native speech: {spk_clause} speaking with natural voice '{voiceover}', synchronized realistic vocal audio and clear ambient atmosphere"
-                else:
-                    prompt = f"{prompt}, realistic synchronized sound design, clear natural ambient audio and Foley sound effects"
-            else:
-                # 🎙️ CHẾ ĐỘ LỒNG TIẾNG TTS: Bổ sung chỉ thị khẩu hình (Lip-sync Articulation)
-                if has_dialogue and not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation", "talking with"]):
-                    spk_clause = f"the character {', '.join(spk_names)}" if spk_names else "the character"
-                    prompt = f"{prompt}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue"
 
             if prompt != raw_prompt:
                 scene["prompt"] = prompt
@@ -1078,10 +1224,20 @@ async def process_scene(
                 # 1. Sinh TTS (Bỏ qua khi ở chế độ AI Voice)
                 # Audit #9: dùng bản _with_status để biết TTS có lỗi không —
                 # lỗi thì vẫn fallback im lặng nhưng phải đánh dấu scene.
+                # Chồng chéo (nhóm 4): nếu có prefetch_task cho cảnh này
+                # (đã chạy trong lúc cảnh trước poll / chờ chain) thì dùng
+                # nó làm tts_task — KHÔNG sinh TTS lần 2; task được await
+                # sau poll như thường, TTS prefetched vẫn chồng lấn poll.
+                # Chỉ dùng prefetch ở attempt 1; retry attempt 2 đi nhánh
+                # thường (kiểm tra file audio đã hoàn chỉnh chưa).
                 tts_failed = False
                 tts_error = ""
+                tts_task_is_prefetch = False
                 if is_ai_voice:
                     tts_task = None
+                elif prefetch_task is not None and attempt == 1:
+                    tts_task = prefetch_task
+                    tts_task_is_prefetch = True
                 else:
                     if not await _is_complete_audio_file(audio_path):
                         if voice_segments and len(voice_segments) > 0:
@@ -1094,7 +1250,7 @@ async def process_scene(
                             )
                     else:
                         tts_task = None
-                if tts_task is not None:
+                if tts_task is not None and not tts_task_is_prefetch:
                     tts_started = time.monotonic()
 
                 payload = {"prompt": prompt, "duration": duration, "size": size, "timeout": 600}
@@ -1150,9 +1306,47 @@ async def process_scene(
                 poll_s += time.monotonic() - _poll_t0
 
                 if tts_task:
-                    audio_duration, tts_failed, tts_error = await tts_task
-                    if tts_started is not None:
-                        tts_s = time.monotonic() - tts_started
+                    if tts_task_is_prefetch:
+                        # Prefetch đã sinh TTS từ trước (trong lúc cảnh trước
+                        # poll / chờ chain): lấy kết quả + tts_s thật của nó
+                        # để job["timing"] vẫn cộng đúng (tts_s prefetched
+                        # chồng lấn với poll_s như quy ước cũ).
+                        _pref = None
+                        try:
+                            _pref = await tts_task
+                        except asyncio.CancelledError:
+                            if cancel_event is not None and cancel_event.is_set():
+                                raise
+                            print(f"[batch_engine Warning] Prefetch TTS scene {idx} bị hủy — sinh TTS lại.")
+                        except Exception as pref_err:
+                            print(f"[batch_engine Warning] Prefetch TTS scene {idx} lỗi ({pref_err}) — sinh TTS lại.")
+                        if _pref is not None and _pref.get("tts_started"):
+                            audio_duration = _pref.get("audio_duration") or max(2.0, len(voiceover) / 3.0)
+                            tts_failed = bool(_pref.get("tts_failed"))
+                            tts_error = _pref.get("tts_error") or ""
+                            tts_s = float(_pref.get("tts_s") or 0.0)
+                        elif _pref is not None:
+                            # Prefetch xong nhưng không sinh TTS (audio đã có
+                            # sẵn từ trước): dùng nhánh ước lượng như khi
+                            # tts_task None.
+                            audio_duration = max(2.0, len(voiceover) / 3.0)
+                        else:
+                            # Prefetch chết giữa chừng (hiếm): sinh TTS lại
+                            # ngay tại đây — nối tiếp, không retry prefetch.
+                            _retry_t0 = time.monotonic()
+                            if voice_segments and len(voice_segments) > 0:
+                                audio_duration, tts_failed, tts_error = await generate_multi_voice_tts_with_status(
+                                    voice_segments, audio_path, tmp_seg_dir
+                                )
+                            else:
+                                audio_duration, tts_failed, tts_error = await generate_tts_with_status(
+                                    voiceover, scene_voice, audio_path
+                                )
+                            tts_s = time.monotonic() - _retry_t0
+                    else:
+                        audio_duration, tts_failed, tts_error = await tts_task
+                        if tts_started is not None:
+                            tts_s = time.monotonic() - tts_started
                     if tts_failed:
                         # Audit #9: TTS lỗi -> audio im lặng, cảnh mất tiếng.
                         # Báo ngay qua progress (Monitor/log thấy liền) và
@@ -1281,6 +1475,7 @@ async def process_scene(
                         "error": None,
                         "tts_failed": tts_failed,
                         "tts_error": tts_error or None,
+                        "prefetched": _prefetched is not None,
                         "timing": {
                             "render_s": round(time.monotonic() - attempt_t0, 3),
                             "poll_s": round(poll_s, 3),
@@ -1400,6 +1595,9 @@ def summarize_batch_timing(results: List[Dict[str, Any]], wall_s: float) -> Dict
       Hai số này chồng lấn nhau (TTS chạy song song với poll) và ở chế độ
       song song còn chồng lấn giữa các scene — nên poll_s/tts_s có thể lớn
       hơn render_s; chúng dùng để soi bottleneck, KHÔNG cộng vào total.
+      Từ nhóm 4 (chồng chéo): tts_s gồm cả TTS prefetched — TTS của cảnh
+      N+1 sinh trong lúc cảnh N đang poll / chờ chain, nên tts_s càng
+      chồng lấn với poll_s của cảnh trước; quy ước cộng dồn giữ nguyên.
     - compose_s / total_s: do film_pipeline điền sau (ghép + tổng pipeline).
     Scene nào thiếu timing (lỗi setup, job cũ) thì tính là 0.
     """
@@ -1462,6 +1660,16 @@ async def run_batch(
       status "cancelled" thay vì chạy tiếp. GIỚI HẠN: ffmpeg đồng bộ chạy
       trong asyncio.to_thread (ghép clip/last frame) không bị giết khi
       cancel — cảnh đang chạy sẽ xong bước đó rồi mới dừng hẳn.
+    Chồng chéo pipeline (nhóm 4) — prefetch_scene():
+    - sequential: trong lúc cảnh N poll video thì prompt + TTS của cảnh
+      N+1 được chuẩn bị song song; cảnh N+1 vẫn chỉ render SAU KHI có
+      last frame của cảnh N (reference_image gán sau khi N xong) nên
+      chain không bao giờ bị phá — chỉ chồng chéo phần chuẩn bị/TTS.
+    - none/parallel: mỗi worker prefetch prompt + TTS của chính nó ngay
+      từ đầu, chồng lên stagger sleep và lúc chờ chain_from_previous.
+    - Prefetch KHÔNG gọi API video, KHÔNG đụng reference_image/last
+      frame, KHÔNG render sớm; TTS mỗi cảnh chỉ sinh đúng 1 lần và
+      tts_s của nó vẫn được cộng vào timing (xem summarize_batch_timing).
     """
     batch_t0 = time.monotonic()
 
@@ -1522,17 +1730,52 @@ async def run_batch(
             return _finish(_health_error_results(health_err))
 
         # ── Kỹ thuật Chaining: Tuần tự toàn bộ phim (Seamless Sequential Chaining) ──
+        # Chồng chéo (nhóm 4): trong lúc cảnh N chờ API video (poll) thì
+        # prefetch_scene() chuẩn bị prompt + TTS cho cảnh N+1 — TTS/ghép
+        # hậu kỳ của cảnh đã xong không bị chặn bởi poll. Prefetch KHÔNG
+        # gọi API video, KHÔNG đụng reference_image, nên chain vẫn đúng:
+        # cảnh N+1 chỉ bắt đầu render SAU KHI có last frame của cảnh N
+        # (reference_image được gán ngay dưới đây, sau khi N xong).
         if chain_mode == "sequential":
             results = []
             prev_last_frame = None
+            pending_prefetch: Dict[int, asyncio.Task] = {}
+
+            async def _cancel_pending_prefetch() -> None:
+                for t in list(pending_prefetch.values()):
+                    if not t.done():
+                        t.cancel()
+                if pending_prefetch:
+                    await asyncio.gather(*pending_prefetch.values(), return_exceptions=True)
+                pending_prefetch.clear()
+
             for si, s in enumerate(sorted_scenes):
                 idx = s["index"]
                 # Audit #8: dừng trước mỗi cảnh khi job đã bị hủy; các cảnh
                 # còn lại trả về status "cancelled" thay vì render tiếp.
                 if cancel_event is not None and cancel_event.is_set():
+                    await _cancel_pending_prefetch()
                     results.extend(_cancelled_result(x) for x in sorted_scenes[si:])
                     break
+                # Prefetch cảnh kế (N+1) TRƯỚC khi render cảnh N: prompt +
+                # TTS của N+1 chạy song song với poll video của N.
+                if si + 1 < len(sorted_scenes):
+                    nxt = sorted_scenes[si + 1]
+                    nxt_idx = nxt.get("index")
+                    if (
+                        nxt_idx is not None
+                        and nxt_idx not in pending_prefetch
+                        and not (nxt_idx < start_scene_idx and nxt.get("status") == "done" and nxt.get("video_path"))
+                    ):
+                        pending_prefetch[nxt_idx] = asyncio.create_task(
+                            prefetch_scene(nxt, output_dir, voice, style_locks=style_locks,
+                                           voice_mode=voice_mode, cancel_event=cancel_event)
+                        )
+                pf_task = pending_prefetch.pop(idx, None)
                 if idx < start_scene_idx and s.get("status") == "done" and s.get("video_path"):
+                    if pf_task is not None and not pf_task.done():
+                        pf_task.cancel()
+                        await asyncio.gather(pf_task, return_exceptions=True)
                     results.append(s)
                     if s.get("last_frame_path"):
                         prev_last_frame = s["last_frame_path"]
@@ -1569,8 +1812,12 @@ async def run_batch(
                         client, s, sem, base_url, api_key,
                         output_dir, voice, progress_cb, style_locks=style_locks,
                         voice_mode=voice_mode, cancel_event=cancel_event,
+                        prefetch_task=pf_task,
                     )
                 except asyncio.CancelledError:
+                    # Hủy là hủy thật (audit #8): dọn luôn task prefetch
+                    # của cảnh kế để không sinh TTS / giữ task rò rỉ.
+                    await _cancel_pending_prefetch()
                     raise
                 except Exception as seq_err:
                     # Sequential mode cũng không sập batch vì 1 scene lỗi (§1.9).
@@ -1602,6 +1849,28 @@ async def run_batch(
                 done_events[idx].set()
 
         async def worker_with_chain(s: Dict[str, Any], order_idx: int):
+            idx = s["index"]
+            if idx < start_scene_idx and s.get("status") == "done" and s.get("video_path"):
+                return s
+            # Chồng chéo (nhóm 4): prefetch prompt + TTS cho chính cảnh này
+            # ngay từ đầu worker — chạy song song với stagger sleep và với
+            # lúc chờ chain_from_previous (cảnh trước chưa xong). Prefetch
+            # KHÔNG gọi API video, KHÔNG đụng reference_image nên chain
+            # vẫn đúng: render chỉ bắt đầu sau khi nhận last frame trước.
+            pf_task = asyncio.create_task(
+                prefetch_scene(s, output_dir, voice, style_locks=style_locks,
+                               voice_mode=voice_mode, cancel_event=cancel_event)
+            )
+            try:
+                return await _worker_with_chain_inner(s, order_idx, pf_task)
+            finally:
+                # Worker xong (hoặc lỗi / hủy / timeout chain) mà prefetch
+                # chưa được process_scene dùng thì dọn — không rò rỉ task.
+                if not pf_task.done():
+                    pf_task.cancel()
+                    await asyncio.gather(pf_task, return_exceptions=True)
+
+        async def _worker_with_chain_inner(s: Dict[str, Any], order_idx: int, pf_task):
             idx = s["index"]
             if idx < start_scene_idx and s.get("status") == "done" and s.get("video_path"):
                 return s
@@ -1681,6 +1950,7 @@ async def run_batch(
                     client, s, sem, base_url, api_key,
                     output_dir, voice, progress_cb, style_locks=style_locks,
                     voice_mode=voice_mode, cancel_event=cancel_event,
+                    prefetch_task=pf_task,
                 )
             except asyncio.CancelledError:
                 raise
