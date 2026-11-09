@@ -6175,6 +6175,8 @@ function openReviewDeskForShot(shotIndex) {
 function renderShotDeskTimelineScreen() {
   const container = document.getElementById('sdVisualTimelineTracks');
   if (!container) return;
+  // Đang kéo-thả thì poll không được vẽ lại timeline (kẻo mất element đang kéo).
+  if (window.__sdDragging) return;
 
   if (!currentShotDeskProject || !currentShotDeskProject.shots || currentShotDeskProject.shots.length === 0) {
     container.innerHTML = `<div style="text-align:center;padding:30px;color:var(--muted);">Chưa có shot nào để hiển thị timeline.</div>`;
@@ -6184,22 +6186,28 @@ function renderShotDeskTimelineScreen() {
   const p = currentShotDeskProject;
   const shots = p.shots;
   const approvedShots = shots.filter(s => s.status === 'approved' || s.status === 'done');
+  const anyRendering = shots.some(s => s.status === 'rendering');
 
   let videoTrackHtml = '';
   shots.forEach((s, idx) => {
     const isApproved = s.status === 'approved' || s.status === 'done';
+    const isRendering = s.status === 'rendering';
     const thumbUrl = s.first_frame_url || s.last_frame_url || '';
     videoTrackHtml += `
-      <div class="sd-clip-block" onclick="openReviewDeskForShot(${s.index})" style="${isApproved ? 'border-color:var(--green);background:rgba(52,211,153,0.08);' : 'opacity:0.65;'}cursor:pointer;" title="Bấm để mở Review Desk cho Shot ${s.index}">
+      <div class="sd-clip-block${isRendering ? ' sd-rendering' : ''}" data-sd-shot="${s.index}" draggable="${anyRendering ? 'false' : 'true'}"
+        ondragstart="sdTimelineDragStart(event, ${s.index})" ondragover="sdTimelineDragOver(event)" ondragleave="sdTimelineDragLeave(event)"
+        ondrop="sdTimelineDrop(event, ${s.index})" ondragend="sdTimelineDragEnd(event)"
+        onclick="sdTimelineClipClick(event, ${s.index})" style="${isApproved ? 'border-color:var(--green);background:rgba(52,211,153,0.08);' : 'opacity:0.65;'}cursor:${anyRendering ? 'default' : 'grab'};" title="Kéo-thả để đổi thứ tự • Bấm để mở Review Desk cho Shot ${s.index}">
         <div class="fx fx-ac fx-g8">
           ${thumbUrl ? `<img loading="lazy" decoding="async" src="${thumbUrl}" style="width:34px;height:48px;object-fit:cover;border-radius:4px;border:1px solid var(--border);flex-shrink:0;">` : ''}
           <div style="overflow:hidden;flex:1;">
             <div class="u-fw700 fx fx-jc-sb fx-ac">
-              <span>Shot ${s.index}</span>
+              <span>⠿ Shot ${s.index}</span>
               <span style="font-size:10px;color:${isApproved ? 'var(--green)' : 'var(--muted)'};">${isApproved ? '✓ Approved' : s.status}</span>
             </div>
             <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${s.duration}s • ${esc(s.title || '')}</div>
           </div>
+          <button type="button" class="btn btn-ghost btn-sm" style="flex-shrink:0;padding:2px 6px;" title="Render lại shot này (giữ nguyên nhân vật/giọng, clip cũ được lưu để so sánh A/B)" onclick="event.stopPropagation(); sdRerenderShot(${s.index})" ${isRendering ? 'disabled' : ''}>🔄</button>
         </div>
       </div>
     `;
@@ -6227,6 +6235,7 @@ function renderShotDeskTimelineScreen() {
   });
 
   container.innerHTML = `
+    <div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">⠿ Kéo-thả shot để đổi thứ tự${anyRendering ? ' — đang có shot render nên tạm khóa kéo-thả' : ''} • 🔄 render lại shot (clip cũ được lưu để so sánh A/B bên dưới) • Bấm vào shot để mở Review Desk.</div>
     <div class="sd-track">
       <div class="sd-track-label">🎬 VIDEO TRACK</div>
       <div class="sd-track-content">${videoTrackHtml}</div>
@@ -6254,6 +6263,7 @@ function renderShotDeskTimelineScreen() {
         </div>
       </div>
     </div>
+    ${shots.filter(s => s.previous_clip).map(s => sdShotDeskAbHtml(s)).join('')}
   `;
 
   const composeBtn = document.getElementById('sdBtnComposeTimeline');
@@ -6275,6 +6285,165 @@ function renderShotDeskTimelineScreen() {
 
   if (p.final_video) {
     displayShotDeskFinalMovie(p.final_video, p.srt_file, p.total_duration, p.final_dir);
+  }
+}
+
+// ── Timeline Editor Shot Desk: kéo-thả đổi thứ tự + render lại + A/B ─────
+// Cùng cơ chế với Timeline Editor panel Tạo phim (PR #2): kéo-thả đổi thứ tự
+// (lưu xuống server, hoàn lại khi lỗi), render lại 1 shot tái dùng endpoint
+// render sẵn có (clip cũ được lưu sang previous/), so sánh A/B giữ tối đa
+// 1 bản cũ. Kéo-thả dùng HTML5 DnD như handleSceneDropReorder bên Tạo phim.
+let __sdDragShotIdx = null;
+
+function sdTimelineClipClick(e, shotIdx) {
+  // Vừa thả kéo-thả xong thì click kéo theo không được mở Review Desk.
+  if (window.__sdJustDropped && Date.now() - window.__sdJustDropped < 400) return;
+  openReviewDeskForShot(shotIdx);
+}
+
+function sdTimelineDragStart(e, shotIdx) {
+  if (!currentShotDeskProject || !currentShotDeskProject.shots) return;
+  if (currentShotDeskProject.shots.some(s => s.status === 'rendering')) {
+    e.preventDefault();
+    showToast('Đang có shot render — đợi xong rồi đổi thứ tự.', 'error');
+    return;
+  }
+  __sdDragShotIdx = shotIdx;
+  window.__sdDragging = true;
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', String(shotIdx)); } catch (_) {}
+  e.target.closest('.sd-clip-block')?.classList.add('sd-dragging');
+}
+
+function sdTimelineDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  e.target.closest('.sd-clip-block')?.classList.add('sd-drag-over');
+}
+
+function sdTimelineDragLeave(e) {
+  e.target.closest('.sd-clip-block')?.classList.remove('sd-drag-over');
+}
+
+async function sdTimelineDrop(e, targetIdx) {
+  e.preventDefault();
+  document.querySelectorAll('.sd-clip-block').forEach(el => el.classList.remove('sd-dragging', 'sd-drag-over'));
+  window.__sdDragging = false;
+  window.__sdJustDropped = Date.now();
+  const fromIdx = __sdDragShotIdx;
+  __sdDragShotIdx = null;
+  if (fromIdx == null || fromIdx === targetIdx) return;
+  if (!currentShotDeskProject || !currentShotDeskProject.shots) return;
+  const shots = currentShotDeskProject.shots;
+  const fromPos = shots.findIndex(s => s.index === fromIdx);
+  const toPos = shots.findIndex(s => s.index === targetIdx);
+  if (fromPos === -1 || toPos === -1) return;
+  const prevOrder = shots.map(s => s.index);
+  const [moved] = shots.splice(fromPos, 1);
+  shots.splice(toPos, 0, moved);
+  renderShotDeskTimelineScreen();
+  showToast(`🔄 Đã đổi Shot ${fromIdx} sang vị trí Shot ${targetIdx}!`);
+  try {
+    const res = await apiFetch(`/api/shot-desk/projects/${encodeURIComponent(currentShotDeskProject.id)}/shots/reorder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: shots.map(s => s.index) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    showToast('✅ Đã lưu thứ tự mới lên server.');
+    // Server đã đánh số lại shot (index + URL frame/video mới) — nạp lại
+    // project để đồng bộ, thay vì tự đoán số mới ở local.
+    await onSelectShotDeskProject(currentShotDeskProject.id, false);
+  } catch (err) {
+    // Hoàn lại thứ tự cũ như TimelineEditor.persistReorder bên Tạo phim.
+    const byIdx = {};
+    currentShotDeskProject.shots.forEach(s => { byIdx[s.index] = s; });
+    currentShotDeskProject.shots = prevOrder.map(i => byIdx[i]).filter(Boolean);
+    renderShotDeskTimelineScreen();
+    showToast('❌ Không lưu được thứ tự mới: ' + err.message + ' — đã hoàn lại thứ tự cũ.', 'error');
+  }
+}
+
+function sdTimelineDragEnd(e) {
+  document.querySelectorAll('.sd-clip-block').forEach(el => el.classList.remove('sd-dragging', 'sd-drag-over'));
+  window.__sdDragging = false;
+  __sdDragShotIdx = null;
+}
+
+async function sdRerenderShot(shotIdx) {
+  if (!currentShotDeskProject) return;
+  try {
+    const res = await apiFetch(`/api/shot-desk/projects/${encodeURIComponent(currentShotDeskProject.id)}/shots/${shotIdx}/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ background: true }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    const s = currentShotDeskProject.shots.find(x => x.index === shotIdx);
+    if (s) {
+      s.status = 'rendering';
+      if (data.previous_clip) s.previous_clip = data.previous_clip;
+    }
+    renderShotDeskTimelineScreen();
+    showToast(`🔄 Đang render lại Shot ${shotIdx}… xong sẽ hiện so sánh A/B.`);
+  } catch (err) {
+    showToast('❌ Không render lại được Shot ' + shotIdx + ': ' + err.message, 'error');
+  }
+}
+
+function sdShotDeskAbHtml(s) {
+  const pid = currentShotDeskProject.id;
+  const oldPrompt = esc((s.previous_clip.prompt || '').slice(0, 80));
+  return `<div class="tl-ab-panel" style="margin-top:10px;">
+    <div class="tl-ab-title">🆚 So sánh A/B — Shot ${s.index} (bản mới vs bản cũ) <span class="tl-ab-note">Prompt cũ: ${oldPrompt}</span></div>
+    <div class="tl-ab-grid">
+      <div class="tl-ab-cell"><div class="tl-ab-label">✨ Bản mới</div>
+        <video controls preload="metadata" src="/api/shot-desk/projects/${encodeURIComponent(pid)}/shots/${s.index}/video" class="tl-ab-video" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"></video>
+        <div class="tl-ab-novid" style="display:none;">Không xem được bản mới.</div></div>
+      <div class="tl-ab-cell"><div class="tl-ab-label">📼 Bản cũ</div>
+        <video controls preload="metadata" src="/api/shot-desk/projects/${encodeURIComponent(pid)}/shots/${s.index}/previous-video" class="tl-ab-video" onerror="this.style.display='none';this.nextElementSibling.style.display='block'"></video>
+        <div class="tl-ab-novid" style="display:none;">Không xem được bản cũ.</div></div>
+    </div>
+    <div class="tl-ab-actions">
+      <button type="button" class="btn btn-primary btn-sm" onclick="sdKeepNewShot(${s.index})">✅ Giữ bản mới</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="sdRestoreOldShot(${s.index})">↩️ Quay lại bản cũ</button>
+    </div>
+  </div>`;
+}
+
+async function sdKeepNewShot(shotIdx) {
+  if (!currentShotDeskProject) return;
+  try {
+    const res = await apiFetch(`/api/shot-desk/projects/${encodeURIComponent(currentShotDeskProject.id)}/shots/${shotIdx}/discard-previous`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    const s = currentShotDeskProject.shots.find(x => x.index === shotIdx);
+    if (s) delete s.previous_clip;
+    renderShotDeskTimelineScreen();
+    showToast('✅ Đã giữ bản mới, xóa bản cũ.');
+  } catch (err) {
+    showToast('❌ ' + err.message, 'error');
+  }
+}
+
+async function sdRestoreOldShot(shotIdx) {
+  if (!currentShotDeskProject) return;
+  try {
+    const res = await apiFetch(`/api/shot-desk/projects/${encodeURIComponent(currentShotDeskProject.id)}/shots/${shotIdx}/restore-previous`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    const s = currentShotDeskProject.shots.find(x => x.index === shotIdx);
+    if (s) {
+      if (data.prompt != null) s.prompt = data.prompt;
+      if (data.previous_clip) s.previous_clip = data.previous_clip;
+      else delete s.previous_clip;
+    }
+    await onSelectShotDeskProject(currentShotDeskProject.id, false);
+    showToast('↩️ Đã quay lại bản cũ (bản mới vừa render thành bản cũ để đổi lại được).');
+  } catch (err) {
+    showToast('❌ ' + err.message, 'error');
   }
 }
 

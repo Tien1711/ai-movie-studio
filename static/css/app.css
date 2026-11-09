@@ -870,6 +870,9 @@ select option { background:var(--bg2); }
   transition: all .15s ease; cursor: pointer;
 }
 .sd-clip-block:hover { transform: translateY(-2px); border-color: var(--accent); }
+.sd-clip-block.sd-dragging { opacity: 0.45; border-style: dashed; }
+.sd-clip-block.sd-drag-over { border-color: var(--accent); background: rgba(99, 102, 241, 0.25); transform: translateY(-2px); }
+.sd-clip-block.sd-rendering { opacity: 0.6; }
 .sd-transition-pill {
   background: rgba(234, 179, 8, 0.15); border: 1px solid rgba(234, 179, 8, 0.3); color: var(--yellow);
   padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; white-space: nowrap;
