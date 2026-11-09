@@ -722,6 +722,9 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             voice_mode=req.voice_mode or "tts",
             timing=batch_timing,
             cancel_event=cancel_event,
+            # Snapshot nhân vật CỦA PHIM này (đã lưu ở create_movie) —
+            # scene nhắc tên ai thì dán đúng Character Block của người đó.
+            characters=job.get("characters") or copy.deepcopy(req.characters or []),
         )
 
         job["results"] = results
@@ -1099,6 +1102,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             progress_cb=retry_progress_cb,
             voice_mode=req.voice_mode or "tts",
             cancel_event=retry_cancel_event,
+            characters=job.get("characters") or copy.deepcopy(req.characters or []),
         )
 
         # Audit #8: hủy trong lúc retry -> dừng, không ghép lại phim.
@@ -1462,6 +1466,9 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
                 voice=req.voice,
                 progress_cb=single_cb,
                 voice_mode=req.voice_mode or "tts",
+                # Snapshot nhân vật CỦA PHIM này — render lại 1 shot vẫn
+                # dán đúng Character Block như render cả phim.
+                characters=job.get("characters") or copy.deepcopy(req.characters or []),
             )
 
         current_results = {r["index"]: r for r in job.get("results", [])}
@@ -2195,6 +2202,10 @@ from shot_desk import (
     update_shot_desk_project_settings,
     compose_shot_desk_timeline,
     export_shot_desk_zip,
+    reorder_shot_desk_shots,
+    save_previous_shot_clip,
+    restore_previous_shot_clip,
+    discard_previous_shot_clip,
     SHOT_DESK_DIR
 )
 
@@ -2516,6 +2527,21 @@ async def api_shot_desk_render_shot(
             return {"success": True, "message": f"Shot {shot_index} đang được xử lý, đã chặn request trùng lặp!", "status": "rendering"}
         active_set.add(shot_index)
 
+        # Timeline Editor Shot Desk (nhóm 2): render lại 1 shot thì lưu clip
+        # cũ sang previous/ (giữ tối đa 1 bản) để so sánh A/B / quay lại —
+        # tái dùng endpoint render sẵn có, không thêm endpoint rerender riêng.
+        # Nạp lại proj sau khi lưu để target mang previous_clip mới nhất
+        # (tránh save ở dưới đè mất meta).
+        prev_meta = None
+        try:
+            prev_meta = save_previous_shot_clip(project_id, shot_index)
+        except Exception as exc:
+            print(f"[ShotDesk] Không lưu được clip cũ shot {shot_index}: {exc}")
+        if prev_meta is not None:
+            proj = get_shot_desk_project(project_id) or proj
+            target = next((s for s in proj.get("shots", [])
+                           if s["index"] == shot_index), target)
+
         if bg:
             target["status"] = "rendering"
             target["error"] = None
@@ -2537,7 +2563,8 @@ async def api_shot_desk_render_shot(
                     ACTIVE_SHOT_TASKS.get(project_id, set()).discard(shot_index)
 
             asyncio.create_task(_bg_run())
-            return {"success": True, "message": f"Đang render Shot {shot_index} trong nền...", "status": "rendering"}
+            return {"success": True, "message": f"Đang render Shot {shot_index} trong nền...", "status": "rendering",
+                    "previous_clip": prev_meta}
         else:
             try:
                 shot = await render_single_shot_desk(
@@ -2548,13 +2575,111 @@ async def api_shot_desk_render_shot(
                     use_compliance=use_compliance,
                     custom_prompt=custom_prompt,
                 )
-                return {"success": True, "shot": shot}
+                return {"success": True, "shot": shot, "previous_clip": prev_meta}
             finally:
                 ACTIVE_SHOT_TASKS.get(project_id, set()).discard(shot_index)
     except Exception as e:
         import traceback
         traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+class ShotDeskReorderRequest(BaseModel):
+    order: List[int] = Field(min_length=1, max_length=200)
+
+
+@app.post("/api/shot-desk/projects/{project_id}/shots/reorder")
+def api_shot_desk_reorder_shots(project_id: str, payload: ShotDeskReorderRequest):
+    """Đổi thứ tự các shot (Timeline Editor Shot Desk) — cùng cơ chế với
+    POST /api/jobs/{id}/scenes/reorder của panel Tạo phim (PR #2).
+    Body: {"order": [3, 1, 2]} = chỉ số CŨ theo thứ tự MỚI (hoán vị 1..N).
+    Đổi tên thư mục/file shot + clip/audio theo chỉ số mới, đánh dấu final cũ."""
+    get_safe_project_dir(project_id)
+    proj = get_shot_desk_project(project_id)
+    if not proj:
+        return JSONResponse({"error": "Không tìm thấy dự án"}, status_code=404)
+    if ACTIVE_SHOT_TASKS.get(project_id) or project_id in ACTIVE_SHOT_DESK_COMPOSE:
+        return JSONResponse(
+            {"error": "Dự án đang render hoặc đang dựng phim — không đổi được thứ tự lúc này."},
+            status_code=409)
+    try:
+        new_proj = reorder_shot_desk_shots(project_id, list(payload.order))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    total_duration = sum(int(s.get("duration") or 10) for s in new_proj.get("shots", []))
+    return {
+        "success": True,
+        "order": list(payload.order),
+        "total_duration": total_duration,
+        "final_stale": True,
+        "shots": [{"index": s["index"], "prompt": s.get("prompt", ""),
+                   "duration": s.get("duration")} for s in new_proj.get("shots", [])],
+    }
+
+
+@app.get("/api/shot-desk/projects/{project_id}/shots/{shot_index}/previous-video")
+def api_shot_desk_get_shot_previous_video(project_id: str, shot_index: int):
+    """Stream bản clip CŨ của 1 shot Shot Desk (so sánh A/B sau render lại)."""
+    p = resolve_safe_project_path(project_id, f"previous/shot_{shot_index:03d}_clip.mp4")
+    if not p.exists():
+        p = resolve_safe_project_path(project_id, f"previous/shot_{shot_index:03d}_raw.mp4")
+    if not p.exists() or not p.is_file():
+        return JSONResponse({"error": "Shot này không có bản clip cũ"}, status_code=404)
+    return FileResponse(str(p), media_type="video/mp4")
+
+
+@app.post("/api/shot-desk/projects/{project_id}/shots/{shot_index}/restore-previous")
+def api_shot_desk_restore_previous(project_id: str, shot_index: int):
+    """Quay lại bản cũ: hoán đổi clip hiện tại <-> bản previous (bản mới vừa
+    render thành bản cũ để vẫn đổi lại được). Khôi phục cả prompt cũ."""
+    get_safe_project_dir(project_id)
+    proj = get_shot_desk_project(project_id)
+    if not proj:
+        return JSONResponse({"error": "Không tìm thấy dự án"}, status_code=404)
+    target = next((s for s in proj.get("shots", [])
+                   if s.get("index") == shot_index), None)
+    if not target:
+        return JSONResponse({"error": f"Không tìm thấy Shot {shot_index}"}, status_code=404)
+    if shot_index in ACTIVE_SHOT_TASKS.get(project_id, set()):
+        return JSONResponse({"error": "Shot đang render — hãy đợi xong rồi thử lại."}, status_code=409)
+    if not target.get("previous_clip"):
+        return JSONResponse({"error": f"Shot {shot_index} không có bản clip cũ để quay lại"}, status_code=404)
+    try:
+        new_prev = restore_previous_shot_clip(project_id, shot_index)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    proj = get_shot_desk_project(project_id)
+    shot = next((s for s in proj.get("shots", [])
+                 if s.get("index") == shot_index), target)
+    return {
+        "success": True,
+        "shot_index": shot_index,
+        "prompt": shot.get("prompt", ""),
+        "previous_clip": new_prev,
+        "final_stale": True,
+    }
+
+
+@app.post("/api/shot-desk/projects/{project_id}/shots/{shot_index}/discard-previous")
+def api_shot_desk_discard_previous(project_id: str, shot_index: int):
+    """Giữ bản mới: xóa file + metadata bản cũ (xác nhận A/B xong)."""
+    get_safe_project_dir(project_id)
+    proj = get_shot_desk_project(project_id)
+    if not proj:
+        return JSONResponse({"error": "Không tìm thấy dự án"}, status_code=404)
+    target = next((s for s in proj.get("shots", [])
+                   if s.get("index") == shot_index), None)
+    if not target:
+        return JSONResponse({"error": f"Không tìm thấy Shot {shot_index}"}, status_code=404)
+    if shot_index in ACTIVE_SHOT_TASKS.get(project_id, set()):
+        return JSONResponse({"error": "Shot đang render — hãy đợi xong rồi thử lại."}, status_code=409)
+    if not target.get("previous_clip"):
+        return JSONResponse({"error": f"Shot {shot_index} không có bản clip cũ để xóa"}, status_code=404)
+    try:
+        discard_previous_shot_clip(project_id, shot_index)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"success": True, "shot_index": shot_index}
 
 
 class RenderAllRequest(BaseModel):

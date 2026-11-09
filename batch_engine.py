@@ -833,6 +833,110 @@ def apply_style_locks(prompt: str, style_locks: Optional[Dict[str, str]] = None)
     return ", ".join(parts)
 
 
+# ── Nhân vật CỦA PHIM (snapshot job["characters"], PR #8) ───────────────────
+# film_pipeline/run_batch trước đây không đọc snapshot này nên scene nhắc tên
+# nhân vật vẫn render bằng prompt trần (dễ trôi ngoại hình). Các hàm dưới
+# đây CHỈ đọc snapshot của đúng job/phim đang render — không bao giờ chạm
+# thư viện toàn cục _characters.json — và dán Character Block NGUYÊN VĂN
+# (không paraphrase, không dịch) vào prompt của scene nhắc tới nhân vật đó.
+_CHARACTER_BLOCK_KEYS = ("character_block", "block", "description")
+
+
+def character_block_of(char: Dict[str, Any]) -> str:
+    """Trích Character Block (text) của 1 nhân vật trong snapshot.
+
+    Thứ tự ưu tiên: character_block > block > description > character_sheet
+    (dạng chuỗi, tương thích snapshot cũ). character_sheet dạng dict chứa
+    URL ảnh các góc thì KHÔNG phải block text nên bỏ qua. Trả "" khi không
+    có block text nào.
+    """
+    if not isinstance(char, dict):
+        return ""
+    for key in _CHARACTER_BLOCK_KEYS:
+        val = char.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    sheet = char.get("character_sheet")
+    if isinstance(sheet, str) and sheet.strip():
+        return sheet.strip()
+    return ""
+
+
+def _name_matches(text_lower: str, name: str) -> bool:
+    """Tên/alias có xuất hiện trong text không (khớp biên từ, không phân
+    biệt hoa/thường; tránh 'Lan' khớp nhầm trong 'Lank...' hay 'Phong'
+    khớp nhầm trong 'Phong ba')."""
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    return re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)",
+                     text_lower) is not None
+
+
+def match_film_characters(scene_text: str,
+                          characters: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Tìm các nhân vật trong snapshot mà scene_text nhắc tới (tên hoặc
+    alias). Xếp tên dài trước để tên dài thắng tên ngắn trùng một phần
+    (vd 'Lan Nữ' trước 'Lan'). Trả về list nhân vật khớp (mỗi nhân vật
+    tối đa 1 lần), giữ thứ tự ưu tiên tên dài."""
+    if not scene_text or not characters:
+        return []
+    lowered = scene_text.lower()
+    scored = []
+    for ch in characters:
+        if not isinstance(ch, dict):
+            continue
+        names = [str(ch.get("name") or "")]
+        aliases = ch.get("aliases") or []
+        if isinstance(aliases, (list, tuple)):
+            names.extend(str(a) for a in aliases)
+        best = 0
+        for n in names:
+            if _name_matches(lowered, n):
+                best = max(best, len(n.strip()))
+        if best > 0:
+            scored.append((best, ch))
+    scored.sort(key=lambda item: -item[0])
+    return [ch for _, ch in scored]
+
+
+def apply_film_characters(prompt: str, scene: Dict[str, Any],
+                          characters: Optional[List[Dict[str, Any]]]) -> str:
+    """Dán Character Block NGUYÊN VĂN của các nhân vật được nhắc trong scene
+    vào cuối prompt. Scene không nhắc ai, snapshot rỗng, hoặc nhân vật
+    không có block text -> trả prompt nguyên vẹn. Block đã có sẵn trong
+    prompt (vd user tự dán) thì không dán trùng lần nữa."""
+    if not characters:
+        return prompt
+    parts = [str(scene.get("prompt") or ""), str(scene.get("voiceover") or "")]
+    for seg in scene.get("voice_segments") or []:
+        if isinstance(seg, dict):
+            parts.append(str(seg.get("character") or seg.get("speaker") or ""))
+            parts.append(str(seg.get("text") or ""))
+    if scene.get("character"):
+        parts.append(str(scene.get("character") or ""))
+    parts.append(prompt)
+    scene_text = " ".join(p for p in parts if p)
+    matched = match_film_characters(scene_text, characters)
+    if not matched:
+        return prompt
+    out = prompt.rstrip()
+    lowered = out.lower()
+    for ch in matched:
+        block = character_block_of(ch)
+        if not block:
+            continue
+        # Block đã có trong prompt (dù chỉ phần đầu 40 ký tự) -> khỏi dán trùng.
+        probe = block[:40].lower()
+        if probe and probe in lowered:
+            continue
+        name = str(ch.get("name") or "").strip()
+        label = f"Character [{name}]" if name else "Character"
+        out = f"{out}, {label}: {block}"
+        lowered = out.lower()
+    return out
+
+
 async def generate_keyframe_image(
     prompt: str,
     base_url: str,
@@ -1101,6 +1205,7 @@ async def process_scene(
     voice_mode: str = "tts",
     cancel_event: Optional[asyncio.Event] = None,
     prefetch_task: Optional[asyncio.Task] = None,
+    characters: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Pipeline xử lý 1 cảnh độc lập với cơ chế kiểm soát retry thông minh (Non-Spamming):
@@ -1163,6 +1268,13 @@ async def process_scene(
             audio_path = os.path.join(output_dir, "audio", f"scene_{idx:03d}.mp3") if not is_ai_voice else None
             video_path = os.path.join(output_dir, "scenes", f"scene_{idx:03d}.mp4")
             tmp_seg_dir = os.path.join(output_dir, "audio", f"segs_{idx:03d}")
+
+            # Dán Character Block NGUYÊN VĂN của nhân vật CỦA PHIM này mà
+            # scene nhắc tới (snapshot job["characters"] — không dùng thư
+            # viện toàn cục). Dán SAU sanitize (sanitize chạy trong
+            # build_scene_prompt) để bộ làm sạch không sửa block
+            # (verbatim là yêu cầu khóa nhân vật của Tiến).
+            prompt = apply_film_characters(prompt, scene, characters)
 
             if prompt != raw_prompt:
                 scene["prompt"] = prompt
@@ -1645,6 +1757,7 @@ async def run_batch(
     voice_mode: str = "tts",
     timing: Optional[Dict[str, float]] = None,
     cancel_event: Optional[asyncio.Event] = None,
+    characters: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Chạy hàng loạt tất cả các cảnh với hỗ trợ kỹ thuật First/Last Frame Chaining & Fallback:
@@ -1670,6 +1783,10 @@ async def run_batch(
     - Prefetch KHÔNG gọi API video, KHÔNG đụng reference_image/last
       frame, KHÔNG render sớm; TTS mỗi cảnh chỉ sinh đúng 1 lần và
       tts_s của nó vẫn được cộng vào timing (xem summarize_batch_timing).
+    - characters: snapshot nhân vật CỦA PHIM này (job["characters"], PR #8).
+      Scene nhắc tên nhân vật nào thì process_scene dán Character Block
+      nguyên văn của đúng nhân vật đó vào prompt — không dùng thư viện
+      toàn cục _characters.json.
     """
     batch_t0 = time.monotonic()
 
@@ -1813,6 +1930,7 @@ async def run_batch(
                         output_dir, voice, progress_cb, style_locks=style_locks,
                         voice_mode=voice_mode, cancel_event=cancel_event,
                         prefetch_task=pf_task,
+                        characters=characters,
                     )
                 except asyncio.CancelledError:
                     # Hủy là hủy thật (audit #8): dọn luôn task prefetch
@@ -1951,6 +2069,7 @@ async def run_batch(
                     output_dir, voice, progress_cb, style_locks=style_locks,
                     voice_mode=voice_mode, cancel_event=cancel_event,
                     prefetch_task=pf_task,
+                    characters=characters,
                 )
             except asyncio.CancelledError:
                 raise

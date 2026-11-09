@@ -1111,6 +1111,262 @@ def update_shot_desk_project_settings(project_id: str, settings: Dict[str, Any])
         return {"success": True, "project": proj}
 
 
+# ── 3b. Timeline Editor cho Shot Desk: reorder + so sánh A/B ─────────────────
+# Cùng cơ chế với Timeline Editor của panel Tạo phim (PR #2): đổi thứ tự shot
+# (đổi tên thư mục/file theo chỉ số mới), render lại 1 shot thì lưu clip cũ
+# sang previous/ (giữ tối đa 1 bản) để so sánh A/B / quay lại. File clip
+# Shot Desk: clips/shot_XXX_clip.mp4 (+_raw), audio/shot_XXX_tts.mp3,
+# frame: shots/shot_XXX/*.
+
+def _sd_shot_disk_files(proj_dir: Path, idx: int) -> Dict[str, Path]:
+    """Mọi file trên đĩa gắn với 1 shot (đường dẫn tuyệt đối)."""
+    n = f"{idx:03d}"
+    return {
+        "shot_dir": proj_dir / "shots" / f"shot_{n}",
+        "clip": proj_dir / "clips" / f"shot_{n}_clip.mp4",
+        "raw": proj_dir / "clips" / f"shot_{n}_raw.mp4",
+        "audio": proj_dir / "audio" / f"shot_{n}_tts.mp3",
+        "prev_clip": proj_dir / "previous" / f"shot_{n}_clip.mp4",
+        "prev_raw": proj_dir / "previous" / f"shot_{n}_raw.mp4",
+        "prev_audio": proj_dir / "previous" / f"shot_{n}_tts.mp3",
+    }
+
+
+def _sd_rename_shot_files(proj_dir: Path, mapping: Dict[int, int]) -> None:
+    """Đổi tên file/thư mục của các shot theo mapping old_idx -> new_idx.
+    2 pha qua thư mục staging để không va chạm khi hoán đổi (vd 1<->2).
+    File nào không tồn tại thì bỏ qua; lỗi 1 file chỉ log, không dừng."""
+    staging = proj_dir / ".reorder_tmp"
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        staged: Dict[str, Path] = {}
+        for old_idx, new_idx in mapping.items():
+            if old_idx == new_idx:
+                continue
+            files = _sd_shot_disk_files(proj_dir, old_idx)
+            # Thư mục shot (frame) dời nguyên thư mục.
+            src_dir = files["shot_dir"]
+            if src_dir.is_dir():
+                dst_stage = staging / f"shotdir_{old_idx}"
+                try:
+                    shutil.move(str(src_dir), str(dst_stage))
+                    staged[f"shotdir_{old_idx}"] = dst_stage
+                except Exception as exc:
+                    print(f"[ShotDesk Reorder] Không dời được {src_dir}: {exc}")
+            for role in ("clip", "raw", "audio", "prev_clip", "prev_raw", "prev_audio"):
+                src = files[role]
+                if src.is_file():
+                    dst_stage = staging / f"{role}_{old_idx}"
+                    try:
+                        shutil.move(str(src), str(dst_stage))
+                        staged[f"{role}_{old_idx}"] = dst_stage
+                    except Exception as exc:
+                        print(f"[ShotDesk Reorder] Không dời được {src}: {exc}")
+        for key, stage_path in staged.items():
+            role, old_idx_s = key.rsplit("_", 1)
+            new_idx = mapping[int(old_idx_s)]
+            if role == "shotdir":
+                dst = proj_dir / "shots" / f"shot_{new_idx:03d}"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                dst = _sd_shot_disk_files(proj_dir, new_idx)[role]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(stage_path), str(dst))
+            except Exception as exc:
+                print(f"[ShotDesk Reorder] Không đặt lại được {stage_path} -> {dst}: {exc}")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _sd_reindex_shot(shot: Dict[str, Any], project_id: str,
+                     old_idx: int, new_idx: int) -> None:
+    """Đổi index + đường dẫn/URL gắn với shot sau reorder (frame rel path,
+    frame URL, video/audio URL đi theo chỉ số mới)."""
+    shot["index"] = new_idx
+    old_seg = f"shots/shot_{old_idx:03d}"
+    new_seg = f"shots/shot_{new_idx:03d}"
+    for k_file, k_url in (("first_frame", "first_frame_url"),
+                          ("middle_frame", "middle_frame_url"),
+                          ("last_frame", "last_frame_url")):
+        ref = shot.get(k_file)
+        if isinstance(ref, str) and old_seg in ref:
+            shot[k_file] = ref.replace(old_seg, new_seg)
+        if shot.get(k_url):
+            shot[k_url] = (f"/api/shot-desk/projects/{project_id}/shots/"
+                           f"{new_idx}/frames/{Path(shot.get(k_file) or '').name}")
+    if shot.get("video_url"):
+        shot["video_url"] = (f"/api/shot-desk/projects/{project_id}/shots/"
+                             f"{new_idx}/video")
+    if shot.get("audio_url"):
+        shot["audio_url"] = (f"/api/shot-desk/projects/{project_id}/shots/"
+                             f"{new_idx}/audio")
+
+
+def reorder_shot_desk_shots(project_id: str,
+                            order: List[int]) -> Dict[str, Any]:
+    """Đổi thứ tự các shot của dự án Shot Desk.
+    order: chỉ số CŨ theo thứ tự MỚI, phải là hoán vị của 1..N.
+    Đổi tên file/thư mục theo chỉ số mới, đánh dấu final cũ (final_stale).
+    Raise ValueError khi project không có hoặc order không hợp lệ."""
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError(f"Không tìm thấy dự án Shot Desk '{project_id}'")
+        shots = proj.get("shots", [])
+        n = len(shots)
+        if len(order) != n or sorted(order) != list(range(1, n + 1)):
+            raise ValueError(
+                f"Thứ tự không hợp lệ: phải là hoán vị của 1..{n} "
+                "(đủ số lượng, không trùng, không thiếu)")
+        proj_dir = SHOT_DESK_DIR / project_id
+        mapping = {old_idx: new_pos
+                   for new_pos, old_idx in enumerate(order, start=1)}
+        _sd_rename_shot_files(proj_dir, mapping)
+        old_shots = sorted(shots, key=lambda s: s.get("index", 0))
+        by_index = {s.get("index"): s for s in old_shots}
+        new_shots = []
+        for new_pos, old_idx in enumerate(order, start=1):
+            shot = by_index[old_idx]
+            _sd_reindex_shot(shot, project_id, old_idx, new_pos)
+            new_shots.append(shot)
+        proj["shots"] = new_shots
+        proj["total_duration"] = sum(
+            _parse_shot_duration(s.get("duration", 10), default=10)
+            for s in new_shots)
+        proj["final_stale"] = True
+        save_shot_desk_project(proj)
+        return proj
+
+
+def save_previous_shot_clip(project_id: str,
+                            shot_index: int) -> Optional[Dict[str, Any]]:
+    """Sao chép clip/audio hiện tại của shot sang previous/ (giữ tối đa 1
+    bản cũ — bản cũ hơn nữa bị xóa). Trả về metadata previous_clip, hoặc
+    None nếu shot chưa có file nào."""
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError(f"Không tìm thấy dự án Shot Desk '{project_id}'")
+        shot = next((s for s in proj.get("shots", [])
+                     if s.get("index") == shot_index), None)
+        if not shot:
+            raise ValueError(f"Không tìm thấy Shot {shot_index}")
+        proj_dir = SHOT_DESK_DIR / project_id
+        files = _sd_shot_disk_files(proj_dir, shot_index)
+        prev_dir = proj_dir / "previous"
+        prev_dir.mkdir(parents=True, exist_ok=True)
+        for role in ("prev_clip", "prev_raw", "prev_audio"):
+            if files[role].is_file():
+                try:
+                    files[role].unlink()
+                except Exception:
+                    pass
+        copied = []
+        for role in ("clip", "raw", "audio"):
+            src = files[role]
+            if src.is_file():
+                try:
+                    shutil.copy2(str(src), str(files[f"prev_{role}"]))
+                    copied.append(files[f"prev_{role}"].name)
+                except Exception as exc:
+                    print(f"[ShotDesk] Không sao chép được {src}: {exc}")
+        if not copied:
+            return None
+        meta = {
+            "prompt": shot.get("prompt", ""),
+            "created_at": time.time(),
+            "has_video": any(n.endswith(".mp4") for n in copied),
+            "files": copied,
+        }
+        shot["previous_clip"] = meta
+        save_shot_desk_project(proj)
+        return meta
+
+
+def restore_previous_shot_clip(project_id: str,
+                               shot_index: int) -> Optional[Dict[str, Any]]:
+    """Quay lại bản cũ: hoán đổi clip hiện tại <-> bản previous (bản mới vừa
+    render thành bản cũ để vẫn đổi lại được). Khôi phục cả prompt cũ.
+    Trả về metadata previous_clip MỚI sau hoán đổi, hoặc None nếu trước đó
+    không có clip hiện tại. Raise ValueError khi không có bản cũ."""
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError(f"Không tìm thấy dự án Shot Desk '{project_id}'")
+        shot = next((s for s in proj.get("shots", [])
+                     if s.get("index") == shot_index), None)
+        if not shot:
+            raise ValueError(f"Không tìm thấy Shot {shot_index}")
+        if not shot.get("previous_clip"):
+            raise ValueError(f"Shot {shot_index} không có bản clip cũ để quay lại")
+        proj_dir = SHOT_DESK_DIR / project_id
+        files = _sd_shot_disk_files(proj_dir, shot_index)
+        staging = proj_dir / ".restore_tmp"
+        staging.mkdir(parents=True, exist_ok=True)
+        try:
+            staged = []
+            for role in ("clip", "raw", "audio"):
+                src = files[role]
+                if src.is_file():
+                    shutil.move(str(src), str(staging / src.name))
+                    staged.append(src.name)
+            for role in ("clip", "raw", "audio"):
+                src = files[f"prev_{role}"]
+                if src.is_file():
+                    dst = files[role]
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(dst))
+            for name in staged:
+                shutil.move(str(staging / name), str(proj_dir / "previous" / name))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        prev_prompt = (shot.get("previous_clip") or {}).get("prompt", "")
+        current_prompt = shot.get("prompt", "")
+        shot["prompt"] = prev_prompt
+        shot["status"] = "review"
+        proj["final_stale"] = True
+        if not staged:
+            shot.pop("previous_clip", None)
+            save_shot_desk_project(proj)
+            return None
+        meta = {
+            # Bản vừa bị thay ra (clip mới) thành bản cũ để đổi lại được.
+            "prompt": current_prompt,
+            "created_at": time.time(),
+            "has_video": any(n.endswith(".mp4") for n in staged),
+            "files": staged,
+        }
+        shot["previous_clip"] = meta
+        save_shot_desk_project(proj)
+        return meta
+
+
+def discard_previous_shot_clip(project_id: str, shot_index: int) -> bool:
+    """Giữ bản mới: xóa file + metadata bản cũ. Trả False khi không có bản cũ."""
+    with get_sync_project_lock(project_id):
+        proj = get_shot_desk_project(project_id)
+        if not proj:
+            raise ValueError(f"Không tìm thấy dự án Shot Desk '{project_id}'")
+        shot = next((s for s in proj.get("shots", [])
+                     if s.get("index") == shot_index), None)
+        if not shot:
+            raise ValueError(f"Không tìm thấy Shot {shot_index}")
+        if not shot.get("previous_clip"):
+            return False
+        proj_dir = SHOT_DESK_DIR / project_id
+        files = _sd_shot_disk_files(proj_dir, shot_index)
+        for role in ("prev_clip", "prev_raw", "prev_audio"):
+            if files[role].is_file():
+                try:
+                    files[role].unlink()
+                except Exception:
+                    pass
+        shot.pop("previous_clip", None)
+        save_shot_desk_project(proj)
+        return True
+
+
 # ── 4. Timeline Hậu Kỳ: Ghép Các Shot Đã Duyệt Thành Phim Hoàn Chỉnh ──────────
 
 def compose_shot_desk_timeline(

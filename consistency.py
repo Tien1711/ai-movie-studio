@@ -14,6 +14,8 @@ không import app/batch_engine nên test được độc lập, không sợ circ
 
 from __future__ import annotations
 
+import difflib
+import re
 from typing import Any, Dict, List, Optional
 
 # Clip API video trả về dài 10s/cảnh — scene dài hơn sẽ bị loop/cắt.
@@ -47,6 +49,188 @@ PLACE_KEYWORDS = {
     "hospital", "house", "market", "river", "desert", "snow", "street",
     "office", "kitchen", "temple", "cave",
 }
+
+
+# ── Preflight cầu nối v2: trích thực thể thời gian/địa điểm ───────────────
+# v1 chỉ khớp từ khóa (TIME_GROUPS/PLACE_KEYWORDS). v2 trích thực thể thật
+# từ prompt rồi so sánh 2 cảnh kề nhau:
+#   - thời gian: nhóm buổi trong ngày + độ lệch ngày ("hôm sau", "tuần sau"...
+#     "sáng" -> "sáng hôm sau" là nhảy thời gian dù cùng buổi sáng);
+#   - địa điểm: từ khóa địa điểm + danh từ riêng sau giới từ (tại/ở/trong...)
+#     + cụm từ viết hoa nhiều từ (Hà Nội, Cổ Loa) — so bằng tập hợp đã
+#     chuẩn hóa, và so khớp chuỗi tương đồng (difflib) để "rừng trúc" vs
+#     "rừng tre" không bị tính là đổi bối cảnh.
+# Heuristic từ khóa v1 được GIỮ làm fallback khi không trích được thực thể
+# ở một trong hai cảnh (vd chỉ có "trong nhà"/"ngoài trời").
+
+# Cụm chỉ độ lệch ngày (dài trước để "ngày hôm sau" thắng "hôm sau").
+# Giá trị: số ngày lệch so với "hôm nay" của cảnh (âm = quá khứ).
+DAY_OFFSET_MARKERS = (
+    ("vài ngày sau", 3),
+    ("ngày hôm sau", 1),
+    ("ngày hôm trước", -1),
+    ("hôm sau", 1),
+    ("ngày sau", 1),
+    ("tuần sau", 7),
+    ("tháng sau", 30),
+    ("năm sau", 365),
+    ("hôm trước", -1),
+    ("hôm qua", -1),
+)
+
+# Giới từ mở đầu cụm địa điểm (VI + EN).
+_PLACE_PREPOSITIONS = (
+    "tại", "ở", "trong", "ngoài", "trên", "dưới", "giữa", "về", "đến",
+    "tới", "từ", "ra", "vào", "qua", "at", "in", "on",
+)
+# Chú ý: KHÔNG dùng lớp ký tự [A-ZÀ-Ỹ] để nhận diện chữ hoa — dải Unicode
+# đó chứa cả chữ thường có dấu (ố, ồ, ộ...). Chữ hoa được kiểm bằng
+# str.isupper() trên từng token (xem _leading_capital_run).
+_PLACE_PREP_RE = re.compile(
+    r"(?:^|[\s,;:.])"
+    r"(?:" + "|".join(_PLACE_PREPOSITIONS) + r")\s+"
+    r"([^\s,;:.]+(?:\s+[^\s,;:.]+)*)",
+    re.IGNORECASE,
+)
+
+# Từ viết hoa không phải địa điểm (đại từ/xưng hô) — loại khỏi thực thể.
+_NON_PLACE_CAPITALIZED = {
+    "tôi", "anh", "chị", "em", "ông", "bà", "cô", "chú", "bác", "bạn",
+    "mình", "ta", "chúng ta", "mọi người", "ai",
+}
+
+
+def _extract_time(text: str) -> Optional[Dict[str, Any]]:
+    """Trích thực thể thời gian: {"group": nhóm buổi|None, "day": lệch ngày}.
+
+    Trả None khi prompt không nhắc gì về thời gian (để fallback quyết)."""
+    lowered = text.lower()
+    group = _time_group(text)
+    day = 0
+    for phrase, offset in DAY_OFFSET_MARKERS:
+        if phrase in lowered:
+            day = offset
+            break
+    if group is None and day == 0:
+        return None
+    return {"group": group, "day": day}
+
+
+def _time_label(t: Dict[str, Any]) -> str:
+    label = t.get("group") or ""
+    day = t.get("day") or 0
+    if day > 0:
+        label = (label + " hôm sau") if label else "hôm sau"
+    elif day < 0:
+        label = (label + " hôm trước") if label else "hôm trước"
+    return label.strip() or "không rõ thời gian"
+
+
+def _time_changed(t_prev: Optional[Dict[str, Any]],
+                  t_cur: Optional[Dict[str, Any]]) -> Optional[str]:
+    """So sánh 2 thực thể thời gian. Trả chuỗi mô tả thay đổi, hoặc None
+    khi không kết luận được đổi (thiếu dữ kiện ở một bên / giống nhau)."""
+    if not t_prev or not t_cur:
+        return None
+    g_prev, g_cur = t_prev.get("group"), t_cur.get("group")
+    d_prev, d_cur = t_prev.get("day") or 0, t_cur.get("day") or 0
+    if g_prev and g_cur:
+        if g_prev != g_cur or d_prev != d_cur:
+            return (f"thời gian đổi từ '{_time_label(t_prev)}' "
+                    f"sang '{_time_label(t_cur)}'")
+        return None
+    if d_prev != d_cur:
+        return (f"thời gian đổi từ '{_time_label(t_prev)}' "
+                f"sang '{_time_label(t_cur)}'")
+    return None
+
+
+def _normalize_place_entity(raw: str) -> str:
+    return re.sub(r"\s+", " ", raw.strip().lower().strip(".,;:!?()\"'"))
+
+
+def _leading_capital_run(phrase: str) -> str:
+    """Chuỗi các từ đầu cụm mà từ nào cũng bắt đầu bằng chữ hoa thật
+    (str.isupper) — vd 'Hà Nội buổi chiều' -> 'Hà Nội'."""
+    run = []
+    for w in phrase.split():
+        if w and w[0].isupper():
+            run.append(w)
+        else:
+            break
+    return " ".join(run)
+
+
+def _extract_places(text: str, exclude: frozenset = frozenset()) -> set:
+    """Trích thực thể địa điểm: từ khóa địa điểm + danh từ riêng sau giới
+    từ + cụm viết hoa nhiều từ không ở đầu câu. `exclude`: tên nhân vật
+    (để 'Lan' không bị tính là địa điểm)."""
+    found = set(_places(text))
+    for m in _PLACE_PREP_RE.finditer(text):
+        ent = _normalize_place_entity(_leading_capital_run(m.group(1)))
+        if ent and ent not in exclude and ent not in _NON_PLACE_CAPITALIZED:
+            found.add(ent)
+    for sentence in re.split(r"[.!?\n]+", text):
+        tokens = re.findall(r"[^\s,;:.!?()\"']+", sentence.strip())
+        if len(tokens) < 2:
+            continue
+        # Bỏ từ đầu câu (viết hoa do ngữ pháp), quét cụm viết hoa còn lại.
+        rest = tokens[1:]
+        i = 0
+        while i < len(rest):
+            if rest[i] and rest[i][0].isupper():
+                j = i
+                while j < len(rest) and rest[j] and rest[j][0].isupper():
+                    j += 1
+                ent = _normalize_place_entity(" ".join(rest[i:j]))
+                words = ent.split()
+                if ent and ent not in exclude \
+                        and ent not in _NON_PLACE_CAPITALIZED:
+                    # Cụm 1 từ viết hoa giữa câu vẫn có thể là tên người —
+                    # chỉ nhận khi có trong danh sách địa điểm hoặc cụm
+                    # >= 2 từ (tên riêng địa danh thường nhiều từ: Hà Nội,
+                    # Cổ Loa, Trúc Lâm).
+                    if len(words) >= 2 or ent in PLACE_KEYWORDS:
+                        found.add(ent)
+                i = j
+            else:
+                i += 1
+    return found
+
+
+def _place_similarity(a: str, b: str) -> float:
+    """Độ tương đồng chuỗi 2 thực thể địa điểm (0..1)."""
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _places_changed(prev_places: set, cur_places: set) -> bool:
+    """Hai tập thực thể địa điểm có khác nhau thật không? Giống nhau khi
+    giao nhau, hoặc khi thực thể gần nhất đủ tương đồng (>= 0.5, vd
+    'rừng trúc' vs 'rừng tre')."""
+    if not prev_places or not cur_places:
+        return False
+    if prev_places & cur_places:
+        return False
+    best = max((_place_similarity(a, b) for a in prev_places for b in cur_places),
+               default=0.0)
+    return best < 0.5
+
+
+def _character_names_to_exclude(req: Dict[str, Any]) -> frozenset:
+    """Tên + alias nhân vật (lowercase) để loại khỏi thực thể địa điểm."""
+    names = set()
+    for ch in req.get("characters") or []:
+        if isinstance(ch, dict):
+            if ch.get("name"):
+                names.add(str(ch["name"]).strip().lower())
+            for al in ch.get("aliases") or []:
+                if al:
+                    names.add(str(al).strip().lower())
+    for scene in req.get("scenes") or []:
+        for seg in scene.get("voice_segments") or []:
+            if isinstance(seg, dict) and seg.get("character"):
+                names.add(str(seg["character"]).strip().lower())
+    return frozenset(n for n in names if n)
 
 
 def _check(level: str, code: str, message: str, suggestion: str = "",
@@ -206,25 +390,43 @@ def run_consistency_checks(req: Dict[str, Any],
             "nhân vật/bối cảnh. Bật 'Đồng nhất tối đa' để ép nối tiếp."))
 
     # ── 4. bridge (warning): nhảy thời gian/địa điểm giữa 2 cảnh liên tiếp ──
-    # Heuristic từ khóa, chưa hiểu ngữ nghĩa sâu: chỉ cảnh báo khi phát hiện
-    # rõ ràng (đổi nhóm thời gian, đổi trong/ngoài nhà, hoặc đổi địa điểm).
+    # v2: trích thực thể thời gian/địa điểm từ prompt 2 cảnh kề nhau rồi so
+    # sánh (kèm so khớp chuỗi tương đồng cho địa điểm). Không trích được
+    # thực thể thì GIỮ heuristic từ khóa v1 làm fallback.
     ordered = sorted(scenes, key=lambda s: s.get("index", 0))
+    exclude_names = _character_names_to_exclude(req)
     for prev, cur in zip(ordered, ordered[1:]):
         prev_text, cur_text = _scene_text(prev), _scene_text(cur)
         prev_idx, cur_idx = prev.get("index"), cur.get("index")
         reason = ""
-        if _time_group(prev_text) and _time_group(cur_text) \
-                and _time_group(prev_text) != _time_group(cur_text):
-            reason = (f"thời gian đổi từ '{_time_group(prev_text)}' "
-                      f"sang '{_time_group(cur_text)}'")
-        elif _indoor_outdoor(prev_text) and _indoor_outdoor(cur_text) \
-                and _indoor_outdoor(prev_text) != _indoor_outdoor(cur_text):
-            reason = "bối cảnh đổi trong nhà ↔ ngoài trời"
+        # v2a. Thời gian: nhóm buổi + lệch ngày.
+        time_reason = _time_changed(_extract_time(prev_text),
+                                    _extract_time(cur_text))
+        if time_reason:
+            reason = time_reason
         else:
-            prev_places, cur_places = _places(prev_text), _places(cur_text)
-            if prev_places and cur_places and prev_places != cur_places:
-                reason = (f"địa điểm đổi từ '{', '.join(sorted(prev_places))}' "
-                          f"sang '{', '.join(sorted(cur_places))}'")
+            # v2b. Địa điểm: thực thể trích được, so tập hợp + tương đồng chuỗi.
+            prev_places_v2 = _extract_places(prev_text, exclude_names)
+            cur_places_v2 = _extract_places(cur_text, exclude_names)
+            if _places_changed(prev_places_v2, cur_places_v2):
+                reason = (f"địa điểm đổi từ "
+                          f"'{', '.join(sorted(prev_places_v2))}' "
+                          f"sang '{', '.join(sorted(cur_places_v2))}'")
+        if not reason:
+            # Fallback v1 (heuristic từ khóa): chỉ chạy khi v2 không kết
+            # luận được — vd đổi trong nhà ↔ ngoài trời không có tên địa điểm.
+            if _time_group(prev_text) and _time_group(cur_text) \
+                    and _time_group(prev_text) != _time_group(cur_text):
+                reason = (f"thời gian đổi từ '{_time_group(prev_text)}' "
+                          f"sang '{_time_group(cur_text)}'")
+            elif _indoor_outdoor(prev_text) and _indoor_outdoor(cur_text) \
+                    and _indoor_outdoor(prev_text) != _indoor_outdoor(cur_text):
+                reason = "bối cảnh đổi trong nhà ↔ ngoài trời"
+            else:
+                prev_places, cur_places = _places(prev_text), _places(cur_text)
+                if prev_places and cur_places and prev_places != cur_places:
+                    reason = (f"địa điểm đổi từ '{', '.join(sorted(prev_places))}' "
+                              f"sang '{', '.join(sorted(cur_places))}'")
         if reason:
             checks.append(_check(
                 "warning", "bridge",
