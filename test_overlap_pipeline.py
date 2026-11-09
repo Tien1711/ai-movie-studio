@@ -262,8 +262,10 @@ def test_sequential_three_scenes_order_chain_and_overlap(overlap_env):
     assert len(overlap_env["calls"]["tts"]) == 3, overlap_env["calls"]["tts"]
     assert [r.get("prefetched") for r in results] == [False, True, True]
     # Wall: không prefetch thì ≥ 3 × (TTS 1.0s + compose/lastframe) ≈ 3.6s;
-    # có prefetch thì ≈ 2.2s. Ngưỡng 3.0s tách 2 trường hợp, chừa nhiễu CPU.
-    assert wall < 3.0, f"sequential chồng chéo phải < 3.0s, thực tế {wall:.2f}s"
+    # có prefetch thì ≈ 2.2s. Ngưỡng 3.4s tách 2 trường hợp, chừa nhiễu CPU
+    # (3.0s ban đầu quá sát trên VM chia sẻ CPU — đã thấy wall vượt 3.0s
+    # khi chạy full suite dù chồng chéo vẫn đúng theo các assert trên).
+    assert wall < 3.4, f"sequential chồng chéo phải < 3.4s, thực tế {wall:.2f}s"
     # Timing giữ đủ key; tts_s cộng cả phần TTS prefetched (>0 mỗi cảnh).
     for key in ("render_s", "poll_s", "tts_s", "compose_s", "total_s"):
         assert key in timing, f"thiếu timing key {key}"
@@ -300,7 +302,9 @@ def test_parallel_chained_scenes_overlap_chain_wait(overlap_env):
     # TTS cảnh 2/3 bắt đầu trước khi cảnh 1 xong (chờ chain nhưng TTS chạy).
     tts2 = [c for c in overlap_env["calls"]["tts"] if "hái hoa" in c["text"]][0]
     assert tts2["start"] < overlap_env["done_times"][1]
-    assert wall < 2.5, f"parallel+chain phải < 2.5s, thực tế {wall:.2f}s"
+    # Ngưỡng 3.0s (2.5s ban đầu quá sát trên VM chia sẻ CPU — đã thấy
+    # wall 2.56s khi chạy full suite dù chồng chéo vẫn đúng).
+    assert wall < 3.0, f"parallel+chain phải < 3.0s, thực tế {wall:.2f}s"
 
 
 # ── (4) cancel giữa lúc chồng chéo ──────────────────────────────────────────

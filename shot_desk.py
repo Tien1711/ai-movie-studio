@@ -1488,16 +1488,21 @@ def compose_shot_desk_timeline(
         progress_cb(5, "Đang khởi tạo phụ đề SRT đồng bộ chính xác với audio...")
 
     # 2. Tạo phụ đề SRT đồng bộ: Tự động phát hiện chính xác thời điểm có tiếng mới hiện phụ đề
+    # ── 2 PHỤ ĐỀ (fix 2026-11-09, cùng lỗi như compose_full_movie) ─────────
+    # burn_in: SRT chỉ là file trung gian để khắc → ghi vào tmp_dir, KHÔNG để
+    # cạnh mp4 trong final/ (trình phát tự nạp phụ đề cùng tên sẽ hiện 2 lớp).
+    # srt_only: SRT là sản phẩm chính → giữ trong final/. none: không tạo SRT.
     slug = to_slug(proj.get("title", "movie"))
     srt_filename = f"{slug}_{ts}_phude.srt" if subtitle_mode == "burn_in" else f"{slug}_{ts}.srt"
-    srt_path = final_dir / srt_filename
-    create_srt(
-        srt_entries,
-        str(srt_path),
-        clip_durations=clip_durations,
-        media_paths=valid_clips,
-        timeline_offsets=timeline_offsets,
-    )
+    srt_path = (tmp_dir / srt_filename) if subtitle_mode == "burn_in" else (final_dir / srt_filename)
+    if subtitle_mode != "none":
+        create_srt(
+            srt_entries,
+            str(srt_path),
+            clip_durations=clip_durations,
+            media_paths=valid_clips,
+            timeline_offsets=timeline_offsets,
+        )
 
     # 3. Quản lý & Trộn âm thanh SFX / Ambience thật
     sfx_clips = []
@@ -1601,7 +1606,13 @@ def compose_shot_desk_timeline(
     with get_sync_project_lock(project_id):
         latest = get_shot_desk_project(project_id) or proj
         latest["final_video"] = f"/api/shot-desk/projects/{project_id}/final-video/{final_mp4_name}"
-        latest["srt_file"] = f"/api/shot-desk/projects/{project_id}/subtitles/{srt_filename}"
+        # Chỉ "srt_only" mới có file SRT trong final/ để tải (burn_in đã khắc
+        # vào video, SRT chỉ nằm trong tmp; "none" thì không có SRT) — tránh
+        # trình phát tự nạp phụ đề chồng lên chữ đã khắc.
+        latest["srt_file"] = (
+            f"/api/shot-desk/projects/{project_id}/subtitles/{srt_filename}"
+            if subtitle_mode == "srt_only" else None
+        )
         latest.setdefault("timeline_settings", {}).update({
             "music_volume": music_volume,
             "voice_volume": voice_volume,
