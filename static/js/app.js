@@ -278,6 +278,7 @@ function showPanel(name) {
   if (name === 'characters') loadCharacters();
   if (name === 'shot-desk') initShotDeskStudio();
   if (name === 'affiliate') initAffiliateStudio();
+  if (name === 'create') refreshQueueHint(); // Nhóm 1: trạng thái hàng đợi trước khi bấm Sản xuất
 }
 
 // ── API Health ──────────────────────────────────────────────────────────
@@ -1763,7 +1764,10 @@ async function startMovieCreation() {
     if (data.error) throw new Error(data.error);
 
     activeJobId = data.job_id;
-    document.getElementById('createStatus').textContent = `✅ Job ${activeJobId} đã bắt đầu!`;
+    document.getElementById('createStatus').textContent =
+      (data.queue_position && data.queue_position > 1)
+        ? `✅ Job ${activeJobId} đã xếp hàng chờ render (vị trí ${data.queue_position})!`
+        : `✅ Job ${activeJobId} đã bắt đầu!`;
 
     // Chuyển sang panel Monitor
     showPanel('monitor');
@@ -1944,6 +1948,10 @@ function updateMonitor(data, jobId) {
     }
   }
 
+  // Nhóm 1 — Hàng đợi render + cảnh báo QC kỹ thuật (clip không đạt vẫn giữ).
+  renderQueueCard(data.render_queue);
+  renderQcWarningCard(data);
+
   // Pre-Export Scene Audit Card: Hiển thị bảng kiểm định nếu có audit
   if (data.audit || data.status === 'audit_pending') {
     renderSceneAuditCard(data.audit, data, jobId);
@@ -2065,6 +2073,113 @@ function notifyJobTerminal(data, jobId) {
   }
 }
 
+// ── Nhóm 1: Hàng đợi render + QC + ước tính thời gian ──────────────────────
+
+/** Hiện hàng đợi render trong Monitor: job đang chạy + từng job chờ + vị trí. */
+function renderQueueCard(queue) {
+  const card = document.getElementById('renderQueueCard');
+  const body = document.getElementById('renderQueueBody');
+  if (!card || !body) return;
+  if (!queue || (!queue.current && !(queue.queued && queue.queued.length))) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+  let html = '';
+  if (queue.current) {
+    html += `<div>▶️ <b>Đang render:</b> ${esc(queue.current.title || queue.current.job_id)} — ${queue.current.progress || 0}% (${queue.current.total || 0} cảnh)</div>`;
+  }
+  (queue.queued || []).forEach(q => {
+    html += `<div>⏳ <b>Vị trí ${q.queue_position}:</b> ${esc(q.title || q.job_id)} — ${q.total || 0} cảnh</div>`;
+  });
+  body.innerHTML = html;
+}
+
+/** Hiện cảnh báo tổng các cảnh QC không đạt (clip vẫn giữ, không tự xóa). */
+function renderQcWarningCard(data) {
+  const card = document.getElementById('qcWarningCard');
+  const body = document.getElementById('qcWarningBody');
+  if (!card || !body) return;
+  const failed = data.qc_failed_scenes || [];
+  if (!failed.length) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+  const items = failed.map(idx => {
+    const info = (data.scenes && (data.scenes[idx] || data.scenes[String(idx)])) || {};
+    const issues = (info.qc_issues || []).map(i => '• ' + esc(String(i))).join('<br>');
+    return `<div>🔍 <b>Cảnh ${idx}:</b><br>${issues || '• QC không đạt (không rõ lý do)'}</div>`;
+  }).join('');
+  body.innerHTML = items +
+    `<div class="u-c-muted u-fs12">Clip vẫn được giữ nguyên — kiểm tra lại rồi render lại cảnh đó nếu cần. ` +
+    `QC chỉ kiểm tra kỹ thuật (thời lượng, phân giải, khung đen/đứng hình), không phát hiện lỗi nội dung như kính lệch hay mặt biến dạng.</div>`;
+}
+
+/** Ước tính thời gian render trước khi bấm Sản xuất (không tạo job). */
+async function requestEstimate() {
+  const box = document.getElementById('estimateBox');
+  const body = document.getElementById('estimateBody');
+  const btn = document.getElementById('btnEstimate');
+  if (!box || !body) return;
+  syncScenesFromDOM();
+  if (scenes.length === 0) {
+    box.style.display = 'block';
+    body.innerHTML = '⚠️ Chưa có cảnh nào để ước tính — thêm ít nhất 1 cảnh rồi bấm lại.';
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang ước tính...'; }
+  try {
+    const payload = buildMoviePayload();
+    const res = await apiFetch('/api/estimate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(formatApiError(data, res));
+    const mins = data.estimated_minutes;
+    const secs = data.estimated_seconds;
+    const timeText = mins >= 1 ? `~${mins} phút (${secs}s)` : `~${secs} giây`;
+    box.style.display = 'block';
+    body.innerHTML =
+      `⏱️ <b>Ước tính tổng thời gian: ${timeText}</b> — ${data.scenes} cảnh, ` +
+      `chạy ${data.concurrent} luồng${data.chain_mode === 'sequential' ? ' (nối tiếp từng cảnh)' : ''} ` +
+      `(render ~${data.render_s}s + ghép ~${data.compose_s}s).<br>` +
+      `<span class="u-c-muted u-fs12">${esc(data.note || 'Chỉ là ước tính, không cam kết thời gian thực tế.')}</span>`;
+  } catch (e) {
+    box.style.display = 'block';
+    body.innerHTML = '❌ Không ước tính được: ' + esc(e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⏱️ Ước tính thời gian'; }
+  }
+  refreshQueueHint();
+}
+
+/** Hiện trạng thái hàng đợi render ngay dưới nút Sản xuất (trước khi bấm). */
+async function refreshQueueHint() {
+  const el = document.getElementById('queueHint');
+  if (!el) return;
+  try {
+    const res = await apiFetch('/api/render-queue');
+    const q = await res.json();
+    if (!res.ok) throw new Error('queue');
+    if (q.current || (q.queued && q.queued.length)) {
+      const parts = [];
+      if (q.current) parts.push(`▶️ Đang render: ${esc(q.current.title || q.current.job_id)} (${q.current.progress || 0}%)`);
+      (q.queued || []).forEach(item => {
+        parts.push(`⏳ Vị trí ${item.queue_position}: ${esc(item.title || item.job_id)} (${item.total || 0} cảnh)`);
+      });
+      el.innerHTML = '📋 Hàng đợi render: ' + parts.join(' · ') +
+        ' — phim mới sẽ xếp sau, render nối tiếp.';
+    } else {
+      el.textContent = '📋 Hàng đợi render đang trống — bấm Sản xuất sẽ render ngay.';
+    }
+  } catch (e) {
+    el.textContent = '';
+  }
+}
+
 function renderSceneMonitorCard(idx, info, data, jobId) {
   let cell = document.getElementById(`cell-${idx}`);
   if (!cell) {
@@ -2165,6 +2280,8 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
   if (currentStatus === 'error') {
     promptAndActionsHtml = `
       <div class="fx fx-col fx-g6 u-mt2">
+        ${info.compliance_failed ? `<div style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.55);border-radius:6px;padding:6px 8px;font-size:11.5px;color:#f87171;font-weight:600;">🛡️ Đã thử compliance_prompt nhưng vẫn bị từ chối — không thử lại nữa. Sửa prompt rồi tạo lại cảnh này.</div>` : ''}
+        ${info.used_compliance && !info.compliance_failed ? `<div style="background:rgba(59,130,246,0.10);border:1px solid rgba(59,130,246,0.45);border-radius:6px;padding:6px 8px;font-size:11.5px;color:#93c5fd;">🛡️ Prompt gốc bị từ chối nên đã tự thử 1 lần bằng compliance_prompt.</div>` : ''}
         <label class="u-fs115 u-fw700 u-c-yellow u-mb0">✏️ Chỉnh sửa Prompt cho Cảnh ${idx}:</label>
         <textarea id="edit-prompt-${idx}" rows="3" style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;background:var(--bg1);border:1px solid var(--border);color:var(--text);resize:vertical;font-family:inherit;" placeholder="Nhập prompt thay thế an toàn hơn...">${esc(promptText)}</textarea>
         <div class="fx fx-g8 fx-jc-fe u-mt2">
@@ -2196,6 +2313,8 @@ function renderSceneMonitorCard(idx, info, data, jobId) {
         </div>
         ${voiceoverText ? `<div class="cell-voiceover">🎙️ Lời thoại: ${esc(voiceoverText)}</div>` : ''}
         ${info.tts_failed ? `<div style="background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.5);border-radius:6px;padding:6px 8px;margin-top:6px;font-size:11.5px;color:var(--yellow);font-weight:600;">⚠️ Cảnh này MẤT TIẾNG: lỗi TTS${info.tts_error ? ' — ' + esc(String(info.tts_error).slice(0, 80)) : ''} (đã dùng audio im lặng).</div>` : ''}
+        ${info.qc_failed ? `<div style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.55);border-radius:6px;padding:6px 8px;margin-top:6px;font-size:11.5px;color:#f87171;font-weight:600;">🔍 QC KHÔNG ĐẠT — clip vẫn được giữ:${(info.qc_issues || []).map(i => '<br>• ' + esc(String(i))).join('') || '<br>• Không rõ lý do'}</div>` : ''}
+        ${info.used_compliance ? `<div style="background:rgba(59,130,246,0.10);border:1px solid rgba(59,130,246,0.45);border-radius:6px;padding:6px 8px;margin-top:6px;font-size:11.5px;color:#93c5fd;">🛡️ Prompt gốc bị từ chối nên đã tự thử 1 lần bằng compliance_prompt.</div>` : ''}
       </div>
     `;
   } else {

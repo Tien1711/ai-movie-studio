@@ -473,13 +473,26 @@
       </div>
 
       <!-- Launch button -->
-      <div class="wizard-sticky-cta" style="display:flex;gap:12px;align-items:center;margin-bottom:24px;">
+      <div class="wizard-sticky-cta" style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
         <button id="btnCreateMovie" class="btn btn-primary btn-lg" onclick="startMovieCreation()">
           🚀 Bắt đầu Sản xuất Hàng Loạt
+        </button>
+        <button id="btnEstimate" class="btn btn-ghost btn-lg" onclick="requestEstimate()" title="Ước tính tổng thời gian render dựa trên timing đã đo từ các job trước (chỉ là ước tính, không cam kết)">
+          ⏱️ Ước tính thời gian
         </button>
         <span class="u-c-muted u-fs13" id="createStatus"></span>
         <span class="cta-hint">Phím tắt <span class="kbd">Ctrl</span>+<span class="kbd">Enter</span></span>
       </div>
+      <!-- Ước tính thời gian render trước khi bấm Sản xuất (Nhóm 1)
+           LƯU Ý: KHÔNG dùng class "card" ở đây — ui.js gom mọi .card con trực
+           tiếp của #panel-create vào wizard bước 2, còn nút Ước tính ở bước 3
+           nên box sẽ bị ẩn theo bước 2. Div thường (như #queueHint) thì ở yên
+           và hiện ở mọi bước. -->
+      <div id="estimateBox" style="display:none;margin-bottom:12px;padding:10px 14px;border:1px solid var(--border);border-radius:10px;background:var(--bg2);">
+        <div id="estimateBody" class="u-fs13" style="line-height:1.6;"></div>
+      </div>
+      <!-- Hàng đợi render hiện tại (Nhóm 1) -->
+      <div id="queueHint" class="u-fs12 u-c-muted" style="margin-bottom:24px;"></div>
     </div>
 
     <!-- ─ Panel: Video Tiếp Thị Liên Kết (Affiliate Marketing) ────── -->
@@ -921,6 +934,22 @@
             <div class="card-title">⏱️ Thời gian từng giai đoạn</div>
           </div>
           <div id="timingBreakdown" class="u-fs13" style="display:flex;flex-wrap:wrap;gap:8px 20px;color:var(--text);"></div>
+        </div>
+
+        <!-- Hàng đợi render (Nhóm 1: nhiều phim xếp hàng nối tiếp) -->
+        <div class="card" id="renderQueueCard" style="display:none;">
+          <div class="card-header u-mb8">
+            <div class="card-title">📋 Hàng đợi render</div>
+          </div>
+          <div id="renderQueueBody" class="u-fs13" style="display:flex;flex-direction:column;gap:6px;line-height:1.6;"></div>
+        </div>
+
+        <!-- Cảnh báo QC kỹ thuật (Nhóm 1: clip không đạt vẫn được giữ) -->
+        <div class="card" id="qcWarningCard" style="display:none;border:1px solid rgba(239,68,68,0.6);background:rgba(239,68,68,0.04);">
+          <div class="card-header u-mb8">
+            <div class="card-title" style="color:#f87171;">🔍 QC không đạt — clip vẫn được giữ, cần bạn quyết định</div>
+          </div>
+          <div id="qcWarningBody" class="u-fs13" style="line-height:1.6;display:flex;flex-direction:column;gap:8px;"></div>
         </div>
 
         <!-- Pre-Export Scene Audit Card (Kiểm định tính toàn vẹn trước khi xuất phim) -->

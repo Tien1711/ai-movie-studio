@@ -376,6 +376,10 @@ class SceneItem(BaseModel):
     chain_from_previous: Optional[bool] = False # First/Last Frame Chaining: kế thừa khung hình cuối của cảnh trước
     sheet_angle: Optional[str] = "front"        # "front" | "side" | "closeup" | "fullbody"
     last_frame_url: Optional[str] = None
+    # Nhóm 1 (render tự động): bản prompt an toàn đã chốt sẵn cho cảnh này.
+    # Khi engine từ chối prompt gốc, pipeline tự thử ĐÚNG 1 lần bằng bản này
+    # (dán nguyên văn, không sanitize thêm); không có thì fallback sanitize cũ.
+    compliance_prompt: Optional[str] = Field(default=None, max_length=5000)
 
 
 class MovieRequest(BaseModel):
@@ -542,6 +546,15 @@ def load_all_persisted_jobs(force: bool = False):
                             data.setdefault("logs", []).append(
                                 "[Hệ thống] Job bị gián đoạn do server khởi động lại "
                                 "(interrupted). Bấm Resume để chạy tiếp từ cảnh chưa xong.")
+                        if data.get("status") == "queued":
+                            # Nhóm 1: hàng đợi chỉ sống trong tiến trình — sau
+                            # restart không còn worker nào lấy job này nữa.
+                            data["status"] = "error"
+                            data["error"] = "interrupted"
+                            data["queue_position"] = 0
+                            data.setdefault("logs", []).append(
+                                "[Hệ thống] Job đang chờ trong hàng đợi thì server khởi động lại "
+                                "(interrupted). Bấm Resume để xếp hàng render lại.")
                         JOBS[item.name] = data
                 except Exception as exc:
                     logger.warning("Không load được job %s: %s", item.name, exc)
@@ -571,6 +584,15 @@ def get_or_restore_job(job_id: str) -> Optional[Dict]:
                 data.setdefault("logs", []).append(
                     "[Hệ thống] Job bị gián đoạn do server khởi động lại "
                     "(interrupted). Bấm Resume để chạy tiếp từ cảnh chưa xong.")
+            if data.get("status") == "queued":
+                # Nhóm 1: như load_all_persisted_jobs — hàng đợi không sống
+                # qua restart, đánh dấu interrupted để bấm Resume xếp hàng lại.
+                data["status"] = "error"
+                data["error"] = "interrupted"
+                data["queue_position"] = 0
+                data.setdefault("logs", []).append(
+                    "[Hệ thống] Job đang chờ trong hàng đợi thì server khởi động lại "
+                    "(interrupted). Bấm Resume để xếp hàng render lại.")
             with JOBS_LOCK:
                 # Re-check sau khi đọc đĩa: pipeline có thể vừa tạo job này.
                 if job_id not in JOBS:
@@ -611,6 +633,161 @@ def _spawn_job_task(job_id: str, coro) -> "asyncio.Task":
 
     task.add_done_callback(_done)
     return task
+
+
+# ── Hàng đợi render (Nhóm 1: render tự động) ──────────────────────────────
+# Nhiều phim bấm Sản xuất cùng lúc thì xếp hàng nối tiếp thay vì render chồng
+# lên nhau: job vào hàng đợi, worker lấy từng job chạy film_pipeline đến khi
+# hàng rỗng. Job đầu tiên (hàng trống) chạy ngay; các job sau thấy vị trí của
+# mình trong Monitor. Hàng đợi chỉ sống trong tiến trình — restart server thì
+# job còn "queued" được đánh dấu interrupted ở load_all_persisted_jobs (như
+# job "running" cũ) để bấm Resume chạy tiếp.
+RENDER_QUEUE: List[str] = []  # job_id chờ render, theo thứ tự vào hàng
+RENDER_QUEUE_WORKER: Optional["asyncio.Task"] = None
+RENDER_CURRENT_JOB_ID: Optional[str] = None
+
+
+def _job_title(job: Optional[Dict]) -> str:
+    if not job:
+        return ""
+    req_data = job.get("req")
+    if isinstance(req_data, dict):
+        return req_data.get("title", "") or job.get("id", "")
+    if hasattr(req_data, "title"):
+        return getattr(req_data, "title") or job.get("id", "")
+    return job.get("id", "")
+
+
+def _refresh_queue_positions() -> None:
+    """Cập nhật queue_position (1-based) cho mọi job đang chờ; job đang chạy = 0."""
+    with JOBS_LOCK:
+        snapshot = list(RENDER_QUEUE)
+    for pos, job_id in enumerate(snapshot, start=1):
+        job = JOBS.get(job_id)
+        if job is not None:
+            job["queue_position"] = pos
+
+
+def _render_queue_snapshot() -> Dict[str, Any]:
+    """Ảnh chụp hàng đợi cho Monitor/API: job đang chạy + từng job chờ + vị trí."""
+    with JOBS_LOCK:
+        queued_ids = list(RENDER_QUEUE)
+        current_id = RENDER_CURRENT_JOB_ID
+    current = None
+    if current_id:
+        job = JOBS.get(current_id)
+        if job is not None:
+            current = {
+                "job_id": current_id,
+                "title": _job_title(job),
+                "status": job.get("status"),
+                "progress": job.get("progress", 0),
+                "total": job.get("total", 0),
+            }
+    queued = []
+    for pos, job_id in enumerate(queued_ids, start=1):
+        job = JOBS.get(job_id)
+        if job is None:
+            continue
+        queued.append({
+            "job_id": job_id,
+            "title": _job_title(job),
+            "status": job.get("status"),
+            "total": job.get("total", 0),
+            "queue_position": pos,
+            "created_at": job.get("created_at", 0),
+        })
+    return {"current": current, "queued": queued, "queue_length": len(queued)}
+
+
+def _ensure_render_queue_worker() -> None:
+    """Đảm bảo có 1 worker hàng đợi đang chạy (gọi từ endpoint async)."""
+    global RENDER_QUEUE_WORKER
+    if RENDER_QUEUE_WORKER is None or RENDER_QUEUE_WORKER.done():
+        RENDER_QUEUE_WORKER = asyncio.create_task(_render_queue_worker())
+
+
+def enqueue_render_job(job: Dict) -> int:
+    """Cho job vào hàng đợi render, trả về vị trí (1-based). Job đầu hàng chạy
+    ngay khi worker lấy; job đã trong hàng thì không xếp trùng. Gọi từ endpoint
+    async (create/resume) vì _ensure_render_queue_worker cần event loop."""
+    job_id = job["id"]
+    with JOBS_LOCK:
+        if job_id not in RENDER_QUEUE:
+            RENDER_QUEUE.append(job_id)
+        position = RENDER_QUEUE.index(job_id) + 1
+    job["status"] = "queued"
+    job["queue_position"] = position
+    job_log(job, f"⏳ Xếp hàng chờ render (vị trí {position} trong hàng đợi)...")
+    _save_job_best_effort(job)
+    _ensure_render_queue_worker()
+    return position
+
+
+def dequeue_render_job(job_id: str) -> bool:
+    """Gỡ job khỏi hàng đợi (khi hủy/xóa lúc còn chờ). Trả về True nếu đã gỡ."""
+    with JOBS_LOCK:
+        if job_id in RENDER_QUEUE:
+            RENDER_QUEUE.remove(job_id)
+            removed = True
+        else:
+            removed = False
+    if removed:
+        _refresh_queue_positions()
+    return removed
+
+
+async def _render_queue_worker() -> None:
+    """Worker hàng đợi: lấy từng job chạy film_pipeline nối tiếp đến khi hết.
+    Job nào lỗi/cancel cũng không chặn job sau (film_pipeline tự bắt lỗi của
+    nó; đây chỉ bọc thêm để worker không chết vì exception lọt ra)."""
+    global RENDER_QUEUE_WORKER, RENDER_CURRENT_JOB_ID
+    try:
+        while True:
+            with JOBS_LOCK:
+                if not RENDER_QUEUE:
+                    break
+                job_id = RENDER_QUEUE.pop(0)
+            _refresh_queue_positions()
+            job = JOBS.get(job_id) or get_or_restore_job(job_id)
+            if not job or job.get("cancelled") or job.get("status") == "cancelled":
+                continue
+            req = job.get("req")
+            if isinstance(req, dict):
+                try:
+                    req = MovieRequest(**req)
+                    job["req"] = req
+                except Exception as exc:
+                    job["status"] = "error"
+                    job_log(job, f"❌ Không khôi phục được cấu hình job để render: {exc}")
+                    _save_job_best_effort(job)
+                    continue
+            if req is None:
+                job["status"] = "error"
+                job_log(job, "❌ Job thiếu cấu hình (req) nên không thể render.")
+                _save_job_best_effort(job)
+                continue
+            RENDER_CURRENT_JOB_ID = job_id
+            job["status"] = "running"
+            job["queue_position"] = 0
+            job_log(job, "▶️ Bắt đầu render (đến lượt trong hàng đợi).")
+            _save_job_best_effort(job)
+            try:
+                await film_pipeline(job, req)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Render queue job %s lỗi chưa được xử lý.", job_id)
+                job["status"] = "error"
+                job_log(job, f"❌ Lỗi xử lý pipeline: {exc}")
+                _save_job_best_effort(job)
+            finally:
+                RENDER_CURRENT_JOB_ID = None
+                _refresh_queue_positions()
+    finally:
+        with JOBS_LOCK:
+            if RENDER_QUEUE_WORKER is asyncio.current_task():
+                RENDER_QUEUE_WORKER = None
 
 
 def _mark_job_cancelled(job: Dict) -> None:
@@ -755,12 +932,19 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     # Audit #9: cảnh TTS lỗi vẫn "done" (video có, audio im
                     # lặng) nhưng msg + cờ tts_failed phải nói rõ để Monitor
                     # thấy ngay cảnh nào mất tiếng.
-                    "msg": "✅ Hoàn thành ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)" if r.get("tts_failed") else "✅ Hoàn thành",
+                    "msg": "✅ Hoàn thành ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)" if r.get("tts_failed") else (
+                        "✅ Hoàn thành 🔍 QC không đạt — xem chi tiết trong thẻ cảnh" if r.get("qc_failed") else "✅ Hoàn thành"),
                     "video_url": f"/api/jobs/{job_id}/scenes/{idx}/video",
                     "last_frame_url": r.get("last_frame_url"),
                     "error": None,
                     "tts_failed": bool(r.get("tts_failed")),
                     "tts_error": r.get("tts_error"),
+                    # Nhóm 1: QC + compliance retry — Monitor hiện badge từ đây.
+                    "qc_failed": bool(r.get("qc_failed")),
+                    "qc_issues": list(r.get("qc_issues") or []),
+                    "qc": r.get("qc"),
+                    "used_compliance": bool(r.get("used_compliance")),
+                    "compliance_failed": bool(r.get("compliance_failed")),
                 })
                 ok_count += 1
             else:
@@ -768,8 +952,24 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     "status": "error",
                     "msg": f"❌ {r.get('error', '')}",
                     "error": r.get("error", ""),
+                    "used_compliance": bool(r.get("used_compliance")),
+                    "compliance_failed": bool(r.get("compliance_failed")),
                 })
                 job["failed_scenes"].append(idx)
+
+        # Nhóm 1: danh sách cảnh QC không đạt + cảnh đã thử compliance — để
+        # Monitor hiện cảnh báo tổng + badge từng cảnh (clip KHÔNG bị xóa).
+        job["qc_failed_scenes"] = [r["index"] for r in results
+                                   if r.get("status") == "done" and r.get("qc_failed")]
+        job["compliance_retried_scenes"] = [r["index"] for r in results
+                                            if r.get("used_compliance")]
+        if job["qc_failed_scenes"]:
+            job_log(job, "🔍 QC không đạt: cảnh " + ", ".join(f"#{i}" for i in job["qc_failed_scenes"]) +
+                    " — clip vẫn giữ nguyên, xem lý do trong thẻ từng cảnh rồi quyết định render lại hay giữ.")
+        if job["compliance_retried_scenes"]:
+            job_log(job, "🛡️ Đã tự thử compliance_prompt cho cảnh " +
+                    ", ".join(f"#{i}" for i in job["compliance_retried_scenes"]) +
+                    " (prompt gốc bị từ chối, chỉ thử đúng 1 lần).")
 
         # Audit #9: TTS lỗi vẫn giữ fallback im lặng cho scene đó, nhưng job
         # phải cảnh báo rõ — liệt kê scene mất tiếng trong log Monitor.
@@ -1024,17 +1224,105 @@ async def create_movie(req: MovieRequest):
         job_log(job, f"🎯 [Đồng nhất tối đa] Preflight: {cm_checks['warnings']} cảnh báo "
                      f"(chain đã ép sequential, xem consistency_checks).")
     _save_job_or_http500(job)
-    # Spawn qua _spawn_job_task (giữ reference trong JOB_TASKS để cancel thật);
-    # nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
-    _spawn_job_task(job_id, film_pipeline(job, req))
+    # Nhóm 1 — hàng đợi render: job vào hàng đợi nối tiếp thay vì spawn
+    # pipeline ngay (nhiều phim bấm cùng lúc không render chồng nhau).
+    # Job đầu hàng chạy ngay; các job sau chờ tới lượt, thấy vị trí ở Monitor.
+    # Nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
+    queue_position = enqueue_render_job(job)
 
-    resp: Dict[str, Any] = {"job_id": job_id, "message": "Đã bắt đầu sản xuất phim hàng loạt"}
+    resp: Dict[str, Any] = {
+        "job_id": job_id,
+        "message": "Đã bắt đầu sản xuất phim hàng loạt" if queue_position <= 1 else f"Đã xếp hàng chờ render (vị trí {queue_position})",
+        "queue_position": queue_position,
+        "queued": queue_position > 1,
+    }
     if cm_checks is not None:
         resp["consistency_mode"] = "max"
         resp["chain_mode"] = req.chain_mode
         resp["consistency_warnings"] = cm_checks["warnings"]
         resp["consistency_checks"] = cm_checks["checks"]
     return resp
+
+
+# ── Ước tính thời gian render (Nhóm 1) ──────────────────────────────────────
+# Dựa trên timing ĐÃ ĐO từ các job trước (PR #6: job["timing"]["poll_s"] là
+# tổng thời gian chờ API video của các scene). Đây chỉ là ƯỚC TÍNH — tốc độ
+# thực tế còn tùy tải của engine, mạng, độ dài từng cảnh — KHÔNG cam kết.
+ESTIMATE_FALLBACK_POLL_S_PER_SCENE = 60.0  # chưa có mẫu đo: 60s/cảnh
+ESTIMATE_FALLBACK_COMPOSE_S = 30.0         # chưa có mẫu đo: 30s ghép phim
+
+
+def estimate_render_time(req: "MovieRequest") -> Dict[str, Any]:
+    """Ước tính tổng thời gian render cho 1 MovieRequest (chưa tạo job).
+
+    Công thức: waves = ceil(n_scenes / concurrent_hiệu_dụng) — mỗi wave chờ
+    trung bình poll_s/cảnh (đo từ job trước); cộng thời gian ghép phim trung
+    bình. chain_mode=sequential -> concurrent hiệu dụng = 1 (nối tiếp từng
+    cảnh, không song song). TTS chạy song song với poll nên không cộng thêm.
+    """
+    n = max(len(req.scenes or []), 0)
+    raw_concurrent = req.max_concurrent if (req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
+    concurrent = 1 if (req.chain_mode or "none") == "sequential" else min(raw_concurrent, 12)
+
+    poll_total = 0.0
+    poll_scenes = 0
+    compose_samples: List[float] = []
+    for job in list(JOBS.values()):
+        timing = job.get("timing") or {}
+        results = job.get("results") or []
+        done = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "done")
+        poll_s = timing.get("poll_s") or 0
+        if done > 0 and poll_s > 0:
+            poll_total += float(poll_s)
+            poll_scenes += done
+        compose_s = timing.get("compose_s") or 0
+        if compose_s > 0:
+            compose_samples.append(float(compose_s))
+
+    if poll_scenes > 0:
+        avg_poll = poll_total / poll_scenes
+        basis = "measured"
+    else:
+        avg_poll = ESTIMATE_FALLBACK_POLL_S_PER_SCENE
+        basis = "fallback"
+    avg_compose = (sum(compose_samples) / len(compose_samples)) if compose_samples else ESTIMATE_FALLBACK_COMPOSE_S
+
+    import math
+    waves = math.ceil(n / max(concurrent, 1)) if n > 0 else 0
+    est_render = waves * avg_poll
+    est_total = est_render + (avg_compose if n > 0 else 0.0)
+    return {
+        "estimated_seconds": round(est_total, 1),
+        "estimated_minutes": round(est_total / 60.0, 1),
+        "render_s": round(est_render, 1),
+        "compose_s": round(avg_compose, 1) if n > 0 else 0.0,
+        "scenes": n,
+        "concurrent": concurrent,
+        "chain_mode": req.chain_mode or "none",
+        "avg_poll_s_per_scene": round(avg_poll, 1),
+        "samples": {"jobs_with_timing": len(compose_samples), "scenes_measured": poll_scenes},
+        "basis": basis,
+        "note": ("Ước tính dựa trên thời gian chờ API trung bình "
+                 f"({avg_poll:.0f}s/cảnh, đo từ {poll_scenes} cảnh đã render)"
+                 if basis == "measured" else
+                 "Chưa có job nào đo được timing — dùng mức mặc định 60s/cảnh. "
+                 "Ước tính sẽ chính xác hơn sau vài lần render.") +
+                " Chỉ là ước tính, không cam kết thời gian thực tế.",
+    }
+
+
+@app.get("/api/render-queue")
+def api_render_queue():
+    """Hàng đợi render hiện tại: job đang chạy + từng job chờ + vị trí."""
+    return _render_queue_snapshot()
+
+
+@app.post("/api/estimate")
+async def api_estimate_render_time(req: MovieRequest):
+    """Ước tính tổng thời gian render TRƯỚC khi bấm Sản xuất (không tạo job)."""
+    if not req.scenes:
+        return JSONResponse({"error": "Không có cảnh nào để ước tính!"}, status_code=400)
+    return estimate_render_time(req)
 
 
 async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
@@ -1479,15 +1767,26 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
         if res.get("status") == "done":
             _scene(job, idx).update({
                 "status": "done",
-                "msg": "✅ Hoàn thành (Đã tạo lại)" + (" ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)" if res.get("tts_failed") else ""),
+                "msg": "✅ Hoàn thành (Đã tạo lại)" + (" ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)" if res.get("tts_failed") else "") + (" 🔍 QC không đạt — xem chi tiết trong thẻ cảnh" if res.get("qc_failed") else ""),
                 "video_url": f"/api/jobs/{job_id}/scenes/{idx}/video",
                 "last_frame_url": res.get("last_frame_url"),
                 "error": None,
                 "tts_failed": bool(res.get("tts_failed")),
                 "tts_error": res.get("tts_error"),
+                # Nhóm 1: QC + compliance retry (như film_pipeline).
+                "qc_failed": bool(res.get("qc_failed")),
+                "qc_issues": list(res.get("qc_issues") or []),
+                "qc": res.get("qc"),
+                "used_compliance": bool(res.get("used_compliance")),
+                "compliance_failed": bool(res.get("compliance_failed")),
             })
             # Audit #9: đồng bộ lại danh sách cảnh mất tiếng.
             job["tts_failed_scenes"] = [r["index"] for r in all_results if r.get("tts_failed")]
+            # Nhóm 1: đồng bộ lại danh sách cảnh QC không đạt / đã thử compliance.
+            job["qc_failed_scenes"] = [r["index"] for r in all_results
+                                       if r.get("status") == "done" and r.get("qc_failed")]
+            job["compliance_retried_scenes"] = [r["index"] for r in all_results
+                                                if r.get("used_compliance")]
             if idx in job.get("failed_scenes", []):
                 job["failed_scenes"].remove(idx)
             job_log(job, f"🎉 [Cảnh {idx}] Render lại thành công!")
@@ -1889,6 +2188,11 @@ async def job_sse(job_id: str, request: Request):
                     "failed_scenes": job.get("failed_scenes", []),
                     "is_retrying": job.get("is_retrying", False),
                     "last_frames": last_frames,
+                    # Nhóm 1: QC + compliance + hàng đợi render cho Monitor.
+                    "qc_failed_scenes": job.get("qc_failed_scenes", []),
+                    "compliance_retried_scenes": job.get("compliance_retried_scenes", []),
+                    "queue_position": job.get("queue_position", 0),
+                    "render_queue": _render_queue_snapshot(),
                 }
                 last_log_count = len(job["logs"])
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -1983,6 +2287,8 @@ def delete_job(job_id: str):
         return JSONResponse(
             {"error": "Job đang chạy, không thể xoá. Hãy hủy job trước."},
             status_code=409)
+    # Nhóm 1: job còn chờ trong hàng đợi thì gỡ khỏi hàng trước khi xóa.
+    dequeue_render_job(job_id)
     job_dir = get_safe_job_dir(job_id)
     with JOBS_LOCK:
         job = JOBS.pop(job_id, None)
@@ -2070,11 +2376,14 @@ def api_cancel_job(job_id: str):
     job = get_or_restore_job(job_id)
     if not job:
         return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
+    # Nhóm 1: job còn chờ trong hàng đợi thì gỡ khỏi hàng (không render nữa).
+    was_queued = dequeue_render_job(job_id)
     with JOBS_LOCK:
         task = JOB_TASKS.get(job_id)
         cancel_event = JOB_CANCEL_EVENTS.get(job_id)
         job["cancelled"] = True
         job["status"] = "cancelled"
+        job["queue_position"] = 0
     # Set cờ hủy để run_batch dừng ở cảnh/poll tiếp theo (audit #8).
     if cancel_event is not None:
         cancel_event.set()
@@ -2082,7 +2391,10 @@ def api_cancel_job(job_id: str):
     # pipeline kiểm tra cờ cancelled ở các mốc giai đoạn rồi thoát.
     if task is not None and not task.done():
         task.cancel()
-    job_log(job, "🛑 Người dùng đã yêu cầu dừng/hủy job!")
+    if was_queued:
+        job_log(job, "🛑 Đã hủy job đang chờ trong hàng đợi (gỡ khỏi hàng render).")
+    else:
+        job_log(job, "🛑 Người dùng đã yêu cầu dừng/hủy job!")
     _save_job_best_effort(job)
     return {"success": True, "message": "Đã dừng job thành công"}
 
@@ -2105,12 +2417,18 @@ async def api_resume_job(job_id: str, payload: Optional[ResumeJobRequest] = None
             return JSONResponse(
                 {"error": "Job đang chạy, không thể resume chồng lên tiến trình hiện tại."},
                 status_code=409)
-        job["status"] = "running"
+        # Nhóm 1: job đã xếp hàng chờ thì không xếp trùng.
+        if job["id"] in RENDER_QUEUE:
+            return JSONResponse(
+                {"error": "Job đã xếp hàng chờ render, không thể resume chồng lên."},
+                status_code=409)
         job["cancelled"] = False
     job_log(job, f"▶️ Tiếp tục chạy job từ Cảnh {start_idx}...")
     _save_job_or_http500(job)
-    _spawn_job_task(job_id, film_pipeline(job, req))
-    return {"success": True, "message": f"Đang tiếp tục chạy job từ Cảnh {start_idx}"}
+    # Nhóm 1: resume cũng qua hàng đợi render (nối tiếp, không chồng job khác).
+    queue_position = enqueue_render_job(job)
+    return {"success": True, "message": f"Đang tiếp tục chạy job từ Cảnh {start_idx}",
+            "queue_position": queue_position}
 
 
 class KeyframePreviewRequest(BaseModel):
