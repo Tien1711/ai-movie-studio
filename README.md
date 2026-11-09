@@ -115,6 +115,28 @@ Kết quả kiểm thử tự động xác nhận 6/6 tính năng hoạt động
 🎉 TẤT CẢ 6/6 TESTS AFFILIATE MARKETING ĐÃ PASS 100%!
 ```
 
+### CI (GitHub Actions)
+
+Workflow `.github/workflows/ci.yml` chạy toàn bộ test suite (Python 3.12) trên
+mỗi push và pull request vào `main`. Chạy tương đương trên máy local:
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pip install pytest httpx   # pytest KHÔNG nằm trong requirements.txt
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+    -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
+  python -m pytest test_affiliate_continuity.py test_affiliate_suite.py \
+    test_audit_medium_minor.py test_audit_severe.py test_character_scope.py \
+    test_consistency_mode.py test_core_suite.py test_e2e_stress_suite.py \
+    test_fixes.py test_render_speed.py test_timeline_editor.py \
+    test_tts_multi_engine.py test_ui_layout.py test_ui_theme.py -q
+```
+Lưu ý:
+- Biến proxy phải gỡ khi chạy pytest, nếu không httpx báo lỗi `InvalidURL` giả.
+- `test_sub.py` và `test_bottom_sub.py` bị loại khỏi CI vì lỗi collection có từ trước.
+- `requirements.txt` đã pin đúng phiên bản (`==`); muốn nâng cấp thư viện thì sửa
+  pin rồi chạy lại toàn bộ suite trong venv sạch trước khi commit.
+
 ---
 
 ## 📄 Bản Quyền
