@@ -1258,7 +1258,19 @@ async def process_scene(
                 "error": None,
                 "tts_failed": False,
                 "tts_error": None,
+                # Nhóm 1 (render tự động): retry compliance + QC clip.
+                "used_compliance": False,   # True khi lần thử 2 dùng compliance_prompt
+                "compliance_failed": False,  # True khi cả compliance cũng bị từ chối
+                "qc_failed": False,          # True khi clip về nhưng QC kỹ thuật không đạt
+                "qc": None,                  # kết quả qc.qc_clip() (dict) hoặc None
+                "qc_issues": [],             # lý do QC không đạt (tiếng Việt)
             }
+
+            # Compliance prompt của shot (nếu có): bản viết lại an toàn đã chốt
+            # sẵn cho shot này — khi prompt gốc bị từ chối thì thử ĐÚNG 1 LẦN
+            # bằng bản này, dán NGUYÊN VĂN, không sanitize/paraphrase thêm.
+            compliance_prompt = (scene.get("compliance_prompt") or "").strip()
+            compliance_tried = False
 
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -1559,6 +1571,39 @@ async def process_scene(
                     if not os.path.exists(clip_path):
                         shutil.copy2(video_path, clip_path)
 
+                # ── Nhóm 1 — QC kỹ thuật clip vừa render xong ──
+                # Chạy sau khi compose xong (video_path là clip Monitor sẽ
+                # phát). Clip không đạt chỉ gắn cờ qc_failed + lý do — KHÔNG
+                # tự xóa clip, KHÔNG đổi status "done". QC lỗi công cụ thì
+                # ghi qc_error và cho qua (không chặn render vì lỗi QC).
+                try:
+                    from qc import expected_resolution_for_size, qc_clip
+                    exp_w, exp_h = expected_resolution_for_size(size)
+                    qc_res = await asyncio.to_thread(
+                        qc_clip,
+                        video_path,
+                        expected_duration=expected_dur,
+                        expected_width=exp_w,
+                        expected_height=exp_h,
+                    )
+                    result["qc"] = qc_res
+                    result["qc_issues"] = list(qc_res.get("issues") or [])
+                    if qc_res.get("error") and not qc_res.get("issues"):
+                        result["qc_error"] = qc_res["error"]
+                        print(f"[batch_engine Warning] QC scene {idx} không chạy được: {qc_res['error']}")
+                    elif not qc_res.get("passed"):
+                        result["qc_failed"] = True
+                        print(f"[batch_engine Warning] QC scene {idx} KHÔNG ĐẠT: {'; '.join(result['qc_issues'])}")
+                        if progress_cb:
+                            try:
+                                progress_cb(idx, f"🔍 QC không đạt: {result['qc_issues'][0][:80] if result['qc_issues'] else ''}",
+                                            {"qc_failed": True, "qc_issues": result["qc_issues"], "qc": qc_res})
+                            except TypeError:
+                                pass
+                except Exception as qc_err:
+                    result["qc_error"] = str(qc_err)
+                    print(f"[batch_engine Warning] QC scene {idx} lỗi ngoài dự kiến (bỏ qua): {qc_err}")
+
                 # 3. Trích xuất khung hình cuối cùng (Last Frame Extraction)
                 last_frame_path = os.path.join(output_dir, "scenes", f"scene_{idx:03d}_last_frame.jpg")
                 extracted_frame = await asyncio.to_thread(
@@ -1588,6 +1633,13 @@ async def process_scene(
                         "tts_failed": tts_failed,
                         "tts_error": tts_error or None,
                         "prefetched": _prefetched is not None,
+                        # Nhóm 1: QC + compliance đã ghi ở trên, giữ nguyên
+                        # trong result để film_pipeline/Monitor thấy được.
+                        "qc_failed": bool(result.get("qc_failed")),
+                        "qc_issues": list(result.get("qc_issues") or []),
+                        "qc": result.get("qc"),
+                        "used_compliance": bool(result.get("used_compliance")),
+                        "compliance_failed": bool(result.get("compliance_failed")),
                         "timing": {
                             "render_s": round(time.monotonic() - attempt_t0, 3),
                             "poll_s": round(poll_s, 3),
@@ -1606,9 +1658,16 @@ async def process_scene(
                         "error": None,
                         "tts_failed": tts_failed,
                         "tts_error": tts_error or None,
+                        "qc_failed": bool(result.get("qc_failed")),
+                        "qc_issues": list(result.get("qc_issues") or []),
+                        "qc": result.get("qc"),
+                        "used_compliance": bool(result.get("used_compliance")),
+                        "compliance_failed": bool(result.get("compliance_failed")),
                     }
                     if tts_failed:
                         msg_text = "✅ Hoàn thành ⚠️ TTS lỗi — cảnh mất tiếng (audio im lặng)"
+                    elif result.get("qc_failed"):
+                        msg_text = "✅ Hoàn thành 🔍 QC không đạt — xem chi tiết trong thẻ cảnh"
                     else:
                         msg_text = "✅ Hoàn thành (Đã trích xuất Last Frame)" if extracted_frame else "✅ Hoàn thành!"
                     try:
@@ -1661,8 +1720,21 @@ async def process_scene(
                 # Nếu bị lỗi ở lần 1, thử lại ĐÚNG 1 LẦN sau khoảng nghỉ
                 if attempt == 1:
                     if is_prompt_refusal:
-                        if progress_cb:
-                            progress_cb(idx, "🪄 Muse từ chối nội dung. Đang tự động làm sạch prompt...")
+                        # Nhóm 1 — retry compliance: ưu tiên compliance_prompt
+                        # của shot (nếu có) thay vì tự sanitize. Chỉ 1 lần duy
+                        # nhất; lần 2 mà vẫn bị từ chối thì dừng (nhánh dưới).
+                        if compliance_prompt and compliance_prompt != prompt.strip() and not compliance_tried:
+                            compliance_tried = True
+                            result["used_compliance"] = True
+                            prompt = compliance_prompt
+                            scene["prompt"] = compliance_prompt
+                            result["compliance_prompt_used"] = compliance_prompt
+                            msg_retry = (f"🛡️ Cảnh {idx}: prompt gốc bị từ chối — "
+                                         f"thử lại ĐÚNG 1 lần bằng compliance_prompt (lần 2/2)...")
+                            print(f"[batch_engine] {msg_retry}")
+                            if progress_cb:
+                                progress_cb(idx, msg_retry)
+                            continue
                         healed_prompt = sanitize_prompt_heuristics(prompt, clean_err, aggressive=True)
                         if healed_prompt != prompt:
                             prompt = healed_prompt
@@ -1678,23 +1750,37 @@ async def process_scene(
                         continue
 
                 # Đã thử hết số lần hoặc lỗi không thể khắc phục -> DỪNG NGAY
+                # (không retry prompt gốc, không retry lần 2).
                 result["status"] = "error"
                 result["error"] = clean_err
                 result["prompt"] = prompt
+                if is_prompt_refusal and result.get("used_compliance"):
+                    # Lần 2 đã dùng compliance_prompt mà vẫn bị từ chối:
+                    # ghi rõ để Monitor/log nói đúng, không thử nữa.
+                    result["compliance_failed"] = True
+                    result["error"] = (
+                        "Cả prompt gốc và compliance_prompt đều bị từ chối: " + clean_err
+                    )
                 if is_prompt_refusal:
                     result["suggested_prompt"] = sanitize_prompt_heuristics(prompt, clean_err, aggressive=True)
                 if progress_cb:
+                    # Nhóm 1: báo rõ compliance đã thử/không đạt qua extra để
+                    # Monitor hiện badge; msg lỗi dùng result["error"] (đã ghi
+                    # rõ "cả prompt gốc và compliance đều bị từ chối" nếu có).
+                    final_err = result.get("error") or clean_err
                     err_extra = {
                         "status": "error",
-                        "error": clean_err,
+                        "error": final_err,
                         "prompt": prompt,
                         "suggested_prompt": result.get("suggested_prompt", ""),
                         "is_refusal": is_prompt_refusal,
+                        "used_compliance": bool(result.get("used_compliance")),
+                        "compliance_failed": bool(result.get("compliance_failed")),
                     }
                     try:
-                        progress_cb(idx, f"❌ Thất bại: {clean_err[:60]}", err_extra)
+                        progress_cb(idx, f"❌ Thất bại: {final_err[:60]}", err_extra)
                     except TypeError:
-                        progress_cb(idx, f"❌ Thất bại: {clean_err[:60]}")
+                        progress_cb(idx, f"❌ Thất bại: {final_err[:60]}")
                 break
 
         return result
