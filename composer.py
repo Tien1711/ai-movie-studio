@@ -85,6 +85,108 @@ def _clips_share_fps(clips: List[str]) -> bool:
     base = fps_list[0]
     return all(abs(f - base) < 0.5 for f in fps_list)
 
+
+def _probe_video_info(clip: str) -> Dict[str, Any]:
+    """Đo đủ thông số 1 clip để quyết định đường ghép: fps, kích thước,
+    có audio không, sample rate + số kênh audio. Thử ffprobe trước,
+    fallback `ffmpeg -i` (xem _probe_fps). Đo không được -> giá trị None
+    (caller coi như không tương thích, đi nhánh encode cho chắc)."""
+    info: Dict[str, Any] = {"fps": None, "width": None, "height": None,
+                            "has_audio": False, "sample_rate": None,
+                            "channels": None}
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_entries", "stream=codec_type,width,height,r_frame_rate,sample_rate,channels",
+             clip],
+            capture_output=True, text=True, timeout=30,
+        )
+        import json as _json
+        data = _json.loads(out.stdout or "{}")
+        for st in data.get("streams") or []:
+            if st.get("codec_type") == "video" and info["width"] is None:
+                info["width"] = st.get("width")
+                info["height"] = st.get("height")
+                num, _, den = (st.get("r_frame_rate") or "0/1").partition("/")
+                den_f = float(den or 1)
+                if den_f:
+                    info["fps"] = float(num) / den_f
+            elif st.get("codec_type") == "audio" and not info["has_audio"]:
+                info["has_audio"] = True
+                try:
+                    info["sample_rate"] = int(st.get("sample_rate") or 0) or None
+                except Exception:
+                    pass
+                info["channels"] = st.get("channels")
+        if info["width"] is not None:
+            return info
+    except Exception:
+        pass
+    try:
+        res = subprocess.run([FFMPEG, "-i", clip], capture_output=True,
+                             text=True, timeout=30)
+        err = res.stderr or ""
+        m = re.search(r"Video:.*?,\s(\d+)x(\d+)", err)
+        if m:
+            info["width"], info["height"] = int(m.group(1)), int(m.group(2))
+        m = re.search(r"Video:.*?,\s(\d+(?:\.\d+)?)\s*fps", err)
+        if m:
+            info["fps"] = float(m.group(1))
+        m = re.search(r"Audio:.*?,\s(\d+)\s*Hz,\s*(mono|stereo|\d+\.\d+|\d+ channels?)", err)
+        if m:
+            info["has_audio"] = True
+            info["sample_rate"] = int(m.group(1))
+            info["channels"] = 1 if m.group(2) == "mono" else 2
+    except Exception:
+        pass
+    return info
+
+
+def _clips_uniform_for_concat(clips: List[str]) -> bool:
+    """True chỉ khi mọi clip ĐỒNG NHẤT hoàn toàn: cùng fps, cùng kích thước,
+    cùng bố cục audio (có/không audio, sample rate, số kênh). Concat
+    demuxer stream-copy KHÔNG re-encode nên mọi khác biệt đều chui thẳng
+    vào file đích: khác độ phân giải -> file đổi độ phân giải giữa chừng
+    (trình phát đứng hình ở chỗ đổi — tái hiện 2026-11-10: 720p+1080p+720p
+    cùng 24fps ra file 144 frame 720p + 72 frame 1080p); khác audio ->
+    track audio đứt quãng giữa chừng. Chỉ khi đồng nhất mới được đi
+    stream-copy; còn lại phải đi nhánh encode (đã chuẩn hóa)."""
+    infos = [_probe_video_info(c) for c in clips]
+    if any(i["fps"] is None or i["width"] is None for i in infos):
+        return False
+    base = infos[0]
+    for i in infos[1:]:
+        if (abs(i["fps"] - base["fps"]) >= 0.5
+                or i["width"] != base["width"] or i["height"] != base["height"]
+                or i["has_audio"] != base["has_audio"]
+                or i["sample_rate"] != base["sample_rate"]
+                or i["channels"] != base["channels"]):
+            return False
+    return True
+
+
+def _norm_video_chain(label_in: str, w: int, h: int, label_out: str) -> str:
+    """Chuỗi chuẩn hóa video 1 đầu vào: CFR 30fps + scale về kích thước
+    chung + cùng timebase — xfade/concat đều bắt buộc các đầu vào đồng
+    nhất (khác độ phân giải là xfade lỗi, khác fps/timebase là thiếu
+    khung hình)."""
+    return (f"{label_in}fps={TARGET_FPS},scale={w}:{h},"
+            f"settb=AVTB,format=yuv420p,setpts=PTS-STARTPTS{label_out}")
+
+
+def _norm_audio_chain(label_in: Optional[str], dur: float, label_out: str) -> str:
+    """Chuỗi chuẩn hóa audio 1 đầu vào: 44100Hz stereo. Clip câm
+    (label_in None) thì sinh silence bằng anullsrc đủ đúng thời lượng —
+    acrossfade/concat đều cần mọi bên đều có audio, thiếu là lỗi cả
+    filtergraph (clip AI câm rất hay gặp ở Shot Desk)."""
+    if label_in is None:
+        return (f"anullsrc=r=44100:cl=stereo,atrim=0:{max(0.1, dur):.3f},"
+                f"asetpts=PTS-STARTPTS{label_out}")
+    # aresample ép sample rate; aformat ép channel layout stereo (aresample
+    # không nhận option 'ocl' trên ffmpeg đi kèm imageio-ffmpeg).
+    return (f"{label_in}aresample=44100,aformat=channel_layouts=stereo,"
+            f"asetpts=PTS-STARTPTS{label_out}")
+
 QUALITY_PROFILES = {
     "draft": {
         "scale_9_16": "scale=480:854",
@@ -674,6 +776,11 @@ def _merge_single_pass(
     """
     n = len(clips)
     durations = [get_media_duration(c) for c in clips]
+    infos = [_probe_video_info(c) for c in clips]
+    # Kích thước đích = kích thước clip đầu (giữ nguyên khung hình phim đã
+    # chọn); đo không được thì bỏ scale, xfade lỗi sẽ rơi về pairwise.
+    _w0 = infos[0].get("width") or 0
+    _h0 = infos[0].get("height") or 0
     t_durs: List[float] = []
     for i in range(1, n):
         trans = (transitions[i - 1] or "dissolve").lower()
@@ -687,13 +794,19 @@ def _merge_single_pass(
 
     parts: List[str] = []
     for i in range(n):
-        # fps + settb=AVTB: ép mọi đầu vào về cùng CFR 30fps và cùng timebase
-        # (xfade bắt buộc cùng timebase — clip AI 24fps có timebase 1/12288,
-        # 30fps có 1/15360, không ép thì lỗi "timebase do not match" và phải
-        # fallback pairwise; defense in depth cho clip không qua
-        # compose_scene_video).
-        parts.append(f"[{i}:v]fps={TARGET_FPS},settb=AVTB,format=yuv420p,setpts=PTS-STARTPTS[v{i}in]")
-        parts.append(f"[{i}:a]aresample=44100,asetpts=PTS-STARTPTS[a{i}in]")
+        # Chuẩn hóa MỌI đầu vào về cùng CFR 30fps + cùng kích thước + cùng
+        # timebase + cùng audio 44100 stereo (xfade/acrossfade/concat đều
+        # bắt buộc đồng nhất). Clip khác độ phân giải mà không scale thì
+        # xfade lỗi "Error reinitializing filters" rồi rơi về pairwise
+        # (vốn cũng lỗi khung hình — xem nhánh 3b); clip câm mà không
+        # anullsrc thì cả filtergraph lỗi vì thiếu stream audio.
+        v_in = f"[{i}:v]"
+        if _w0 and _h0:
+            parts.append(_norm_video_chain(v_in, _w0, _h0, f"[v{i}in]"))
+        else:
+            parts.append(f"{v_in}fps={TARGET_FPS},settb=AVTB,format=yuv420p,setpts=PTS-STARTPTS[v{i}in]")
+        a_in = f"[{i}:a]" if infos[i].get("has_audio") else None
+        parts.append(_norm_audio_chain(a_in, durations[i], f"[a{i}in]"))
 
     # Chuỗi video: xfade cho dissolve/fade, concat cho cut (giữ đúng độ dài).
     cur_v = "v0in"
@@ -771,17 +884,20 @@ def merge_clips_advanced(
 
     sound_bridge_duration = _as_float(sound_bridge_duration, "sound_bridge_duration")
     # Chỉ dùng concat thuần khi TẤT CẢ transitions là cut/none VÀ không có
-    # sound bridge VÀ mọi clip cùng fps: concat (demuxer lẫn filter) nối
-    # trực tiếp theo timestamp — clip khác fps/timebase sẽ lệch timeline
-    # và đứng hình ở chỗ nối (tái hiện 2026-11-09: 3 clip 24/30/25fps nối
-    # bằng stream-copy ra 15.71s thay vì 15.0s + 1.29s đứng hình).
-    # Clip khác fps thì bỏ qua 2 nhánh concat, đi thẳng single-pass xfade
-    # (đã chuẩn hóa fps) bên dưới.
-    same_fps = _clips_share_fps(clips)
+    # sound bridge VÀ mọi clip ĐỒNG NHẤT hoàn toàn (cùng fps, cùng kích
+    # thước, cùng bố cục audio): concat (demuxer lẫn filter) nối trực
+    # tiếp theo timestamp, KHÔNG re-encode — mọi khác biệt đều chui thẳng
+    # vào file đích. Tái hiện 2026-11-09: clip khác fps/timebase nối bằng
+    # stream-copy ra 15.71s thay vì 15.0s + 1.29s đứng hình. Tái hiện
+    # 2026-11-10: clip cùng 24fps nhưng khác độ phân giải (720p+1080p+720p)
+    # ra file đổi độ phân giải giữa chừng (144 frame 720p + 72 frame
+    # 1080p) — trình phát đứng hình ở chỗ đổi. Clip không đồng nhất thì
+    # bỏ qua 2 nhánh concat, đi thẳng single-pass xfade (đã chuẩn hóa).
+    same_all = _clips_uniform_for_concat(clips)
     all_cuts = (
         all((t or "none").lower() in ("none", "cut", "match cut") for t in transitions)
         and sound_bridge_duration < 0.05
-        and same_fps
+        and same_all
     )
 
     # ── Chiến lược 1: Concat Demuxer siêu tốc (Zero Re-encoding khi toàn bộ là Cut) ──
@@ -875,31 +991,77 @@ def merge_clips_advanced(
                 pct = 25 + int((i / total_steps) * 45)
                 progress_cb(pct, f"Dựng chuyển cảnh ({i}/{total_steps}): {trans}...")
 
+            # Chuẩn hóa cặp clip trước mọi phép ghép: kích thước đích =
+            # kích thước clip hiện tại (clip đầu của cả timeline); audio
+            # câm thì sinh silence (xem _norm_audio_chain).
+            _info0 = _probe_video_info(current_merged)
+            _info1 = _probe_video_info(next_clip)
+            _pw, _ph = _info0.get("width"), _info0.get("height")
+            if not _pw or not _ph:
+                _pw, _ph = _info1.get("width"), _info1.get("height")
+
+            def _pw_vchain(idx: int) -> str:
+                if _pw and _ph:
+                    return _norm_video_chain(f"[{idx}:v]", _pw, _ph, f"[v{idx}]")
+                return (f"[{idx}:v]fps={TARGET_FPS},settb=AVTB,format=yuv420p,"
+                        f"setpts=PTS-STARTPTS[v{idx}]")
+
+            def _pw_achain(idx: int, info: Dict, dur: float) -> str:
+                a_in = f"[{idx}:a]" if info.get("has_audio") else None
+                return _norm_audio_chain(a_in, dur, f"[a{idx}]")
+
             if t_dur < 0.1 or trans in ("none", "cut", "match cut"):
-                clist = step_out + ".txt"
-                with open(clist, "w", encoding="utf-8") as f:
-                    f.write(_concat_list_line(current_merged))
-                    f.write(_concat_list_line(next_clip))
-                try:
+                if _clips_uniform_for_concat([current_merged, next_clip]):
+                    # Cặp đồng nhất: stream-copy nhanh như cũ.
+                    clist = step_out + ".txt"
+                    with open(clist, "w", encoding="utf-8") as f:
+                        f.write(_concat_list_line(current_merged))
+                        f.write(_concat_list_line(next_clip))
                     try:
-                        subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", step_out], check=True, capture_output=True, timeout=120)
-                    except Exception:
-                        subprocess.run([
-                            FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist,
-                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", step_out
-                        ], check=True, capture_output=True, timeout=120)
-                finally:
-                    if os.path.exists(clist):
-                        try: os.remove(clist)
-                        except Exception: pass
+                        try:
+                            subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", step_out], check=True, capture_output=True, timeout=120)
+                        except Exception:
+                            subprocess.run([
+                                FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist,
+                                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", step_out
+                            ], check=True, capture_output=True, timeout=120)
+                    finally:
+                        if os.path.exists(clist):
+                            try: os.remove(clist)
+                            except Exception: pass
+                else:
+                    # Cặp KHÔNG đồng nhất: cấm stream-copy — file sẽ đổi
+                    # độ phân giải/audio giữa chừng -> trình phát đứng hình
+                    # (tái hiện 2026-11-10). Ghép bằng concat filter sau
+                    # khi chuẩn hóa cả 2 đầu vào.
+                    fc = (f"{_pw_vchain(0)};{_pw_vchain(1)};"
+                          f"{_pw_achain(0, _info0, d1)};{_pw_achain(1, _info1, d2)};"
+                          f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]")
+                    cmd = [
+                        FFMPEG, "-y",
+                        "-i", current_merged,
+                        "-i", next_clip,
+                        "-filter_complex", fc,
+                        "-map", "[v]", "-map", "[a]",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                        "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-b:a", "192k",
+                        step_out
+                    ]
+                    _run(cmd, f"Ghép nối clip {i} (chuẩn hóa)")
             else:
                 offset = max(0.1, d1 - t_dur)
-                # fps + settb=AVTB cho cả 2 đầu vào (như single-pass): pairwise
-                # overlay cũng yêu cầu cùng fps/timebase, clip AI trộn fps mà
-                # không ép sẽ ra file thiếu khung hình (tái hiện: 14s chỉ có
-                # 120 frame ≈ 8.6fps).
-                fc = f"[1:v]fps={TARGET_FPS},settb=AVTB,format=yuva420p,fade=t=in:st=0:d={t_dur:.2f}:alpha=1,setpts=PTS-STARTPTS+{offset:.2f}/TB[v1];[0:v]fps={TARGET_FPS},settb=AVTB,format=yuva420p[v0];[v0][v1]overlay=eof_action=pass[v];[0:a][1:a]acrossfade=d={t_dur:.2f}[a]"
+                # Dissolve bằng xfade (BỎ overlay+fade): overlay với
+                # eof_action=pass vẫn làm mất toàn bộ khung hình sau khi
+                # clip đầu kết thúc (tái hiện 2026-11-10: 2 clip 3s
+                # dissolve 0.5s ra file 5.5s nhưng chỉ có 90 frame thay vì
+                # 165 — video đứng hình từ giây thứ 3 trong khi audio vẫn
+                # chạy). xfade giữ đúng số frame ở mọi bước.
+                fc = (f"{_pw_vchain(0)};{_pw_vchain(1)};"
+                      f"[v0][v1]xfade=transition=fade:duration={t_dur:.2f}:offset={offset:.2f}[v];"
+                      f"{_pw_achain(0, _info0, d1)};{_pw_achain(1, _info1, d2)};"
+                      f"[a0][a1]acrossfade=d={t_dur:.2f}[a]")
                 cmd = [
                     FFMPEG, "-y",
                     "-i", current_merged,
