@@ -157,3 +157,44 @@ def test_compose_full_movie_none_no_srt(tmp_path):
     final_dir = tmp_path / "final"
     names = [p.name for p in final_dir.iterdir()]
     assert not any(n.endswith(".srt") for n in names), names
+
+
+# ── Fix 2026-11-10 (PR #16 để sót): pipeline bỏ qua srt_path trả về ──────
+
+def test_sync_job_srt_file_from_compose_result(tmp_path):
+    import app as app_module
+    job = {"id": "job1"}
+    srt = tmp_path / "movie_123.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHi\n", encoding="utf-8")
+    app_module._sync_job_srt_file(job, {"srt_path": str(srt)})
+    assert job["srt_file"] == "/api/jobs/job1/subtitles"
+    # burn_in / none: compose trả srt_path None -> cờ cũ (nếu có) phải bị xóa
+    job["srt_file"] = "/api/jobs/job1/subtitles"
+    app_module._sync_job_srt_file(job, {"srt_path": None})
+    assert "srt_file" not in job
+    app_module._sync_job_srt_file(job, {"srt_path": str(tmp_path / "khong_co.srt")})
+    assert "srt_file" not in job
+
+
+def test_subtitles_endpoint_ignores_stale_srt(tmp_path, monkeypatch):
+    """Endpoint chỉ phục vụ SRT cùng basename với video hiện tại; file SRT cũ
+    còn sót trong final/ (khác timestamp) phải trả 404, không được glob lấy."""
+    import app as app_module
+    from pathlib import Path
+
+    job_dir = tmp_path / "job1"
+    final_dir = job_dir / "final"
+    final_dir.mkdir(parents=True)
+    (final_dir / "movie_111.srt").write_text("cu\n", encoding="utf-8")
+    (final_dir / "movie_222.mp4").write_bytes(b"fake")
+    job = {"id": "job1", "final_video": "/api/jobs/job1/video/movie_222.mp4",
+           "req": None}
+    monkeypatch.setattr(app_module, "get_or_restore_job", lambda jid: job)
+    monkeypatch.setattr(app_module, "get_safe_job_dir", lambda jid: job_dir)
+    resp = app_module.api_download_subtitles("job1")
+    assert resp.status_code == 404
+    # SRT cùng basename với video hiện tại thì phục vụ được
+    (final_dir / "movie_222.srt").write_text("moi\n", encoding="utf-8")
+    resp = app_module.api_download_subtitles("job1")
+    assert resp.status_code == 200
+    assert Path(resp.path).name == "movie_222.srt"

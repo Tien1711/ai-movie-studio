@@ -478,6 +478,22 @@ def _unwrap_final_path(final_path: Any, *, context: str = "compose_full_movie") 
     return path
 
 
+def _sync_job_srt_file(job: Dict, compose_result: Any) -> None:
+    """Đồng bộ job['srt_file'] với kết quả compose_full_movie (fix 2026-11-10):
+    chỉ chế độ 'srt_only' mới có file SRT riêng trong final/ (burn_in đã
+    khắc phụ đề vào video, 'none' thì không có SRT). Trước đây pipeline kiểm
+    tra file final/{title}.srt — tên file đó không còn ai ghi nữa (compose
+    ghi {safe_title}_{ts}.srt) nên job['srt_file'] không bao giờ được set,
+    và sau PR #16 (ẩn nút tải SRT khi không có srt_file) thì nút tải biến
+    mất luôn cả ở chế độ srt_only. Compose trả dict {'srt_path', ...} nên
+    đọc trực tiếp từ đó; job cũ không có srt_path thì xóa cờ cũ đi."""
+    srt = compose_result.get("srt_path") if isinstance(compose_result, dict) else None
+    if srt and os.path.exists(str(srt)):
+        job["srt_file"] = f"/api/jobs/{job['id']}/subtitles"
+    else:
+        job.pop("srt_file", None)
+
+
 def save_job(job: Dict):
     """Ghi job_state.json atomic (tmp + fsync + os.replace). Lỗi được log đầy đủ
     và raise để caller biết — KHÔNG nuốt lặng (audit §1.3). Các progress callback
@@ -1042,28 +1058,25 @@ async def film_pipeline(job: Dict, req: MovieRequest):
 
             else:
                 # Xuất 1 phim dài hoàn chỉnh
-                final_path = _unwrap_final_path(
-                    await asyncio.to_thread(
-                        compose_full_movie,
-                        results=results,
-                        output_dir=str(output_dir),
-                        project_title=req.title.replace(" ", "_"),
-                        font_size=req.font_size,
-                        bg_music_path=req.bg_music_path,
-                        music_volume=req.music_volume if req.music_volume is not None else 0.25,
-                        voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
-                        subtitle_mode=req.subtitle_mode or "burn_in",
-                        quality=req.quality or "720p",
-                        transition=req.transition or "none",
-                        aspect_ratio=req.aspect_ratio or "16:9",
-                        allow_partial=bool(req.allow_partial),
-                    )
+                compose_res = await asyncio.to_thread(
+                    compose_full_movie,
+                    results=results,
+                    output_dir=str(output_dir),
+                    project_title=req.title.replace(" ", "_"),
+                    font_size=req.font_size,
+                    bg_music_path=req.bg_music_path,
+                    music_volume=req.music_volume if req.music_volume is not None else 0.25,
+                    voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
+                    subtitle_mode=req.subtitle_mode or "burn_in",
+                    quality=req.quality or "720p",
+                    transition=req.transition or "none",
+                    aspect_ratio=req.aspect_ratio or "16:9",
+                    allow_partial=bool(req.allow_partial),
                 )
+                final_path = _unwrap_final_path(compose_res)
                 rel = Path(final_path).name
                 job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
-                srt_path = output_dir / "final" / f"{req.title.replace(' ', '_')}.srt"
-                if srt_path.exists():
-                    job["srt_file"] = f"/api/jobs/{job_id}/subtitles"
+                _sync_job_srt_file(job, compose_res)
                 job["progress"] = 100
                 job["status"] = "done"
                 if not audit["is_complete"]:
@@ -1440,28 +1453,25 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
         # Hậu kỳ ghép lại phim hoàn chỉnh
         try:
             job_log(job, "🎞️ Đang tự động ghép lại phim với các cảnh vừa tạo lại...")
-            final_path = _unwrap_final_path(
-                await asyncio.to_thread(
-                    compose_full_movie,
-                    results=all_results,
-                    output_dir=str(output_dir),
-                    project_title=req.title.replace(" ", "_"),
-                    font_size=req.font_size,
-                    bg_music_path=req.bg_music_path,
-                    music_volume=req.music_volume if req.music_volume is not None else 0.25,
-                    voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
-                    subtitle_mode=req.subtitle_mode or "burn_in",
-                    quality=req.quality or "720p",
-                    transition=req.transition or "none",
-                    aspect_ratio=req.aspect_ratio or "16:9",
-                    allow_partial=False,
-                )
+            compose_res = await asyncio.to_thread(
+                compose_full_movie,
+                results=all_results,
+                output_dir=str(output_dir),
+                project_title=req.title.replace(" ", "_"),
+                font_size=req.font_size,
+                bg_music_path=req.bg_music_path,
+                music_volume=req.music_volume if req.music_volume is not None else 0.25,
+                voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
+                subtitle_mode=req.subtitle_mode or "burn_in",
+                quality=req.quality or "720p",
+                transition=req.transition or "none",
+                aspect_ratio=req.aspect_ratio or "16:9",
+                allow_partial=False,
             )
+            final_path = _unwrap_final_path(compose_res)
             rel = Path(final_path).name
             job["final_video"] = f"/api/jobs/{job['id']}/video/{rel}"
-            srt_path = output_dir / "final" / f"{req.title.replace(' ', '_')}.srt"
-            if srt_path.exists():
-                job["srt_file"] = f"/api/jobs/{job['id']}/subtitles"
+            _sync_job_srt_file(job, compose_res)
             job["progress"] = 100
             job["status"] = "done"
             job_log(job, f"🎉 Đã tái xuất phim hoàn chỉnh 100%! → {rel}")
@@ -1823,28 +1833,25 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
                 elif audit["is_complete"]:
                     job_log(job, f"🎞️ Toàn bộ {audit['total']} cảnh đã hoàn tất! Đang ghép lại phim hoàn chỉnh...")
                     try:
-                        final_path = _unwrap_final_path(
-                            await asyncio.to_thread(
-                                compose_full_movie,
-                                results=all_results,
-                                output_dir=str(output_dir),
-                                project_title=req.title.replace(" ", "_"),
-                                font_size=req.font_size,
-                                bg_music_path=req.bg_music_path,
-                                music_volume=req.music_volume if req.music_volume is not None else 0.25,
-                                voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
-                                subtitle_mode=req.subtitle_mode or "burn_in",
-                                quality=req.quality or "720p",
-                                transition=req.transition or "none",
-                                aspect_ratio=req.aspect_ratio or "16:9",
-                                allow_partial=False,
-                            )
+                        compose_res = await asyncio.to_thread(
+                            compose_full_movie,
+                            results=all_results,
+                            output_dir=str(output_dir),
+                            project_title=req.title.replace(" ", "_"),
+                            font_size=req.font_size,
+                            bg_music_path=req.bg_music_path,
+                            music_volume=req.music_volume if req.music_volume is not None else 0.25,
+                            voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
+                            subtitle_mode=req.subtitle_mode or "burn_in",
+                            quality=req.quality or "720p",
+                            transition=req.transition or "none",
+                            aspect_ratio=req.aspect_ratio or "16:9",
+                            allow_partial=False,
                         )
+                        final_path = _unwrap_final_path(compose_res)
                         rel = Path(final_path).name
                         job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
-                        srt_path = output_dir / "final" / f"{req.title.replace(' ', '_')}.srt"
-                        if srt_path.exists():
-                            job["srt_file"] = f"/api/jobs/{job_id}/subtitles"
+                        _sync_job_srt_file(job, compose_res)
                         job["progress"] = 100
                         job["status"] = "done"
                         job_log(job, f"🎉 Đã tái xuất phim hoàn chỉnh 100%! → {rel}")
@@ -2337,28 +2344,25 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
     try:
         job_log(job, f"🎞️ Đang tiến hành xuất phim ({'Xuất bản nháp' if allow_partial else 'Xuất hoàn chỉnh'}, quality={quality}, sub={subtitle_mode}, trans={transition})...")
         aspect_ratio = req.aspect_ratio or "16:9" if req else "16:9"
-        final_path = _unwrap_final_path(
-            await asyncio.to_thread(
-                compose_full_movie,
-                results=results,
-                output_dir=str(output_dir),
-                project_title=title,
-                font_size=font_size,
-                bg_music_path=bg_music_path,
-                music_volume=music_volume,
-                voice_volume=voice_volume,
-                subtitle_mode=subtitle_mode,
-                quality=quality,
-                transition=transition,
-                aspect_ratio=aspect_ratio,
-                allow_partial=allow_partial,
-            )
+        compose_res = await asyncio.to_thread(
+            compose_full_movie,
+            results=results,
+            output_dir=str(output_dir),
+            project_title=title,
+            font_size=font_size,
+            bg_music_path=bg_music_path,
+            music_volume=music_volume,
+            voice_volume=voice_volume,
+            subtitle_mode=subtitle_mode,
+            quality=quality,
+            transition=transition,
+            aspect_ratio=aspect_ratio,
+            allow_partial=allow_partial,
         )
+        final_path = _unwrap_final_path(compose_res)
         rel = Path(final_path).name
         job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
-        srt_path = output_dir / "final" / f"{title}.srt"
-        if srt_path.exists():
-            job["srt_file"] = f"/api/jobs/{job_id}/subtitles"
+        _sync_job_srt_file(job, compose_res)
         job["progress"] = 100
         job["status"] = "done"
         job_log(job, f"🎉 Xuất phim thành công! → {rel}")
@@ -2466,26 +2470,34 @@ async def api_preview_keyframe(req: KeyframePreviewRequest):
 
 @app.get("/api/jobs/{job_id}/subtitles")
 def api_download_subtitles(job_id: str):
-    """Tải file phụ đề SRT của phim an toàn."""
+    """Tải file phụ đề SRT của phim an toàn.
+    Chỉ phục vụ file SRT đi kèm đúng video thành phẩm hiện tại của job
+    (cùng basename, khác đuôi .srt) — fix 2026-11-10: trước đây endpoint
+    fallback glob final/*.srt nên có thể phục vụ file SRT CŨ còn sót từ
+    lần xuất trước (burn_in cũ), khiến trình phát lại hiện 2 phụ đề dù
+    bản xuất mới đã không còn file SRT cạnh mp4."""
     job = get_or_restore_job(job_id)
     if not job:
         return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
+    final_video = job.get("final_video") or ""
+    video_name = final_video.rsplit("/", 1)[-1] if final_video else ""
+    video_stem = video_name.rsplit(".", 1)[0] if "." in video_name else video_name
+    candidates = []
+    if video_stem:
+        candidates.append(f"final/{video_stem}.srt")
     req: Optional[MovieRequest] = job.get("req")
     title = (req.title if req else "movie").replace(" ", "_")
     clean_title = "".join(c for c in title if c.isalnum() or c in ("-", "_")).strip() or "movie"
-    srt_path = resolve_safe_job_path(job_id, f"final/{clean_title}.srt")
-    if not srt_path.exists() or not srt_path.is_file():
-        final_dir = resolve_safe_job_path(job_id, "final")
-        srts = [f for f in final_dir.glob("*.srt") if f.is_file()] if final_dir.exists() else []
-        if srts:
-            srt_path = srts[0]
-        else:
-            return JSONResponse({"error": "Không tìm thấy file phụ đề SRT"}, status_code=404)
-    return FileResponse(
-        str(srt_path),
-        media_type="application/x-subrip",
-        headers={"Content-Disposition": f"attachment; filename*=utf-8''{srt_path.name}"}
-    )
+    candidates.append(f"final/{clean_title}.srt")
+    for cand in candidates:
+        srt_path = resolve_safe_job_path(job_id, cand)
+        if srt_path.exists() and srt_path.is_file():
+            return FileResponse(
+                str(srt_path),
+                media_type="application/x-subrip",
+                headers={"Content-Disposition": f"attachment; filename*=utf-8''{srt_path.name}"}
+            )
+    return JSONResponse({"error": "Không tìm thấy file phụ đề SRT"}, status_code=404)
 
 
 @app.get("/api/jobs/{job_id}/metadata")
