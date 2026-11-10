@@ -15,25 +15,31 @@ from composer import (
     FFMPEG,
     TARGET_FPS,
     _clips_share_fps,
+    _clips_uniform_for_concat,
     _probe_fps,
+    _probe_video_info,
     compose_full_movie,
     compose_scene_video,
+    get_media_duration,
     merge_clips_advanced,
 )
 
 CLIP_DUR = 2.0
 
 
-def _make_clip(path, fps, dur=CLIP_DUR):
-    subprocess.run(
-        [FFMPEG, "-y", "-f", "lavfi", "-i",
-         f"testsrc=size=720x1280:rate={fps},format=yuv420p",
-         "-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}",
-         "-t", str(dur), "-c:v", "libx264", "-preset", "ultrafast",
-         "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
-         path],
-        check=True, capture_output=True, text=True,
-    )
+def _make_clip(path, fps, dur=CLIP_DUR, w=720, h=1280, audio=True):
+    cmd = [FFMPEG, "-y", "-f", "lavfi", "-i",
+           f"testsrc=size={w}x{h}:rate={fps},format=yuv420p"]
+    if audio:
+        cmd += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={dur}"]
+    cmd += ["-t", str(dur), "-c:v", "libx264", "-preset", "ultrafast",
+            "-crf", "23", "-pix_fmt", "yuv420p"]
+    if audio:
+        cmd += ["-c:a", "aac", "-b:a", "128k"]
+    else:
+        cmd += ["-an"]
+    cmd.append(path)
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
     return path
 
 
@@ -70,6 +76,38 @@ def _freeze_seconds(path):
     return total
 
 
+def _frame_sizes(path, sample_times=None):
+    """Kích thước frame của file đích — phát hiện file đổi độ phân giải
+    giữa chừng, thứ ffprobe -show_streams không thấy (nó chỉ báo kích
+    thước stream đầu tiên). Ưu tiên ffprobe -show_frames (chính xác từng
+    frame); máy không có ffprobe thì trích mẫu frame tại các thời điểm cho
+    trước rồi đọc kích thước bằng PIL."""
+    import shutil
+    from collections import Counter
+    if shutil.which("ffprobe"):
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_entries", "frame=width,height",
+             "-select_streams", "v:0", "-show_frames", path],
+            capture_output=True, text=True,
+        )
+        import json as _json
+        data = _json.loads(out.stdout or "{}")
+        return Counter((f.get("width"), f.get("height"))
+                       for f in data.get("frames", []))
+    from PIL import Image
+    sizes = Counter()
+    for t in (sample_times or [0.5]):
+        img = f"{path}.sample_{t}.png"
+        subprocess.run([FFMPEG, "-y", "-ss", str(t), "-i", path,
+                        "-frames:v", "1", img],
+                       check=True, capture_output=True)
+        with Image.open(img) as im:
+            sizes[im.size] += 1
+        os.remove(img)
+    return sizes
+
+
 def _results(clips):
     return [
         {"index": i + 1, "status": "done", "video_path": c,
@@ -104,7 +142,6 @@ def test_merge_mixed_fps_none_no_freeze(tmp_path):
     out = str(tmp_path / "merged_none.mp4")
     merge_clips_advanced(clips, transitions=["none", "none"],
                          sound_bridge_duration=0.0, output_path=out)
-    from composer import get_media_duration
     assert get_media_duration(out) == pytest.approx(3 * CLIP_DUR, abs=0.3)
     assert _probe_fps(out) == pytest.approx(TARGET_FPS)
     assert _count_frames(out) == pytest.approx(3 * CLIP_DUR * TARGET_FPS, abs=6)
@@ -198,3 +235,76 @@ def test_subtitles_endpoint_ignores_stale_srt(tmp_path, monkeypatch):
     resp = app_module.api_download_subtitles("job1")
     assert resp.status_code == 200
     assert Path(resp.path).name == "movie_222.srt"
+
+
+# ── Fix 2026-11-10 (PR #18): clip trộn độ phân giải / trộn audio ──────────
+# Clip AI thô kiểu Shot Desk: cùng fps nhưng khác độ phân giải, có clip câm.
+
+def _mixed_res_clips(tmp_path):
+    return [
+        _make_clip(str(tmp_path / "r720.mp4"), 24, w=720, h=1280),
+        _make_clip(str(tmp_path / "r1080.mp4"), 24, w=1080, h=1920),
+        _make_clip(str(tmp_path / "r720b.mp4"), 24, w=720, h=1280),
+    ]
+
+
+def test_clips_uniform_for_concat(tmp_path):
+    a = _make_clip(str(tmp_path / "u1.mp4"), 24)
+    b = _make_clip(str(tmp_path / "u2.mp4"), 24)
+    c = _make_clip(str(tmp_path / "u3.mp4"), 24, w=1080, h=1920)
+    d = _make_clip(str(tmp_path / "u4.mp4"), 24, audio=False)
+    assert _clips_uniform_for_concat([a, b]) is True
+    assert _clips_uniform_for_concat([a, c]) is False  # khác độ phân giải
+    assert _clips_uniform_for_concat([a, d]) is False  # khác audio
+    assert _clips_uniform_for_concat([a, str(tmp_path / "missing.mp4")]) is False
+
+
+def test_merge_mixed_resolution_none_uniform(tmp_path):
+    clips = _mixed_res_clips(tmp_path)
+    out = str(tmp_path / "mixres_none.mp4")
+    merge_clips_advanced(clips, transitions=["none", "none"],
+                         sound_bridge_duration=0.0, output_path=out)
+    assert get_media_duration(out) == pytest.approx(3 * CLIP_DUR, abs=0.3)
+    assert _count_frames(out) == pytest.approx(3 * CLIP_DUR * TARGET_FPS, abs=6)
+    # Trước fix: stream-copy cho ra file đổi độ phân giải giữa chừng
+    # (144 frame 720p + 72 frame 1080p) -> trình phát đứng hình ở chỗ đổi.
+    assert set(_frame_sizes(out, [1.0, 3.0, 5.0])) == {(720, 1280)}
+
+
+def test_merge_mixed_resolution_dissolve_uniform(tmp_path):
+    clips = _mixed_res_clips(tmp_path)
+    out = str(tmp_path / "mixres_dissolve.mp4")
+    merge_clips_advanced(clips, transitions=["dissolve", "dissolve"],
+                         sound_bridge_duration=0.5, output_path=out)
+    assert get_media_duration(out) == pytest.approx(5.0, abs=0.3)
+    assert _count_frames(out) == pytest.approx(5.0 * TARGET_FPS, abs=6)
+    assert set(_frame_sizes(out, [1.0, 2.5, 4.0])) == {(720, 1280)}
+
+
+def test_merge_mixed_audio_none_continuous(tmp_path):
+    clips = [
+        _make_clip(str(tmp_path / "a1.mp4"), 24),
+        _make_clip(str(tmp_path / "a2.mp4"), 24, audio=False),
+        _make_clip(str(tmp_path / "a3.mp4"), 24),
+    ]
+    out = str(tmp_path / "mixaudio_none.mp4")
+    merge_clips_advanced(clips, transitions=["none", "none"],
+                         sound_bridge_duration=0.0, output_path=out)
+    assert get_media_duration(out) == pytest.approx(3 * CLIP_DUR, abs=0.3)
+    assert _count_frames(out) == pytest.approx(3 * CLIP_DUR * TARGET_FPS, abs=6)
+    assert _probe_video_info(out)["has_audio"] is True
+    assert set(_frame_sizes(out, [1.0, 3.0, 5.0])) == {(720, 1280)}
+
+
+def test_merge_mixed_resolution_dissolve_pairwise_fallback(tmp_path, monkeypatch):
+    # Ép nhánh pairwise cũ (COMPOSE_MODE=pairwise): xfade từng bước phải
+    # giữ đúng số frame — trước fix overlay+fade làm mất toàn bộ frame sau
+    # khi clip đầu kết thúc (5.5s chỉ có 90 frame thay vì 165).
+    monkeypatch.setenv("COMPOSE_MODE", "pairwise")
+    clips = _mixed_res_clips(tmp_path)
+    out = str(tmp_path / "mixres_pairwise.mp4")
+    merge_clips_advanced(clips, transitions=["dissolve", "dissolve"],
+                         sound_bridge_duration=0.5, output_path=out)
+    assert get_media_duration(out) == pytest.approx(5.0, abs=0.3)
+    assert _count_frames(out) == pytest.approx(5.0 * TARGET_FPS, abs=6)
+    assert set(_frame_sizes(out, [1.0, 2.5, 4.0])) == {(720, 1280)}
