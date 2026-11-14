@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional
 import aiofiles
 import httpx
 from dotenv import load_dotenv
+
+load_dotenv()
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,8 +50,6 @@ from affiliate_engine import (
     generate_affiliate_script_local,
 )
 
-
-load_dotenv()
 
 logger = logging.getLogger("ai_movie_studio")
 

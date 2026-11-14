@@ -30,7 +30,52 @@ import imageio_ffmpeg
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
-FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+def _resolve_ffmpeg() -> str:
+    """Tu dong phat hien FFmpeg hien dai (>= 4.3 co xfade):
+    1. Uu tien bien moi truong IMAGEIO_FFMPEG_EXE neu da dat.
+    2. Quet cac vi tri FFmpeg hien dai pho bien tren he thong (Cubase, system PATH, ...).
+    3. Fallback sang binary mac dinh di kem imageio-ffmpeg.
+    Dong bo nguoc vao os.environ['IMAGEIO_FFMPEG_EXE'] de moi module khac dung chung."""
+    env_exe = os.environ.get("IMAGEIO_FFMPEG_EXE")
+    if env_exe and os.path.isfile(env_exe):
+        return env_exe
+
+    candidates = [
+        r"C:\Program Files\Steinberg\Cubase 14\Externals\FFmpeg\5.1.1\ffmpeg.exe",
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        shutil.which("ffmpeg"),
+    ]
+    for cand in candidates:
+        if cand and os.path.isfile(cand):
+            try:
+                res = subprocess.run([cand, "-version"], capture_output=True, timeout=5)
+                if res.returncode == 0:
+                    os.environ["IMAGEIO_FFMPEG_EXE"] = cand
+                    return cand
+            except Exception:
+                pass
+
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    os.environ["IMAGEIO_FFMPEG_EXE"] = exe
+    return exe
+
+
+FFMPEG = _resolve_ffmpeg()
+
+_HAS_XFADE_CACHE: Optional[bool] = None
+
+
+def _has_xfade() -> bool:
+    """Kiem tra binary FFmpeg hien hanh co ho tro bo loc xfade khong."""
+    global _HAS_XFADE_CACHE
+    if _HAS_XFADE_CACHE is not None:
+        return _HAS_XFADE_CACHE
+    try:
+        res = subprocess.run([FFMPEG, "-filters"], capture_output=True, text=True, timeout=10)
+        _HAS_XFADE_CACHE = "xfade" in (res.stdout or "")
+    except Exception:
+        _HAS_XFADE_CACHE = False
+    return _HAS_XFADE_CACHE
 
 # ── Chuẩn khung hình (fix lag/đứng hình, 2026-11-09) ────────────────────────
 # Clip AI trả về có fps trộn lẫn (24/25/30, có khi VFR) và timebase khác nhau.
@@ -808,12 +853,13 @@ def _merge_single_pass(
         a_in = f"[{i}:a]" if infos[i].get("has_audio") else None
         parts.append(_norm_audio_chain(a_in, durations[i], f"[a{i}in]"))
 
-    # Chuỗi video: xfade cho dissolve/fade, concat cho cut (giữ đúng độ dài).
+    # Chuỗi video: xfade cho dissolve/fade (nếu hỗ trợ), concat cho cut (giữ đúng độ dài).
     cur_v = "v0in"
     acc_dur = durations[0]
+    has_xf = _has_xfade()
     for i in range(1, n):
         t = t_durs[i - 1]
-        if t > 0.05:
+        if t > 0.05 and has_xf:
             offset = max(0.0, acc_dur - t)
             parts.append(
                 f"[{cur_v}][v{i}in]xfade=transition=fade:duration={t:.3f}:offset={offset:.3f}[x{i}]"
@@ -821,13 +867,13 @@ def _merge_single_pass(
         else:
             parts.append(f"[{cur_v}][v{i}in]concat=n=2:v=1:a=0[x{i}]")
         cur_v = f"x{i}"
-        acc_dur = acc_dur + durations[i] - t
+        acc_dur = acc_dur + durations[i] - (t if (t > 0.05 and has_xf) else 0.0)
 
     # Chuỗi audio: acrossfade cho dissolve/fade, concat cho cut.
     cur_a = "a0in"
     for i in range(1, n):
         t = t_durs[i - 1]
-        if t > 0.05:
+        if t > 0.05 and has_xf:
             parts.append(f"[{cur_a}][a{i}in]acrossfade=d={t:.3f}[a{i}]")
         else:
             parts.append(f"[{cur_a}][a{i}in]concat=n=2:v=0:a=1[a{i}]")
@@ -1052,16 +1098,15 @@ def merge_clips_advanced(
                     _run(cmd, f"Ghép nối clip {i} (chuẩn hóa)")
             else:
                 offset = max(0.1, d1 - t_dur)
-                # Dissolve bằng xfade (BỎ overlay+fade): overlay với
-                # eof_action=pass vẫn làm mất toàn bộ khung hình sau khi
-                # clip đầu kết thúc (tái hiện 2026-11-10: 2 clip 3s
-                # dissolve 0.5s ra file 5.5s nhưng chỉ có 90 frame thay vì
-                # 165 — video đứng hình từ giây thứ 3 trong khi audio vẫn
-                # chạy). xfade giữ đúng số frame ở mọi bước.
-                fc = (f"{_pw_vchain(0)};{_pw_vchain(1)};"
-                      f"[v0][v1]xfade=transition=fade:duration={t_dur:.2f}:offset={offset:.2f}[v];"
-                      f"{_pw_achain(0, _info0, d1)};{_pw_achain(1, _info1, d2)};"
-                      f"[a0][a1]acrossfade=d={t_dur:.2f}[a]")
+                if _has_xfade():
+                    fc = (f"{_pw_vchain(0)};{_pw_vchain(1)};"
+                          f"[v0][v1]xfade=transition=fade:duration={t_dur:.2f}:offset={offset:.2f}[v];"
+                          f"{_pw_achain(0, _info0, d1)};{_pw_achain(1, _info1, d2)};"
+                          f"[a0][a1]acrossfade=d={t_dur:.2f}[a]")
+                else:
+                    fc = (f"{_pw_vchain(0)};{_pw_vchain(1)};"
+                          f"{_pw_achain(0, _info0, d1)};{_pw_achain(1, _info1, d2)};"
+                          f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]")
                 cmd = [
                     FFMPEG, "-y",
                     "-i", current_merged,

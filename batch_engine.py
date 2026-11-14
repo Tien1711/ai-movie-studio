@@ -310,8 +310,17 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str):
         cache_path = None
         if use_cache:
             cache_path = _TTS_CACHE_DIR / _tts_cache_key(clean, voice)
+            dur_meta = cache_path.with_suffix(".dur")
             if cache_path.exists() and cache_path.stat().st_size > 0:
                 shutil.copy2(cache_path, output_path)
+                # Doc duration tu metadata de nhat quan (tranh sai lech do ffprobe encode overhead)
+                if dur_meta.exists():
+                    try:
+                        cached_dur = float(dur_meta.read_text().strip())
+                        if cached_dur > 0.3:
+                            return cached_dur, False, ""
+                    except (ValueError, OSError):
+                        pass
                 dur = await asyncio.to_thread(get_media_duration, output_path)
                 if dur and dur > 0.3:
                     return dur, False, ""
@@ -321,6 +330,12 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str):
             try:
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     _tts_cache_store(cache_path, output_path)
+                    # Luu kem duration metadata de cache hit tra duration nhat quan
+                    try:
+                        dur_meta = cache_path.with_suffix(".dur")
+                        dur_meta.write_text(str(dur))
+                    except OSError:
+                        pass
             except OSError:
                 pass
         return dur, False, ""

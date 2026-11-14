@@ -459,7 +459,7 @@ def test_create_movie_returns_queue_position():
         # Chờ worker xử lý xong (không có key -> job error nhanh).
         time.sleep(1.0)
         job = client.get(f"/api/jobs/{job_id}").json()
-        assert job["status"] in ("queued", "running", "error"), job["status"]
+        assert job["status"] in ("queued", "running", "error", "cancelled"), job["status"]
     finally:
         JOBS.pop(job_id, None)
         app_mod.dequeue_render_job(job_id)

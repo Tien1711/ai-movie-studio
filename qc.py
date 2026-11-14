@@ -155,17 +155,16 @@ def probe_clip(path: str) -> Dict[str, Any]:
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", err)
         if m:
             info["duration_s"] = float(m.group(1)) * 3600 + float(m.group(2)) * 60 + float(m.group(3))
-        vm = re.search(r"Stream #\d+:\d+.*Video:\s*([a-zA-Z0-9_]+)[^,]*,\s*[^,]*,\s*(\d+)x(\d+)[^,]*,\s*([\d.]+)\s*fps", err)
+        vm = re.search(r"Stream #\d+:\d+.*Video:\s*([a-zA-Z0-9_]+)", err)
         if vm:
             info["codec"] = vm.group(1)
-            info["width"] = int(vm.group(2))
-            info["height"] = int(vm.group(3))
-            info["fps"] = float(vm.group(4))
-        else:
-            vm2 = re.search(r"Stream #\d+:\d+.*Video:.*?(\d+)x(\d+)", err)
-            if vm2:
-                info["width"] = int(vm2.group(1))
-                info["height"] = int(vm2.group(2))
+        res_m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", err)
+        if res_m:
+            info["width"] = int(res_m.group(1))
+            info["height"] = int(res_m.group(2))
+        fps_m = re.search(r"Video:.*?,\s*([\d.]+)\s*fps", err)
+        if fps_m:
+            info["fps"] = float(fps_m.group(1))
         info["has_audio"] = bool(re.search(r"Stream #\d+:\d+.*Audio:", err))
         if info["width"] is None and info["duration_s"] is None:
             info["error"] = info.get("error") or "ffmpeg không đọc được metadata clip"
