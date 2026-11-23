@@ -1334,9 +1334,12 @@ def burn_subtitles(
     font_size: int = 10,
     progress_cb: Optional[Any] = None,
     total_duration: Optional[float] = None,
+    raise_on_error: bool = False,
 ):
     """Khắc phụ đề (burn-in) phong cách điện ảnh: Chữ trắng viền đen sắc nét, căn giữa đáy, không hộp đen, không che nhân vật."""
     if not os.path.exists(srt_file) or os.path.getsize(srt_file) < 10:
+        if raise_on_error:
+            raise RuntimeError(f"File phụ đề rỗng hoặc không tồn tại ({srt_file})")
         print(f"[FFmpeg] File phụ đề rỗng hoặc không tồn tại ({srt_file}), bỏ qua burn-in.")
         shutil.copy2(input_video, output_video)
         return output_video
@@ -1398,18 +1401,24 @@ def burn_subtitles(
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
+                    if raise_on_error:
+                        raise RuntimeError("Quá thời gian (timeout 300s) khi khắc phụ đề video bằng FFmpeg.")
                     print("[FFmpeg Cảnh báo] Burn-in timeout sau 300s, fallback video gốc.")
                     shutil.copy2(input_video, output_video)
                     return output_video
                 if proc.returncode != 0:
                     err_file.seek(0)
                     err = err_file.read()[-1000:]
+                    if raise_on_error:
+                        raise RuntimeError(f"Lỗi khắc phụ đề bằng FFmpeg: {err.strip()}")
                     print(f"[FFmpeg Cảnh báo] Lỗi burn phụ đề, fallback video gốc: {err}")
                     shutil.copy2(input_video, output_video)
                     return output_video
         else:
             result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
+                if raise_on_error:
+                    raise RuntimeError(f"Lỗi khắc phụ đề bằng FFmpeg: {result.stderr[-1000:].strip()}")
                 print(f"[FFmpeg Cảnh báo] Lỗi burn phụ đề, fallback video gốc: {result.stderr[-1000:]}")
                 shutil.copy2(input_video, output_video)
                 return output_video

@@ -4889,6 +4889,25 @@ class BulkActionRequest(BaseModel):
     action: str = Field(..., max_length=20)
     video_ids: List[str] = Field(default=[], max_length=200)
 
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        clean = (v or "").strip().lower()
+        if clean not in ("run", "delete"):
+            raise ValueError(f"Hành động '{v}' không hợp lệ (chỉ hỗ trợ 'run' hoặc 'delete')")
+        return clean
+
+    @field_validator("video_ids")
+    @classmethod
+    def validate_video_ids(cls, v: List[str]) -> List[str]:
+        cleaned = []
+        for vid in v:
+            vid_clean = (vid or "").strip()
+            if not re.match(r"^bv_[a-zA-Z0-9_\-]+$", vid_clean):
+                raise ValueError(f"Video ID '{vid}' không hợp lệ hoặc chứa ký tự nguy hiểm")
+            cleaned.append(vid_clean)
+        return cleaned
+
 
 @app.get("/api/batch-videos/templates")
 async def get_batch_templates():
@@ -4959,6 +4978,8 @@ async def run_single_batch_video(video_id: str):
 @app.get("/api/batch-videos/{video_id}")
 async def get_single_batch_video(video_id: str):
     """Lấy thông tin chi tiết của 1 video trong hàng đợi."""
+    if not re.match(r"^bv_[a-zA-Z0-9_\-]+$", video_id):
+        return JSONResponse({"error": "Video ID không hợp lệ"}, status_code=400)
     v = BATCH_MANAGER.get_video(video_id)
     if not v:
         return JSONResponse({"error": "Không tìm thấy video"}, status_code=404)
@@ -4967,7 +4988,9 @@ async def get_single_batch_video(video_id: str):
 
 @app.delete("/api/batch-videos/{video_id}")
 async def delete_single_batch_video(video_id: str):
-    """Xóa 1 video khỏi hàng đợi và dọn dẹp file đĩa."""
+    """Xóa 1 video khỏi hàng đợi và dọn dẹp file đĩa an toàn."""
+    if not re.match(r"^bv_[a-zA-Z0-9_\-]+$", video_id):
+        return JSONResponse({"error": "Video ID không hợp lệ"}, status_code=400)
     ok = BATCH_MANAGER.delete_video(video_id)
     if not ok:
         return JSONResponse({"error": "Không tìm thấy video"}, status_code=404)

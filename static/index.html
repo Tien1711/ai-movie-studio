@@ -1423,8 +1423,8 @@
             <div class="batch-prompt-header fx fx-between fx-ac">
               <label class="batch-block-label">Prompt</label>
               <div class="batch-prompt-tags">
-                <span class="batch-tag active">Theo dòng</span>
-                <span class="batch-tag">Theo ---</span>
+                <span class="batch-tag active" id="batchTagByLine" onclick="setBatchPromptMode('line')">Theo dòng</span>
+                <span class="batch-tag" id="batchTagBySeparator" onclick="setBatchPromptMode('separator')">Theo ---</span>
               </div>
             </div>
             <textarea

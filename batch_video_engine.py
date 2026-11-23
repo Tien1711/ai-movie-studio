@@ -441,22 +441,27 @@ NARRATIVE_BEAT_POOLS: Dict[str, List[Tuple[str, str]]] = {
 
 
 def _validate_image_file(p: Path) -> bool:
-    """Kiểm tra file ảnh tồn tại, kích thước hợp lệ và đúng header magic bytes."""
-    if not p.exists() or p.stat().st_size < 1000:
+    """Kiểm tra file ảnh tồn tại, kích thước hợp lệ, đúng header magic bytes và giải mã thành công bằng PIL."""
+    if not p.exists() or p.stat().st_size < 100:
         return False
     try:
         with open(p, "rb") as f:
             header = f.read(32)
-        # WebP: RIFF....WEBP
-        if header.startswith(b"RIFF") and b"WEBP" in header[:16]:
-            return True
-        # PNG: \x89PNG\r\n\x1a\n
-        if header.startswith(b"\x89PNG\r\n\x1a\n"):
-            return True
-        # JPEG: \xff\xd8
-        if header.startswith(b"\xff\xd8"):
-            return True
-        return False
+        valid_magic = (
+            (header.startswith(b"RIFF") and b"WEBP" in header[:16]) or
+            header.startswith(b"\x89PNG\r\n\x1a\n") or
+            header.startswith(b"\xff\xd8")
+        )
+        if not valid_magic:
+            return False
+        # Xác thực file có thể giải mã trọn vẹn, không bị cắt cụt hoặc hỏng dữ liệu
+        try:
+            from PIL import Image
+            with Image.open(p) as img:
+                img.verify()
+        except Exception:
+            return False
+        return True
     except Exception:
         return False
 
@@ -706,13 +711,26 @@ def generate_batch_script_local(
     }
 
 
+def is_safe_video_id(vid: str) -> bool:
+    """Kiểm tra video ID hợp lệ theo chuẩn định dạng và ngăn chặn triệt để path traversal."""
+    if not vid or not isinstance(vid, str):
+        return False
+    if not re.match(r"^bv_[a-zA-Z0-9_\-]+$", vid):
+        return False
+    try:
+        target_dir = (BATCH_DIR / vid).resolve()
+        return target_dir.parent == BATCH_DIR.resolve()
+    except Exception:
+        return False
+
+
 # ── 4. Quản Lý Hàng Đợi Tạo Video Hàng Loạt (Batch Video Queue Manager) ───────
 class BatchVideoManager:
     """Quản trị danh sách hàng đợi các video hàng loạt trên đĩa."""
 
     def __init__(self):
         self._ensure_storage()
-        self._recover_interrupted_jobs()
+        self.recovered_on_init = self._recover_interrupted_jobs()
 
     def _ensure_storage(self):
         with _QUEUE_LOCK:
@@ -854,9 +872,11 @@ class BatchVideoManager:
 
         with _QUEUE_LOCK:
             videos = self._read_queue()
-            start_num = len(videos) + 1
+            max_order = max((v.get("order_num", 0) for v in videos), default=0)
+            start_num = max_order + 1
 
-            for idx, raw_line in enumerate(prompts):
+            valid_idx = 0
+            for raw_line in prompts:
                 line = raw_line.strip()
                 if not line:
                     continue
@@ -891,7 +911,7 @@ class BatchVideoManager:
 
                 item = {
                     "id": vid_id,
-                    "order_num": start_num + idx,
+                    "order_num": start_num + valid_idx,
                     "prompt": line,
                     "title": script_data["title"],
                     "status": "queued" if auto_run else "draft",
@@ -906,7 +926,7 @@ class BatchVideoManager:
                     "character": script_data.get("character"),
                     # Kịch bản khóa: worker không tự làm mới (xem _process_single_video)
                     "script_locked": bool(preset and preset.get("scenes")),
-                    "created_at": now + idx * 0.001,
+                    "created_at": now + valid_idx * 0.001,
                     "updated_at": now,
                     "scenes": script_data["scenes"],
                     "bundle": {
@@ -920,13 +940,17 @@ class BatchVideoManager:
                 if extra:
                     item.update(extra)
 
-                # Lưu metadata cục bộ của video
-                (v_dir / "project.json").write_text(
-                    json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
+                # Lưu metadata cục bộ của video an toàn
+                try:
+                    (v_dir / "project.json").write_text(
+                        json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                except Exception as e_meta:
+                    logger.warning("Không thể lưu file project.json cho %s: %s", vid_id, e_meta)
 
                 videos.append(item)
                 created_items.append(item)
+                valid_idx += 1
 
             self._write_queue(videos)
 
@@ -962,30 +986,38 @@ class BatchVideoManager:
             return target
 
     def delete_video(self, video_id: str) -> bool:
+        if not is_safe_video_id(video_id):
+            logger.warning("Cố gắng xóa video với ID không an toàn: %s", video_id)
+            return False
+
         with _QUEUE_LOCK:
             videos = self._read_queue()
             target = next((v for v in videos if v.get("id") == video_id), None)
             if not target:
                 return False
 
-            # Chỉ đưa vào tập hợp hủy nếu video đang thực sự running (Point 6: chống phình rác ID)
-            if target.get("status") == "running":
+            # Đưa vào tập hợp hủy nếu video đang running hoặc queued
+            if target.get("status") in ("running", "queued"):
                 with _CANCELLED_LOCK:
                     _CANCELLED_VIDEOS.add(video_id)
 
             videos = [v for v in videos if v.get("id") != video_id]
             self._write_queue(videos)
-            v_dir = BATCH_DIR / video_id
-            if v_dir.exists():
+
+            v_dir = (BATCH_DIR / video_id).resolve()
+            if v_dir.parent == BATCH_DIR.resolve() and v_dir.exists():
                 shutil.rmtree(v_dir, ignore_errors=True)
             return True
 
     def bulk_run(self, video_ids: List[str]) -> int:
         """Kích hoạt chạy các video được chọn (trạng thái draft hoặc failed)."""
-        target_ids = set(video_ids)
+        target_ids = {vid for vid in video_ids if is_safe_video_id(vid)}
+        if not target_ids:
+            return 0
+
+        count = 0
         with _QUEUE_LOCK:
             videos = self._read_queue()
-            count = 0
             for v in videos:
                 if v.get("id") in target_ids and v.get("status") in ("draft", "failed"):
                     v["status"] = "queued"
@@ -995,36 +1027,46 @@ class BatchVideoManager:
                     count += 1
             if count > 0:
                 self._write_queue(videos)
-                start_batch_worker()
-            return count
+
+        if count > 0:
+            start_batch_worker()
+        return count
 
     def bulk_delete(self, video_ids: List[str]) -> int:
-        """Xóa nhiều video được chọn cùng lúc và hủy tác vụ nếu đang chạy."""
-        target_ids = set(video_ids)
+        """Xóa nhiều video được chọn cùng lúc và hủy tác vụ nếu đang chạy (ngăn chặn triệt để path traversal)."""
+        safe_ids = {vid for vid in video_ids if is_safe_video_id(vid)}
+        if not safe_ids:
+            return 0
+
+        matched_items = []
         with _QUEUE_LOCK:
             videos = self._read_queue()
-            # Chỉ đưa vào tập hợp hủy các video đang thực sự running (Point 6)
-            running_ids = {v["id"] for v in videos if v.get("id") in target_ids and v.get("status") == "running"}
-            if running_ids:
+            # Hủy tác vụ cho các video đang running hoặc queued
+            active_ids = {v["id"] for v in videos if v.get("id") in safe_ids and v.get("status") in ("running", "queued")}
+            if active_ids:
                 with _CANCELLED_LOCK:
-                    _CANCELLED_VIDEOS.update(running_ids)
+                    _CANCELLED_VIDEOS.update(active_ids)
 
-            n_before = len(videos)
-            videos = [v for v in videos if v.get("id") not in target_ids]
-            deleted_count = n_before - len(videos)
-            if deleted_count > 0:
+            matched_items = [v for v in videos if v.get("id") in safe_ids]
+            if matched_items:
+                videos = [v for v in videos if v.get("id") not in safe_ids]
                 self._write_queue(videos)
-                for vid in target_ids:
-                    v_dir = BATCH_DIR / vid
-                    if v_dir.exists():
-                        shutil.rmtree(v_dir, ignore_errors=True)
-            return deleted_count
+
+        # Xóa thư mục trên đĩa hoàn toàn ngoài lock và chỉ cho các thư mục con an toàn của BATCH_DIR
+        for item in matched_items:
+            vid = item.get("id")
+            if vid and is_safe_video_id(vid):
+                v_dir = (BATCH_DIR / vid).resolve()
+                if v_dir.parent == BATCH_DIR.resolve() and v_dir.exists():
+                    shutil.rmtree(v_dir, ignore_errors=True)
+
+        return len(matched_items)
 
     def retry_failed(self) -> int:
         """Đưa toàn bộ video bị lỗi về hàng đợi 'queued'."""
+        count = 0
         with _QUEUE_LOCK:
             videos = self._read_queue()
-            count = 0
             for v in videos:
                 if v.get("status") == "failed":
                     v["status"] = "queued"
@@ -1034,14 +1076,16 @@ class BatchVideoManager:
                     count += 1
             if count > 0:
                 self._write_queue(videos)
-                start_batch_worker()
-            return count
+
+        if count > 0:
+            start_batch_worker()
+        return count
 
     def run_all_queued(self) -> int:
         """Kích hoạt tất cả video đang ở trạng thái 'draft' hoặc 'queued'."""
+        count = 0
         with _QUEUE_LOCK:
             videos = self._read_queue()
-            count = 0
             for v in videos:
                 if v.get("status") in ("draft", "queued"):
                     v["status"] = "queued"
@@ -1049,14 +1093,19 @@ class BatchVideoManager:
                     count += 1
             if count > 0:
                 self._write_queue(videos)
-                start_batch_worker()
-            return count
+
+        if count > 0:
+            start_batch_worker()
+        return count
 
     def run_video(self, video_id: str) -> bool:
         """Đưa 1 video cụ thể về hàng đợi 'queued' và khởi động worker."""
+        if not is_safe_video_id(video_id):
+            return False
+
+        found = False
         with _QUEUE_LOCK:
             videos = self._read_queue()
-            found = False
             for v in videos:
                 if v.get("id") == video_id:
                     v["status"] = "queued"
@@ -1067,9 +1116,11 @@ class BatchVideoManager:
                     break
             if found:
                 self._write_queue(videos)
-                start_batch_worker()
-                return True
-            return False
+
+        if found:
+            start_batch_worker()
+            return True
+        return False
 
     def convert_to_shot_desk(self, video_id: str) -> Optional[Dict[str, Any]]:
         """Chuyển đổi video hàng loạt sang một dự án Bàn Phân Cảnh (Shot Desk Studio) hoàn chỉnh."""
@@ -1164,7 +1215,10 @@ def _generate_scene_image(
     """Tạo ảnh tĩnh độ phân giải cao cho phân cảnh thông qua Muse2API."""
     from batch_engine import generate_keyframe_image
     base_url = os.getenv("MUSE2API_URL", "http://localhost:18610")
-    api_key = os.getenv("MUSE2API_KEY") or os.getenv("MUSE_API_KEY") or "m2a_studio_secret_2026"
+    api_key = os.getenv("MUSE2API_KEY") or os.getenv("MUSE_API_KEY") or None
+    if not api_key:
+        logger.warning("MUSE2API_KEY / MUSE_API_KEY chưa được cấu hình trong môi trường, bỏ qua gọi Muse AI.")
+        return False
 
     try:
         res = asyncio.run(generate_keyframe_image(
@@ -1329,28 +1383,39 @@ def _generate_fallback_clip(
 
 def _process_single_video(video_id: str):
     """Xử lý render toàn bộ các cảnh của 1 video trong hàng đợi."""
-    # Kiểm tra nếu job đã bị hủy trước khi bắt đầu
-    with _CANCELLED_LOCK:
-        if video_id in _CANCELLED_VIDEOS:
-            logger.info(f"🚫 Video {video_id} đã bị hủy bỏ bởi người dùng trước khi bắt đầu.")
-            _CANCELLED_VIDEOS.discard(video_id)
-            return
-
-    v = BATCH_MANAGER.get_video(video_id)
-    if not v:
+    if not is_safe_video_id(video_id):
+        logger.warning("Bỏ qua xử lý video ID không an toàn: %s", video_id)
         return
 
-    logger.info("🎬 Bắt đầu sản xuất batch video: %s ('%s')", video_id, v.get("title"))
-    BATCH_MANAGER.update_video(video_id, {
-        "status": "running",
-        "progress": 5,
-        "current_step": "Khởi tạo kịch bản & thư mục sản xuất..."
-    })
-
-    v_dir = BATCH_DIR / video_id
-
-    # Toàn bộ quá trình chuẩn bị & render được bọc trong try...except (Point 4: tránh treo running)
+    # Toàn bộ quá trình chuẩn bị & render được bọc trong try...except...finally
     try:
+        # Kiểm tra nếu job đã bị hủy hoặc xóa trước khi bắt đầu
+        with _CANCELLED_LOCK:
+            if video_id in _CANCELLED_VIDEOS:
+                logger.info("🚫 Video %s đã bị hủy bỏ bởi người dùng trước khi bắt đầu.", video_id)
+                return
+
+        v = BATCH_MANAGER.get_video(video_id)
+        if not v:
+            logger.info("Video %s không còn tồn tại trong hàng đợi, bỏ qua.", video_id)
+            return
+
+        # Chỉ xử lý nếu video đang thực sự ở trạng thái queued
+        if v.get("status") != "queued":
+            logger.info("Video %s có trạng thái '%s', không phải 'queued', bỏ qua.", video_id, v.get("status"))
+            return
+
+        logger.info("🎬 Bắt đầu sản xuất batch video: %s ('%s')", video_id, v.get("title"))
+        BATCH_MANAGER.update_video(video_id, {
+            "status": "running",
+            "progress": 5,
+            "current_step": "Khởi tạo kịch bản & thư mục sản xuất..."
+        })
+
+        v_dir = (BATCH_DIR / video_id).resolve()
+        if v_dir.parent != BATCH_DIR.resolve():
+            raise RuntimeError(f"Đường dẫn video {video_id} không an toàn")
+
         clips_dir = v_dir / "clips"
         audio_dir = v_dir / "audio"
         images_dir = v_dir / "images"
@@ -1413,15 +1478,27 @@ def _process_single_video(video_id: str):
                 tts_err = None
                 for attempt in range(2):
                     try:
-                        dur = asyncio.run(batch_engine.generate_tts(vo_text, voice, str(audio_path)))
-                        if audio_path.exists() and audio_path.stat().st_size > 100:
+                        dur, is_fallback, err_detail = asyncio.run(
+                            batch_engine.generate_tts_with_status(vo_text, voice, str(audio_path))
+                        )
+                        if is_fallback:
+                            if audio_path.exists():
+                                try:
+                                    audio_path.unlink()
+                                except Exception:
+                                    pass
+                            tts_err = RuntimeError(f"TTS trả về audio im lặng dự phòng: {err_detail or 'lỗi không rõ'}")
+                            logger.warning("Lần %d lồng tiếng cảnh %d dùng silent fallback: %s", attempt + 1, idx, err_detail)
+                        elif audio_path.exists() and audio_path.stat().st_size > 100:
                             sc["actual_duration"] = dur
                             tts_err = None
                             break
+                        else:
+                            tts_err = RuntimeError("File audio không được tạo hoặc kích thước rỗng")
                     except Exception as e:
                         tts_err = e
-                        logger.warning(f"Lần {attempt+1} lồng tiếng cảnh {idx} lỗi: {e}")
-                        time.sleep(0.5)
+                        logger.warning("Lần %d lồng tiếng cảnh %d lỗi: %s", attempt + 1, idx, e)
+                    time.sleep(0.5)
 
                 if tts_err or not audio_path.exists() or audio_path.stat().st_size < 100:
                     raise RuntimeError(f"Lỗi tạo giọng đọc (TTS) cảnh {idx}: {tts_err or 'Không thể lưu file âm thanh'}")
@@ -1439,7 +1516,12 @@ def _process_single_video(video_id: str):
                 "progress": step_img_pct,
                 "current_step": f"Đang vẽ hình ảnh AI cảnh {idx}/{total_scenes}..."
             })
-            if not img_path.exists() or img_path.stat().st_size < 1000:
+            if not _validate_image_file(img_path):
+                if img_path.exists():
+                    try:
+                        img_path.unlink()
+                    except Exception:
+                        pass
                 prompt_to_gen = sc.get("prompt", "")
                 _generate_scene_image(
                     prompt=prompt_to_gen,
@@ -1447,7 +1529,7 @@ def _process_single_video(video_id: str):
                     out_img_path=img_path
                 )
 
-            # Đánh giá kết quả tạo ảnh AI thông qua kiểm tra magic bytes thực tế (Point 2)
+            # Đánh giá kết quả tạo ảnh AI thông qua kiểm tra magic bytes và PIL giải mã (Point 2 & 7)
             has_ai_image = _validate_image_file(img_path)
             if has_ai_image:
                 ai_images_count += 1
@@ -1455,6 +1537,11 @@ def _process_single_video(video_id: str):
             else:
                 fallback_scenes_count += 1
                 sc["image_status"] = "fallback"
+                if img_path.exists():
+                    try:
+                        img_path.unlink()
+                    except Exception:
+                        pass
 
             # 1.3 Dựng video clip (ưu tiên ảnh AI + Ken Burns motion)
             step_clip_pct = min(78, base_pct + int(60 / total_scenes))
@@ -1557,7 +1644,8 @@ def _process_single_video(video_id: str):
                 input_video=str(raw_concat_mp4),
                 srt_file=str(srt_file),
                 output_video=str(final_mp4),
-                font_size=12
+                font_size=12,
+                raise_on_error=True
             )
         except Exception as e_burn:
             logger.error(f"Burn-in phụ đề gặp sự cố: {e_burn}")
@@ -1580,11 +1668,12 @@ def _process_single_video(video_id: str):
             warning_msg = f"Có {fallback_scenes_count}/{total_scenes} cảnh phải dùng hình nền dự phòng do AI vẽ ảnh quá tải."
             completion_step = f"Hoàn tất ({ai_images_count}/{total_scenes} cảnh AI)"
 
-        # Hoàn tất thành công!
+        # Hoàn tất thành công! (Lưu lại đầy đủ metadata scenes bao gồm actual_duration và image_status)
         BATCH_MANAGER.update_video(video_id, {
             "status": "completed",
             "progress": 100,
             "current_step": completion_step,
+            "scenes": scenes,
             "final_video_url": f"/api/batch-videos/{video_id}/video",
             "srt_url": f"/api/batch-videos/{video_id}/subtitles",
             "has_fallback_images": fallback_scenes_count > 0,
@@ -1595,11 +1684,16 @@ def _process_single_video(video_id: str):
 
     except Exception as e:
         logger.error("❌ Lỗi sản xuất batch video %s: %s", video_id, e, exc_info=True)
-        BATCH_MANAGER.update_video(video_id, {
-            "status": "failed",
-            "error": str(e),
-            "current_step": f"Lỗi: {e}"
-        })
+        try:
+            if BATCH_MANAGER.get_video(video_id):
+                BATCH_MANAGER.update_video(video_id, {
+                    "status": "failed",
+                    "scenes": scenes if 'scenes' in locals() else [],
+                    "error": str(e),
+                    "current_step": f"Lỗi: {e}"
+                })
+        except Exception as e_fail:
+            logger.error("Không thể cập nhật trạng thái failed cho %s: %s", video_id, e_fail)
     finally:
         # Luôn đảm bảo dọn sạch cờ hủy sau khi kết thúc xử lý (Point 6)
         with _CANCELLED_LOCK:
@@ -1650,8 +1744,7 @@ def start_batch_worker():
 # Khởi tạo singleton quản lý hàng đợi và tự động khôi phục / kích hoạt worker cho các job dở dang (Point 1)
 BATCH_MANAGER = BatchVideoManager()
 try:
-    _rec_count = BATCH_MANAGER._recover_interrupted_jobs()
-    if _rec_count > 0:
+    if getattr(BATCH_MANAGER, "recovered_on_init", 0) > 0:
         start_batch_worker()
 except Exception as _e_rec:
     logger.warning("Không thể tự động khởi động worker sau recovery: %s", _e_rec)

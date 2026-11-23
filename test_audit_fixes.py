@@ -105,7 +105,9 @@ def test_all():
     dummy_bad_file.unlink()
 
     dummy_good_webp = Path(r"C:\Users\Admin\.gemini\antigravity\scratch\ai_movie_studio\workspace\dummy_good.webp")
-    dummy_good_webp.write_bytes(b"RIFF\x20\x00\x00\x00WEBPVP8 " + b"\x00" * 1000)
+    from PIL import Image
+    _img = Image.new("RGB", (200, 200), color="blue")
+    _img.save(str(dummy_good_webp), format="WEBP")
     assert _validate_image_file(dummy_good_webp) is True, "File WebP chuẩn phải được chấp nhận!"
     dummy_good_webp.unlink()
     print("✅ Point 2 PASS: Xác thực tính hợp lệ của ảnh AI qua cấu trúc magic bytes chuẩn, phát hiện file tải dở/hỏng.")
@@ -173,7 +175,7 @@ def test_all():
 
     # 8. Point 10: Cancellation registration (Strict check without 'or True')
     from batch_video_engine import _CANCELLED_VIDEOS, _CANCELLED_LOCK
-    fake_running_id = f"bv_cancel_test_{time.time()}"
+    fake_running_id = f"bv_cancel_test_{int(time.time())}"
     cur_q = BATCH_MANAGER._read_queue()
     cur_q.append({
         "id": fake_running_id,

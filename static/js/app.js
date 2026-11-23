@@ -8842,11 +8842,48 @@ window.batchVideoState = {
   mode: 'free',
   ratio: '9:16',
   scenesCount: 8,
+  promptMode: 'line',
   selectedSet: new Set(),
   pollTimer: null,
   templatesCache: null,
   initialized: false
 };
+
+function setBatchPromptMode(mode) {
+  window.batchVideoState.promptMode = mode;
+  const tagLine = document.getElementById('batchTagByLine');
+  const tagSep = document.getElementById('batchTagBySeparator');
+  const txt = document.getElementById('batchPromptInput');
+
+  if (mode === 'separator') {
+    if (tagLine) tagLine.classList.remove('active');
+    if (tagSep) tagSep.classList.add('active');
+    if (txt) {
+      txt.placeholder = "Mô tả video bạn muốn tạo (chủ đề, nội dung, cảm xúc...)\nPhân tách giữa các video bằng dấu ---\n\nVí dụ:\nĐoạn văn mô tả chi tiết video 1...\n---\nĐoạn văn mô tả chi tiết video 2...";
+    }
+  } else {
+    if (tagLine) tagLine.classList.add('active');
+    if (tagSep) tagSep.classList.remove('active');
+    if (txt) {
+      txt.placeholder = "Mô tả video bạn muốn tạo (chủ đề, nội dung, cảm xúc...)\nMỗi dòng là một video.\n\nVí dụ:\nChuyện ma ở ngôi nhà cổ Đà Lạt\n3 bài học từ người cha nghèo";
+    }
+  }
+  updateBatchPromptStats();
+}
+
+function parseBatchPrompts(text) {
+  if (!text) return [];
+  const mode = window.batchVideoState?.promptMode || 'line';
+  if (mode === 'separator') {
+    return text.split(/(?:^|\n)\s*---\s*(?:\n|$)/)
+      .map(p => p.trim())
+      .filter(p => p.length > 0);
+  } else {
+    return text.split('\n')
+      .map(p => p.trim())
+      .filter(p => p.length > 0);
+  }
+}
 
 function initBatchCreateStudio() {
   if (window.batchVideoState.initialized) {
@@ -8891,9 +8928,9 @@ function updateBatchPromptStats() {
   const estEl = document.getElementById('batchEstimateTime');
   if (!txt) return;
 
-  const lines = txt.value.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const prompts = parseBatchPrompts(txt.value);
   const chars = txt.value.length;
-  const numVideos = lines.length;
+  const numVideos = prompts.length;
 
   if (statsEl) {
     statsEl.textContent = `${numVideos} prompt · ${chars} ký tự`;
@@ -9003,10 +9040,10 @@ async function submitBatchCreate(autoRun) {
   const txt = document.getElementById('batchPromptInput');
   if (!txt) return;
 
-  const rawLines = txt.value.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  if (rawLines.length === 0) {
-    if (typeof showToast === 'function') showToast('Vui lòng nhập ít nhất một dòng prompt để tạo video!', 'warning');
-    else alert('Vui lòng nhập ít nhất một dòng prompt để tạo video!');
+  const rawPrompts = parseBatchPrompts(txt.value);
+  if (rawPrompts.length === 0) {
+    if (typeof showToast === 'function') showToast('Vui lòng nhập ít nhất một prompt để tạo video!', 'warning');
+    else alert('Vui lòng nhập ít nhất một prompt để tạo video!');
     txt.focus();
     return;
   }
@@ -9021,7 +9058,7 @@ async function submitBatchCreate(autoRun) {
   const charId = (window.batchVideoState.mode === 'character') ? (document.getElementById('batchCharacterSelect')?.value || null) : null;
 
   const payload = {
-    prompts: rawLines,
+    prompts: rawPrompts,
     aspect_ratio: window.batchVideoState.ratio,
     scenes_count: window.batchVideoState.scenesCount,
     visual_style: document.getElementById('batchVisualStyle')?.value || 'anime',
