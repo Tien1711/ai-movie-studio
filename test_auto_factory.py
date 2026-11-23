@@ -34,7 +34,7 @@ INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 APP_JS = (ROOT / "static" / "js" / "app.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "js" / "ui.js").read_text(encoding="utf-8")
 
-TRENDING_URL = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=VN"
+TRENDING_URL = "https://trends.google.com/trending/rss?geo=VN"
 VNEXPRESS_URL = "https://vnexpress.net/rss/tin-moi-nhat.rss"
 TUOITRE_URL = "https://tuoitre.vn/rss/tin-moi-nhat.rss"
 

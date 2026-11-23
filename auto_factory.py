@@ -38,9 +38,14 @@ from composer import _resolve_ffmpeg, get_media_duration
 logger = logging.getLogger("ai_movie_studio.auto_factory")
 
 # ── 1. Nguồn nội dung ─────────────────────────────────────────────────────
-TRENDING_RSS_URL = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=VN"
+TRENDING_RSS_URL = "https://trends.google.com/trending/rss?geo=VN"
+TRENDING_RSS_URLS = [
+    "https://trends.google.com/trending/rss?geo=VN",
+    "https://trends.google.com/trends/trendingsearches/daily/rss?geo=VN",
+]
 NEWS_RSS_URLS = [
     "https://vnexpress.net/rss/tin-moi-nhat.rss",
+    "https://tuoitre.vn/home.rss",
     "https://tuoitre.vn/rss/tin-moi-nhat.rss",  # fallback khi VnExpress lỗi
 ]
 
@@ -200,7 +205,7 @@ def fetch_topics(
             return {"source": source, "topics": cached, "fallback": False, "cached": True}
 
     get = http_get or _default_http_get
-    urls = [TRENDING_RSS_URL] if source == "trending" else NEWS_RSS_URLS
+    urls = TRENDING_RSS_URLS if source == "trending" else NEWS_RSS_URLS
     for url in urls:
         try:
             res = get(url)
