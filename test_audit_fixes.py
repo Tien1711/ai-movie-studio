@@ -84,11 +84,11 @@ def test_all():
         raw_prompt="Câu chuyện cảm động gia đình",
         scenes_count=4,
         mode="character",
-        character_id="vo-hung"
+        character_id="hung"
     )
     assert script_lib_char.get("character") is not None
-    assert script_lib_char["character"]["name"] == "Vợ Hùng"
-    assert "Vợ Hùng" in script_lib_char["scenes"][0]["prompt"] or "VỢ HÙNG" in script_lib_char["scenes"][0]["prompt"]
+    assert script_lib_char["character"]["name"] == "Hùng"
+    assert "Hùng" in script_lib_char["scenes"][0]["prompt"] or "HÙNG" in script_lib_char["scenes"][0]["prompt"]
     print("✅ Point 7 PASS: Cho phép chọn nhân vật trực tiếp từ thư viện hồ sơ nhân vật (_characters.json).")
 
     # Point 8: Contextual Storytelling (Prompt topic woven into scenes)

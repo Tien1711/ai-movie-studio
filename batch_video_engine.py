@@ -581,15 +581,22 @@ def generate_batch_script_local(
         is_climax = (i >= mid_count - 2) if mid_count >= 3 else (i == mid_count - 1)
         role = "climax" if is_climax else "buildup"
 
-        # Khai triển nội dung chủ đề cụ thể của prompt vào từng phân cảnh để kịch bản không bị chung chung (Point 8)
+        # Khai triển sâu nội dung chủ đề cụ thể của prompt vào từng phân cảnh để kịch bản xuyên suốt, không chung chung
+        lower_beat = (beat_vo[0].lower() + beat_vo[1:]) if beat_vo else ""
         if i == 0:
-            scene_vo = f"Bắt đầu hành trình '{clean_title}', {beat_vo[0].lower()}{beat_vo[1:]}"
+            scene_vo = f"Bắt đầu hành trình '{clean_title}', {lower_beat}"
         elif is_climax:
-            scene_vo = f"Bước ngoặt lớn nhất của câu chuyện '{topic_clean}' xuất hiện: {beat_vo[0].lower()}{beat_vo[1:]}"
+            scene_vo = f"Bước ngoặt lớn nhất của câu chuyện '{topic_clean}' xuất hiện: {lower_beat}"
+        elif i == 1:
+            scene_vo = f"Khi đi sâu vào câu chuyện '{topic_clean}', {lower_beat}"
+        elif i == 2:
+            scene_vo = f"Từng tình tiết liên quan đến '{topic_clean}' dần hé lộ: {lower_beat}"
+        elif i == 3:
+            scene_vo = f"Diễn biến xung quanh '{topic_clean}' ngày càng gay cấn: {lower_beat}"
         else:
-            scene_vo = beat_vo
+            scene_vo = f"Tiếp nối diễn biến của '{topic_clean}', {lower_beat}"
 
-        full_pr = f"{char_prompt_prefix}{beat_pr_base}, depicting scene specifically related to '{clean_title}', {ratio_prompt}, {style_suffix}"
+        full_pr = f"{char_prompt_prefix}{beat_pr_base}, illustrating key event specifically related to '{clean_title}', {ratio_prompt}, {style_suffix}"
 
         scenes.append({
             "index": idx,
