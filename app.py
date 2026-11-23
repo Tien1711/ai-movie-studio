@@ -32,7 +32,7 @@ load_dotenv()
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from batch_engine import run_batch, generate_keyframe_image, heal_prompt_with_ai, apply_style_locks, sanitize_prompt_heuristics
 from composer import compose_full_movie, audit_movie_scenes, compose_scene_video
@@ -233,7 +233,7 @@ PROJECTS_DIR = WORKSPACE / "_projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 JOB_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-]+$")
-PROTECTED_WORKSPACE_NAMES = {"_uploads", "_music", "_projects", "_shot_desk_projects", "_voice_previews", "_characters.json"}
+PROTECTED_WORKSPACE_NAMES = {"_uploads", "_music", "_projects", "_shot_desk_projects", "_batch_videos", "_voice_previews", "_characters.json"}
 
 def get_safe_job_dir(job_id: str) -> Path:
     """Kiểm tra và trả về thư mục job an toàn bên trong WORKSPACE, chống path traversal."""
@@ -4831,6 +4831,188 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
     _spawn_job_task(job_id, film_pipeline(job, movie_req))
 
     return {"job_id": job_id, "message": "Đã bắt đầu sản xuất video tiếp thị liên kết", "total_scenes": len(movie_req.scenes)}
+
+
+# ── TẠO VIDEO HÀNG LOẠT (BATCH VIDEO CREATOR) ────────────────────────────────
+
+from batch_video_engine import (
+    BATCH_MANAGER,
+    BATCH_PROMPT_TEMPLATES,
+    BATCH_VISUAL_STYLES,
+    BATCH_DIR,
+)
+
+class BatchCreateRequest(BaseModel):
+    prompts: List[str] = Field(default=[], max_length=100)
+    aspect_ratio: str = Field(default="9:16", max_length=10)
+    scenes_count: int = Field(default=8, ge=3, le=12)
+    visual_style: str = Field(default="anime", max_length=50)
+    voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=100)
+    mode: str = Field(default="free", max_length=50)
+    character_id: Optional[str] = Field(default=None, max_length=100)
+    auto_run: bool = True
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls, v: str) -> str:
+        valid_ratios = {"9:16", "16:9", "1:1"}
+        if v not in valid_ratios:
+            raise ValueError(f"Tỷ lệ khung hình '{v}' không hợp lệ. Cho phép: {list(valid_ratios)}")
+        return v
+
+    @field_validator("visual_style")
+    @classmethod
+    def validate_visual_style(cls, v: str) -> str:
+        if v not in BATCH_VISUAL_STYLES:
+            raise ValueError(f"Phong cách '{v}' không hợp lệ. Cho phép: {list(BATCH_VISUAL_STYLES.keys())}")
+        return v
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ("free", "character"):
+            raise ValueError("Chế độ tạo (mode) chỉ nhận 'free' hoặc 'character'")
+        return v
+
+    @field_validator("voice")
+    @classmethod
+    def validate_voice(cls, v: str) -> str:
+        clean = v.strip()
+        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+            raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
+        return clean
+
+
+class BulkActionRequest(BaseModel):
+    action: str = Field(..., max_length=20)
+    video_ids: List[str] = Field(default=[], max_length=200)
+
+
+@app.get("/api/batch-videos/templates")
+async def get_batch_templates():
+    """Trả về danh mục mẫu prompt và các phong cách hình ảnh có sẵn."""
+    return {
+        "templates": BATCH_PROMPT_TEMPLATES,
+        "styles": list(BATCH_VISUAL_STYLES.values())
+    }
+
+
+@app.get("/api/batch-videos/queue")
+async def get_batch_queue(
+    search: str = "",
+    status: str = "all",
+    sort: str = "newest"
+):
+    """Lấy danh sách hàng đợi video kèm bộ lọc và thống kê."""
+    return BATCH_MANAGER.list_queue(search=search, status=status, sort=sort)
+
+
+@app.post("/api/batch-videos/create")
+async def create_batch_videos(req: BatchCreateRequest):
+    """Tạo danh sách video hàng loạt từ các dòng prompt."""
+    clean_prompts = [p.strip() for p in req.prompts if p.strip()]
+    if not clean_prompts:
+        return JSONResponse({"error": "Vui lòng nhập ít nhất một dòng prompt"}, status_code=400)
+
+    created = BATCH_MANAGER.add_batch(
+        prompts=clean_prompts,
+        aspect_ratio=req.aspect_ratio,
+        scenes_count=req.scenes_count,
+        visual_style=req.visual_style,
+        voice=req.voice,
+        mode=req.mode,
+        character_id=req.character_id,
+        auto_run=req.auto_run
+    )
+    return {
+        "message": f"Đã thêm {len(created)} video vào hàng đợi",
+        "created": created,
+        "total": len(created)
+    }
+
+
+@app.post("/api/batch-videos/retry-failed")
+async def retry_failed_batch():
+    """Đưa toàn bộ video bị lỗi về hàng đợi để chạy lại."""
+    count = BATCH_MANAGER.retry_failed()
+    return {"message": f"Đã kích hoạt chạy lại {count} video bị lỗi", "count": count}
+
+
+@app.post("/api/batch-videos/run-all")
+async def run_all_batch():
+    """Kích hoạt chạy toàn bộ video nháp và hàng đợi."""
+    count = BATCH_MANAGER.run_all_queued()
+    return {"message": f"Đã kích hoạt {count} video trong hàng đợi", "count": count}
+
+
+@app.post("/api/batch-videos/{video_id}/run")
+async def run_single_batch_video(video_id: str):
+    """Kích hoạt chạy 1 video cụ thể."""
+    ok = BATCH_MANAGER.run_video(video_id)
+    if not ok:
+        return JSONResponse({"error": "Không tìm thấy video"}, status_code=404)
+    return {"message": "Đã bắt đầu xử lý video", "id": video_id}
+
+
+@app.get("/api/batch-videos/{video_id}")
+async def get_single_batch_video(video_id: str):
+    """Lấy thông tin chi tiết của 1 video trong hàng đợi."""
+    v = BATCH_MANAGER.get_video(video_id)
+    if not v:
+        return JSONResponse({"error": "Không tìm thấy video"}, status_code=404)
+    return v
+
+
+@app.delete("/api/batch-videos/{video_id}")
+async def delete_single_batch_video(video_id: str):
+    """Xóa 1 video khỏi hàng đợi và dọn dẹp file đĩa."""
+    ok = BATCH_MANAGER.delete_video(video_id)
+    if not ok:
+        return JSONResponse({"error": "Không tìm thấy video"}, status_code=404)
+    return {"message": "Đã xóa video thành công", "id": video_id}
+
+
+@app.post("/api/batch-videos/{video_id}/open-shot-desk")
+async def open_batch_in_shot_desk(video_id: str):
+    """Chuyển đổi video hàng loạt sang dự án Shot Desk Studio để biên tập sâu."""
+    res = BATCH_MANAGER.convert_to_shot_desk(video_id)
+    if not res:
+        return JSONResponse({"error": "Không tìm thấy video để chuyển đổi"}, status_code=404)
+    return {"message": "Đã chuyển đổi sang Shot Desk thành công", **res}
+
+
+@app.get("/api/batch-videos/{video_id}/video")
+async def get_batch_video_file(video_id: str):
+    """Tải / stream file video hoàn chỉnh final.mp4 của batch video."""
+    video_path = (BATCH_DIR / video_id / "final.mp4").resolve()
+    if not video_path.is_relative_to(BATCH_DIR.resolve()) or not video_path.is_file():
+        return JSONResponse({"error": "Video chưa hoàn tất hoặc không tồn tại"}, status_code=404)
+    return FileResponse(str(video_path), media_type="video/mp4")
+
+
+@app.get("/api/batch-videos/{video_id}/subtitles")
+async def get_batch_subtitles_file(video_id: str):
+    """Tải file phụ đề SRT của batch video."""
+    srt_path = (BATCH_DIR / video_id / "subtitles.srt").resolve()
+    if not srt_path.is_relative_to(BATCH_DIR.resolve()) or not srt_path.is_file():
+        return JSONResponse({"error": "File phụ đề chưa sẵn sàng hoặc không tồn tại"}, status_code=404)
+    return FileResponse(str(srt_path), media_type="text/plain; charset=utf-8", filename=f"{video_id}_subtitles.srt")
+
+
+@app.post("/api/batch-videos/bulk-action")
+async def bulk_action_batch_videos(req: BulkActionRequest):
+    """Thực hiện thao tác hàng loạt (run hoặc delete) trên danh sách video được chọn."""
+    if not req.video_ids:
+        return JSONResponse({"error": "Danh sách video được chọn rỗng"}, status_code=400)
+
+    if req.action == "run":
+        count = BATCH_MANAGER.bulk_run(req.video_ids)
+        return {"message": f"Đã kích hoạt chạy {count} video được chọn", "count": count, "action": "run"}
+    elif req.action == "delete":
+        count = BATCH_MANAGER.bulk_delete(req.video_ids)
+        return {"message": f"Đã xóa thành công {count} video được chọn", "count": count, "action": "delete"}
+    else:
+        return JSONResponse({"error": f"Hành động '{req.action}' không hợp lệ (chỉ hỗ trợ 'run' hoặc 'delete')"}, status_code=400)
 
 
 if __name__ == "__main__":

@@ -8,8 +8,745 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="static/css/app.css">
-<link rel="stylesheet" href="static/css/ui.css">
+<link rel="stylesheet" href="static/css/app.css?v=20261123_03">
+<link rel="stylesheet" href="static/css/ui.css?v=20261123_03">
+<style id="batchCreatorStyles">
+/* ══════════════════════════════════════════════════════════════════════════
+   BATCH VIDEO CREATOR (TẠO VIDEO HÀNG LOẠT) — HOLLYWOOD CINEMA DARK THEME
+   ══════════════════════════════════════════════════════════════════════════ */
+#panel-batch-create {
+  background: #0b0b0f !important;
+  color: #f3f4f6 !important;
+  font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
+  padding: 16px 20px;
+  border-radius: 12px;
+  min-height: calc(100vh - 80px);
+  box-sizing: border-box;
+}
+
+/* Header */
+.batch-head {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: flex-start !important;
+  margin-bottom: 16px !important;
+}
+.batch-head h2 {
+  font-size: 20px !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  margin: 0 0 4px 0 !important;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.batch-head .panel-sub {
+  color: #9ca3af !important;
+  font-size: 13px !important;
+  max-width: 820px;
+  line-height: 1.4;
+}
+.btn-run-all {
+  background: #f97316 !important;
+  color: #ffffff !important;
+  border: none !important;
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  padding: 8px 18px !important;
+  border-radius: 8px !important;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s ease;
+}
+.btn-run-all:hover {
+  background: #ea580c !important;
+  box-shadow: 0 4px 14px rgba(249, 115, 22, 0.4);
+}
+
+/* Quick Guide Card (Mockup 1) */
+.batch-guide-card {
+  background: #14141c !important;
+  border: 1px solid #232332 !important;
+  border-radius: 10px !important;
+  padding: 14px 18px !important;
+  margin-bottom: 16px !important;
+  color: #e2e8f0 !important;
+}
+.guide-header { display: flex; justify-content: space-between; align-items: center; }
+.guide-when { color: #94a3b8; font-size: 13px; margin-left: 8px; }
+.guide-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.guide-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #cbd5e1;
+}
+.step-num {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #232332;
+  color: #f97316;
+  font-weight: 700;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.guide-tip {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(249, 115, 22, 0.08);
+  border: 1px solid rgba(249, 115, 22, 0.25);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #fdba74;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 3-Column Layout Grid */
+.batch-layout-grid {
+  display: grid !important;
+  grid-template-columns: 300px minmax(320px, 1fr) 340px !important;
+  gap: 14px !important;
+  align-items: start !important;
+}
+@media (max-width: 900px) {
+  .batch-layout-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Columns */
+.batch-col {
+  background: #13131b !important;
+  border: 1px solid #232330 !important;
+  border-radius: 12px !important;
+  padding: 16px !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  box-sizing: border-box;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+}
+
+/* Left Column */
+.batch-input-tabs {
+  display: flex !important;
+  gap: 8px !important;
+  border-bottom: 1px solid #232330 !important;
+  padding-bottom: 10px !important;
+  margin-bottom: 14px !important;
+}
+.batch-tab-btn {
+  background: transparent !important;
+  border: none !important;
+  color: #94a3b8 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  padding: 6px 12px !important;
+  border-radius: 6px !important;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s;
+}
+.batch-tab-btn:hover { color: #f3f4f6 !important; background: #1a1a24 !important; }
+.batch-tab-btn.active {
+  color: #f97316 !important;
+  background: rgba(249, 115, 22, 0.12) !important;
+}
+
+.batch-form-block { margin-bottom: 14px; }
+.batch-block-label {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+.batch-mode-toggle {
+  display: flex;
+  gap: 6px;
+  background: #0d0d12;
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid #232330;
+}
+.btn-segmented {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s;
+}
+.btn-segmented.active {
+  background: #232332 !important;
+  color: #ffffff !important;
+}
+
+.batch-prompt-tags { display: flex; gap: 4px; }
+.batch-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #1c1c26;
+  color: #94a3b8;
+  cursor: pointer;
+}
+.batch-tag.active {
+  background: rgba(249, 115, 22, 0.2);
+  color: #f97316;
+  font-weight: 600;
+}
+
+.batch-textarea {
+  width: 100% !important;
+  background: #0d0d12 !important;
+  border: 1px solid #262636 !important;
+  border-radius: 8px !important;
+  color: #f3f4f6 !important;
+  padding: 10px 12px !important;
+  font-size: 13px !important;
+  line-height: 1.5 !important;
+  resize: vertical !important;
+  min-height: 130px !important;
+  outline: none !important;
+  font-family: inherit !important;
+  box-sizing: border-box;
+}
+.batch-textarea:focus { border-color: #f97316 !important; }
+.batch-prompt-footer { margin-top: 6px; }
+.batch-shortcut-note { font-size: 11px; color: #64748b; }
+
+/* Accordion */
+.batch-accordion {
+  border: 1px solid #232330 !important;
+  border-radius: 8px !important;
+  background: #0d0d12 !important;
+  overflow: hidden;
+  margin-top: 14px;
+}
+.batch-accordion-head {
+  padding: 10px 12px;
+  cursor: pointer;
+  background: #0d0d12;
+  user-select: none;
+}
+.batch-settings-summary {
+  font-size: 11px;
+  background: rgba(249, 115, 22, 0.15);
+  color: #f97316;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.accordion-arrow { font-size: 11px; color: #94a3b8; }
+.batch-accordion-content {
+  padding: 12px;
+  border-top: 1px solid #232330;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.batch-field-label { font-size: 11.5px; font-weight: 600; color: #cbd5e1; margin-bottom: 6px; display: block; }
+.batch-field-val { font-size: 11.5px; color: #f97316; font-weight: 600; }
+.batch-ratio-pills { display: flex; gap: 6px; }
+.ratio-pill {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid #262636;
+  background: #161620;
+  color: #94a3b8;
+  cursor: pointer;
+  text-align: center;
+}
+.ratio-pill.active {
+  background: #f97316 !important;
+  border-color: #f97316 !important;
+  color: #ffffff !important;
+}
+.batch-range-input {
+  width: 100%;
+  accent-color: #f97316;
+  cursor: pointer;
+}
+.batch-select-input {
+  width: 100%;
+  padding: 7px 10px;
+  background: #161620;
+  border: 1px solid #262636;
+  border-radius: 6px;
+  color: #f3f4f6;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+.batch-select-input:focus { border-color: #f97316; }
+
+/* Bottom CTA */
+.batch-cta-wrap { margin-top: 16px; }
+.batch-btn-split {
+  display: flex;
+  position: relative;
+  width: 100%;
+}
+.btn-batch-main {
+  flex: 1;
+  background: #f97316 !important;
+  color: #ffffff !important;
+  border: none !important;
+  padding: 12px 16px !important;
+  font-size: 14.5px !important;
+  font-weight: 700 !important;
+  border-radius: 8px 0 0 8px !important;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background 0.15s;
+}
+.btn-batch-main:hover { background: #ea580c !important; }
+.btn-batch-dropdown-trigger {
+  width: 40px;
+  background: #f97316 !important;
+  color: #ffffff !important;
+  border: none !important;
+  border-left: 1px solid rgba(255, 255, 255, 0.25) !important;
+  border-radius: 0 8px 8px 0 !important;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-batch-dropdown-trigger:hover { background: #ea580c !important; }
+.batch-cta-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  background: #181824;
+  border: 1px solid #2c2c3e;
+  border-radius: 8px;
+  padding: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  min-width: 250px;
+}
+.batch-cta-menu button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.batch-cta-menu button:hover { background: #232332; color: #f97316; }
+.batch-time-est {
+  text-align: center;
+  font-size: 11.5px;
+  color: #94a3b8;
+  margin-top: 8px;
+}
+
+/* Middle Column: Queue */
+.batch-queue-header { margin-bottom: 12px; }
+.batch-queue-title { font-size: 15px; font-weight: 700; color: #ffffff; }
+.batch-search-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #0d0d12;
+  border: 1px solid #262636;
+  border-radius: 20px;
+  padding: 4px 12px;
+  width: 200px;
+}
+.batch-search-box input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #f3f4f6;
+  font-size: 12px;
+  width: 100%;
+}
+.batch-queue-subbar {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #232330;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+.batch-check-all { cursor: pointer; }
+.batch-check-all input { accent-color: #f97316; }
+
+.batch-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.batch-filter-btn {
+  background: #0d0d12 !important;
+  border: 1px solid #232330 !important;
+  color: #94a3b8 !important;
+  padding: 4px 10px !important;
+  border-radius: 12px !important;
+  font-size: 11.5px !important;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.15s;
+}
+.batch-filter-btn:hover { color: #ffffff !important; }
+.batch-filter-btn.active {
+  background: rgba(249, 115, 22, 0.14) !important;
+  border-color: #f97316 !important;
+  color: #f97316 !important;
+  font-weight: 600 !important;
+}
+.filter-count {
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.batch-queue-content {
+  min-height: 440px;
+  max-height: 680px;
+  overflow-y: auto;
+}
+.batch-empty-placeholder {
+  text-align: center;
+  padding: 70px 20px;
+  color: #94a3b8;
+}
+.empty-badge-circle {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #181822;
+  border: 1px dashed #2c2c3e;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  margin-bottom: 12px;
+}
+.batch-empty-placeholder h4 { color: #f3f4f6; font-size: 14.5px; margin-bottom: 6px; }
+.batch-empty-placeholder p { font-size: 12.5px; max-width: 300px; margin: 0 auto; line-height: 1.45; }
+
+/* Queue Item Card */
+.batch-item-card {
+  background: #0e0e14 !important;
+  border: 1px solid #232330 !important;
+  border-radius: 10px !important;
+  padding: 12px 14px !important;
+  margin-bottom: 10px !important;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+}
+.batch-item-card:hover {
+  border-color: rgba(249, 115, 22, 0.4) !important;
+}
+.batch-item-card.selected {
+  border-color: #f97316 !important;
+  background: rgba(249, 115, 22, 0.06) !important;
+  box-shadow: 0 0 0 1px #f97316 !important;
+}
+.batch-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.batch-item-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f3f4f6;
+}
+.batch-order-badge { color: #f97316; font-size: 11.5px; font-weight: 700; }
+.batch-status-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.batch-status-badge.queued { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+.batch-status-badge.running { background: rgba(249, 115, 22, 0.2); color: #fb923c; }
+.batch-status-badge.completed { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+.batch-status-badge.failed { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.batch-status-badge.draft { background: rgba(100, 116, 139, 0.15); color: #94a3b8; }
+
+.batch-item-prompt {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-card-progress { margin: 6px 0; }
+.batch-progress-track {
+  height: 4px;
+  background: #181822;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.batch-progress-fill {
+  height: 100%;
+  background: #f97316;
+  transition: width 0.3s ease;
+}
+.batch-step-label {
+  font-size: 11px;
+  color: #fb923c;
+  margin-top: 4px;
+  display: block;
+}
+.batch-item-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+.batch-item-actions { display: flex; gap: 6px; }
+.batch-action-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.batch-action-btn:hover { color: #f97316; background: #181822; }
+.batch-action-btn.run-btn {
+  background: rgba(34, 197, 94, 0.15) !important;
+  color: #4ade80 !important;
+  border: 1px solid rgba(34, 197, 94, 0.3) !important;
+  font-weight: 600 !important;
+}
+.batch-action-btn.run-btn:hover {
+  background: #22c55e !important;
+  color: #ffffff !important;
+}
+.batch-bulk-toolbar {
+  background: #181824 !important;
+  border: 1px solid #2e2e42 !important;
+  border-radius: 8px !important;
+  padding: 8px 12px !important;
+  margin-bottom: 10px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+}
+.batch-warning-badge {
+  font-size: 11px;
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Right Column: Details */
+.batch-detail-header { margin-bottom: 14px; font-size: 15px; font-weight: 700; color: #ffffff; }
+.batch-detail-empty-box {
+  padding: 50px 20px;
+  text-align: center;
+}
+.empty-dashed-card {
+  border: 1px dashed #262636;
+  border-radius: 10px;
+  padding: 40px 16px;
+  color: #94a3b8;
+}
+.empty-play-badge {
+  width: 46px;
+  height: 46px;
+  border-radius: 8px;
+  background: #181822;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #94a3b8;
+  margin-bottom: 12px;
+}
+.empty-dashed-card h4 { color: #f3f4f6; font-size: 14.5px; margin-bottom: 6px; }
+.empty-dashed-card p { font-size: 12px; line-height: 1.45; }
+
+.batch-player-screen {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 9/16;
+  max-height: 380px;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.batch-player-screen video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.batch-player-loader {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.8);
+  color: #fff;
+  font-size: 12.5px;
+  gap: 10px;
+}
+.batch-video-meta { padding: 10px 0; }
+.batch-title-text { font-size: 14.5px; font-weight: 700; color: #ffffff; margin-bottom: 6px; }
+.batch-tags-row { display: flex; gap: 6px; }
+
+.batch-detail-btns { display: flex; gap: 8px; margin: 10px 0 14px; }
+.batch-detail-btns .btn { flex: 1; padding: 8px 12px; font-size: 12px; border-radius: 6px; }
+
+/* Social Card */
+.batch-social-card {
+  background: #0e0e14;
+  border: 1px solid #232330;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+.social-header { margin-bottom: 10px; font-size: 12.5px; font-weight: 700; color: #f3f4f6; }
+.social-label { font-size: 11px; font-weight: 600; color: #94a3b8; }
+.btn-copy-link {
+  background: transparent;
+  border: none;
+  color: #f97316;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  font-weight: 600;
+}
+.social-text-box {
+  background: #161620;
+  border: 1px solid #262636;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #f3f4f6;
+  line-height: 1.4;
+  margin-bottom: 10px;
+  user-select: all;
+}
+.social-caption { white-space: pre-wrap; max-height: 80px; overflow-y: auto; }
+.social-hashtags { display: flex; flex-wrap: wrap; gap: 4px; }
+.social-tag {
+  font-size: 11px;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Storyboard */
+.batch-scenes-card {
+  background: #0e0e14;
+  border: 1px solid #232330;
+  border-radius: 8px;
+  padding: 12px;
+}
+.scenes-card-header { margin-bottom: 10px; font-size: 12.5px; font-weight: 700; color: #f3f4f6; }
+.batch-scene-row {
+  border-left: 2px solid #f97316;
+  background: #161620;
+  padding: 8px 10px;
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.scene-row-head {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+  color: #f97316;
+  margin-bottom: 4px;
+}
+.scene-row-vo { color: #f3f4f6; margin-bottom: 4px; line-height: 1.4; }
+.scene-row-prompt { color: #94a3b8; font-size: 11px; }
+
+/* Templates Modal */
+.batch-templates-dialog {
+  background: #14141c !important;
+  border: 1px solid #2c2c3e !important;
+  color: #f3f4f6 !important;
+  border-radius: 12px !important;
+}
+.batch-template-cat { margin-bottom: 16px; }
+.cat-title { font-size: 13.5px; font-weight: 700; color: #ffffff; margin-bottom: 4px; }
+.cat-desc { font-size: 11.5px; color: #94a3b8; margin-bottom: 8px; }
+.template-items { display: flex; flex-direction: column; gap: 6px; }
+.template-item-btn {
+  background: #0e0e14 !important;
+  border: 1px solid #262636 !important;
+  border-radius: 6px !important;
+  padding: 8px 12px !important;
+  text-align: left;
+  color: #f3f4f6 !important;
+  font-size: 12.5px !important;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: all 0.15s;
+}
+.template-item-btn:hover {
+  border-color: #f97316 !important;
+  background: rgba(249, 115, 22, 0.08) !important;
+  color: #f97316 !important;
+}
+</style>
 </head>
 <body>
 
@@ -43,6 +780,11 @@
     <div class="nav-item active" data-panel="create" id="nav-create" title="Tạo phim mới (Alt+C)">
       <span class="icon">✏️</span> Tạo phim mới
       <span class="nav-kbd">Alt+C</span>
+    </div>
+    <div class="nav-item" data-panel="batch-create" id="nav-batch-create" title="Tạo video hàng loạt (Alt+B)">
+      <span class="icon">📑</span> Tạo video hàng loạt
+      <span class="badge badge-hot">HOT</span>
+      <span class="nav-kbd">Alt+B</span>
     </div>
     <div class="nav-item" data-panel="affiliate" id="nav-affiliate" title="Video Tiếp Thị — Affiliate (Alt+A)">
       <span class="icon">🛍️</span> Video Tiếp Thị (Affiliate)
@@ -493,6 +1235,375 @@
       </div>
       <!-- Hàng đợi render hiện tại (Nhóm 1) -->
       <div id="queueHint" class="u-fs12 u-c-muted" style="margin-bottom:24px;"></div>
+    </div>
+
+    <!-- ─ Panel: Tạo video hàng loạt (Batch Video Creator) ──────────── -->
+    <div class="panel" id="panel-batch-create">
+      <!-- Header -->
+      <div class="panel-head batch-head">
+        <div>
+          <h2><span class="icon-head">📑</span> Tạo video hàng loạt</h2>
+          <div class="panel-sub">Mỗi dòng prompt ra một video hoàn chỉnh: AI viết kịch bản, đọc giọng, vẽ ảnh, dựng phụ đề. Thêm bao nhiêu tuỳ ý, máy tự làm lần lượt.</div>
+        </div>
+        <div class="panel-head-actions">
+          <button type="button" class="btn btn-orange btn-run-all" id="btnBatchRunAll" onclick="runAllBatchVideos()" title="Chạy toàn bộ video đang trong hàng đợi">
+            <span class="btn-icon">▷</span> Chạy tất cả
+          </button>
+        </div>
+      </div>
+
+      <!-- Card Hướng dẫn nhanh (theo đúng mockup ảnh 1) -->
+      <div class="batch-guide-card" id="batchGuideCard">
+        <div class="guide-header fx fx-between fx-ac">
+          <div class="guide-title fx fx-ac fx-g8">
+            <span class="guide-icon">📑</span>
+            <div>
+              <strong style="color:var(--text);font-size:14px;">Tạo video hàng loạt</strong>
+              <span class="guide-when"><strong>Dùng khi:</strong> bạn có sẵn nhiều ý tưởng và muốn ra nhiều video cùng lúc.</span>
+            </div>
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="toggleBatchGuide()" id="btnToggleGuide">Thu gọn ✕</button>
+        </div>
+        <div class="guide-body" id="batchGuideBody">
+          <div class="guide-steps">
+            <div class="guide-step">
+              <span class="step-num">1</span>
+              <span>Gõ mỗi ý tưởng một dòng vào ô <strong>Prompt</strong>, hoặc bấm <strong>“Mẫu prompt”</strong> để chọn ý tưởng có sẵn.</span>
+            </div>
+            <div class="guide-step">
+              <span class="step-num">2</span>
+              <span>Chọn phong cách hình, giọng đọc, số cảnh, khung hình (dọc 9:16 cho TikTok, Reels) và các tùy chọn tương ứng.</span>
+            </div>
+            <div class="guide-step">
+              <span class="step-num">3</span>
+              <span>Bấm <strong>“Tạo & chạy”</strong> — mỗi dòng thành một video trong hàng đợi ở giữa màn hình.</span>
+            </div>
+            <div class="guide-step">
+              <span class="step-num">4</span>
+              <span>Bấm vào một video để xem, tải về, tạo lại hoặc làm <strong>gói đăng bài</strong>.</span>
+            </div>
+          </div>
+          <div class="guide-tip">
+            <span class="tip-icon">💡</span>
+            <span>Có video lỗi thì bấm <strong>“Tạo lại video lỗi”</strong> — chạy lại tất cả trong một lần bấm.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bố cục 3 Cột Grid -->
+      <div class="batch-layout-grid">
+
+        <!-- CỘT 1: NHẬP PROMPT & THIẾT LẬP -->
+        <div class="batch-col batch-col-input">
+          <!-- Tab switch: Tạo video / Mẫu prompt -->
+          <div class="batch-input-tabs">
+            <button type="button" class="batch-tab-btn active" id="btnTabBatchCreate" onclick="switchBatchColTab('create')">
+              <span class="icon">✨</span> Tạo video
+            </button>
+            <button type="button" class="batch-tab-btn" id="btnTabBatchTemplates" onclick="openBatchTemplatesModal()">
+              <span class="icon">📖</span> Mẫu prompt
+            </button>
+          </div>
+
+          <!-- Chế độ tạo -->
+          <div class="batch-form-block">
+            <label class="batch-block-label">Chế độ tạo</label>
+            <div class="batch-mode-toggle">
+              <button type="button" class="btn-segmented active" id="btnBatchModeFree" onclick="setBatchMode('free')">
+                <span class="icon">✨</span> Tự do
+              </button>
+              <button type="button" class="btn-segmented" id="btnBatchModeChar" onclick="setBatchMode('character')">
+                <span class="icon">👥</span> Có nhân vật
+              </button>
+            </div>
+            <!-- Character Library Dropdown (Point 7) -->
+            <div id="batchCharSelectWrap" style="display: none; margin-top: 8px;">
+              <label class="batch-field-label" style="font-size: 11.5px; color: #cbd5e1; display: block; margin-bottom: 4px;">👤 Chọn nhân vật từ thư viện:</label>
+              <select id="batchCharacterSelect" class="form-select u-w100" style="background: #0e0e14; color: #f3f4f6; border: 1px solid #2e2e42; border-radius: 6px; padding: 6px 10px; font-size: 12px;">
+                <option value="">-- Tự động theo chủ đề --</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Prompt Textarea -->
+          <div class="batch-form-block">
+            <div class="batch-prompt-header fx fx-between fx-ac">
+              <label class="batch-block-label">Prompt</label>
+              <div class="batch-prompt-tags">
+                <span class="batch-tag active">Theo dòng</span>
+                <span class="batch-tag">Theo ---</span>
+              </div>
+            </div>
+            <textarea
+              id="batchPromptInput"
+              class="batch-textarea"
+              placeholder="Mô tả video bạn muốn tạo (chủ đề, nội dung, cảm xúc...)&#10;Mỗi dòng là một video.&#10;&#10;Ví dụ:&#10;Chuyện ma ở ngôi nhà cổ Đà Lạt&#10;3 bài học từ người cha nghèo"
+              rows="7"
+            ></textarea>
+            <div class="batch-prompt-footer fx fx-between fx-ac">
+              <span id="batchPromptStats" class="u-c-muted u-fs12">0 prompt · 0 ký tự</span>
+              <span class="batch-shortcut-note">⌘/Ctrl + Enter để tạo nhanh</span>
+            </div>
+          </div>
+
+          <!-- Accordion Thiết lập video -->
+          <div class="batch-accordion" id="batchSettingsAccordion">
+            <div class="batch-accordion-head fx fx-between fx-ac" onclick="toggleBatchSettingsAccordion()">
+              <div class="fx fx-ac fx-g8">
+                <span class="icon">🔧</span>
+                <span class="u-fw600">Thiết lập video</span>
+                <span class="batch-settings-summary" id="batchSettingsSummary">9:16 · 8 cảnh</span>
+              </div>
+              <span class="accordion-arrow" id="batchSettingsArrow">▲</span>
+            </div>
+            <div class="batch-accordion-content" id="batchSettingsBody">
+              <!-- Tỷ lệ khung hình -->
+              <div class="batch-field">
+                <label class="batch-field-label">Tỷ lệ khung hình</label>
+                <div class="batch-ratio-pills">
+                  <button type="button" class="ratio-pill active" data-ratio="9:16" onclick="setBatchRatio('9:16')">9:16 Dọc</button>
+                  <button type="button" class="ratio-pill" data-ratio="16:9" onclick="setBatchRatio('16:9')">16:9 Ngang</button>
+                  <button type="button" class="ratio-pill" data-ratio="1:1" onclick="setBatchRatio('1:1')">1:1 Vuông</button>
+                </div>
+              </div>
+
+              <!-- Số cảnh mỗi video slider -->
+              <div class="batch-field">
+                <div class="fx fx-between fx-ac">
+                  <label class="batch-field-label">Số cảnh mỗi video</label>
+                  <span class="batch-field-val" id="batchScenesVal">8 cảnh · ~48 giây</span>
+                </div>
+                <input
+                  type="range"
+                  id="batchScenesSlider"
+                  class="batch-range-input"
+                  min="3"
+                  max="12"
+                  value="8"
+                  oninput="onBatchScenesChange(this.value)"
+                >
+              </div>
+
+              <!-- Phong cách hình ảnh -->
+              <div class="batch-field">
+                <label class="batch-field-label">Phong cách hình ảnh</label>
+                <select id="batchVisualStyle" class="batch-select-input">
+                  <option value="anime">Anime Nhật Bản (Anime)</option>
+                  <option value="cinematic">Điện ảnh tả thực (Cinematic Realistic)</option>
+                  <option value="3d_pixar">3D Hoạt hình Pixar (3D Animation)</option>
+                  <option value="cyberpunk">Cyberpunk Viễn tưởng (Sci-Fi Neon)</option>
+                  <option value="oil_painting">Tranh sơn dầu cổ điển (Oil Painting)</option>
+                  <option value="vintage_retro">Cổ điển Hoài niệm 90s (Vintage Retro)</option>
+                </select>
+              </div>
+
+              <!-- Giọng đọc -->
+              <div class="batch-field">
+                <label class="batch-field-label">Giọng đọc</label>
+                <select id="batchVoiceSelect" class="batch-select-input">
+                  <option value="vi-VN-HoaiMyNeural">Hoài My (Nữ miền Nam, truyền cảm)</option>
+                  <option value="vi-VN-NamMinhNeural">Nam Minh (Nam miền Bắc, ấm áp)</option>
+                  <option value="vieneu:AdamBua">Adam Búa (Nam mạnh mẽ, review)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Button: Tạo & Chạy -->
+          <div class="batch-cta-wrap">
+            <div class="batch-btn-split">
+              <button type="button" class="btn btn-orange btn-batch-main" id="btnBatchCreateAndRun" onclick="submitBatchCreate(true)">
+                <span class="btn-icon">▷</span> Tạo & chạy
+              </button>
+              <button type="button" class="btn btn-orange btn-batch-dropdown-trigger" onclick="toggleBatchCtaMenu(event)">
+                ▾
+              </button>
+              <div class="batch-cta-menu" id="batchCtaMenu" style="display: none;">
+                <button type="button" onclick="submitBatchCreate(false)">📝 Chỉ lưu bản nháp (không chạy ngay)</button>
+              </div>
+            </div>
+            <div class="batch-time-est" id="batchEstimateTime">0 video · xong khoảng 0 phút</div>
+          </div>
+        </div>
+
+        <!-- CỘT 2: HÀNG ĐỢI VIDEO -->
+        <div class="batch-col batch-col-queue">
+          <div class="batch-queue-header fx fx-between fx-ac">
+            <div class="batch-queue-title fx fx-ac fx-g6">
+              <span class="icon">📑</span> <strong>Hàng đợi video</strong>
+            </div>
+            <div class="batch-search-box">
+              <span class="search-ico">🔍</span>
+              <input
+                type="text"
+                id="batchSearchInput"
+                placeholder="Tìm prompt hoặc số thứ tự..."
+                oninput="onBatchSearchInput(this.value)"
+              >
+            </div>
+          </div>
+
+          <!-- Controls row -->
+          <div class="batch-queue-subbar fx fx-between fx-ac">
+            <label class="batch-check-all fx fx-ac fx-g6">
+              <input type="checkbox" id="chkBatchSelectAll" onchange="toggleBatchSelectAll(this.checked)">
+              <span id="lblBatchSelectAll">Chọn tất cả (0)</span>
+            </label>
+            <div class="batch-subbar-right fx fx-ac fx-g8">
+              <button type="button" class="btn btn-ghost btn-xs" id="btnBatchRetryFailed" onclick="retryFailedBatchVideos()">
+                ↺ Tạo lại video lỗi
+              </button>
+              <button type="button" class="btn btn-ghost btn-xs" id="btnBatchSort" onclick="toggleBatchSort()">
+                ↓↑ <span id="lblBatchSort">Mới nhất</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Filter Tabs -->
+          <div class="batch-filters" id="batchFilterTabs">
+            <button type="button" class="batch-filter-btn active" data-filter="all" onclick="setBatchFilter('all')">
+              Tất cả <span class="filter-count" id="countFilterAll">0</span>
+            </button>
+            <button type="button" class="batch-filter-btn" data-filter="running" onclick="setBatchFilter('running')">
+              Đang chạy <span class="filter-count" id="countFilterRunning">0</span>
+            </button>
+            <button type="button" class="batch-filter-btn" data-filter="draft" onclick="setBatchFilter('draft')">
+              Nháp <span class="filter-count" id="countFilterDraft">0</span>
+            </button>
+            <button type="button" class="batch-filter-btn" data-filter="completed" onclick="setBatchFilter('completed')">
+              Hoàn tất <span class="filter-count" id="countFilterCompleted">0</span>
+            </button>
+            <button type="button" class="batch-filter-btn" data-filter="failed" onclick="setBatchFilter('failed')">
+              Lỗi <span class="filter-count" id="countFilterFailed">0</span>
+            </button>
+          </div>
+
+          <!-- Floating / Inline Bulk Action Toolbar -->
+          <div class="batch-bulk-toolbar fx fx-between fx-ac" id="batchBulkToolbar" style="display: none;">
+            <div class="fx fx-ac fx-g8">
+              <span class="badge" id="batchBulkCount" style="background:#ea580c;color:#fff;font-weight:700;">0</span>
+              <span style="font-size:12px;font-weight:600;color:#f3f4f6;">video đã chọn</span>
+            </div>
+            <div class="fx fx-ac fx-g6">
+              <button type="button" class="btn btn-sm btn-primary" onclick="bulkRunSelectedVideos()" title="Kích hoạt chạy các video đã chọn">▶ Chạy</button>
+              <button type="button" class="btn btn-sm btn-danger" onclick="bulkDeleteSelectedVideos()" title="Xóa các video đã chọn">🗑 Xóa</button>
+              <button type="button" class="btn btn-sm btn-ghost" onclick="clearBatchSelection()" title="Bỏ chọn">✕</button>
+            </div>
+          </div>
+
+          <!-- Queue Container -->
+          <div class="batch-queue-content" id="batchQueueContainer">
+            <!-- Empty State -->
+            <div class="batch-empty-placeholder" id="batchQueueEmptyState">
+              <div class="empty-badge-circle">
+                <span>📑</span>
+              </div>
+              <h4>Hàng đợi đang trống</h4>
+              <p>Nhập prompt ở khung bên trái — mỗi dòng ra một video hoàn chỉnh có giọng đọc, ảnh và phụ đề.</p>
+            </div>
+
+            <!-- List of items rendered by JavaScript -->
+            <div class="batch-items-wrapper" id="batchItemsList" style="display: none;"></div>
+          </div>
+        </div>
+
+        <!-- CỘT 3: CHI TIẾT KẾT QUẢ -->
+        <div class="batch-col batch-col-detail">
+          <div class="batch-detail-header fx fx-ac fx-g6">
+            <span class="icon">✨</span> <strong>Chi tiết kết quả</strong>
+          </div>
+
+          <!-- Empty state placeholder -->
+          <div class="batch-detail-empty-box" id="batchDetailEmpty">
+            <div class="empty-dashed-card">
+              <div class="empty-play-badge">▷</div>
+              <h4>Chọn một video</h4>
+              <p>Bấm vào một dòng trong hàng đợi để xem video, kịch bản từng cảnh và các thao tác.</p>
+            </div>
+          </div>
+
+          <!-- Active Details Pane -->
+          <div class="batch-detail-main" id="batchDetailContent" style="display: none;">
+            <!-- Player Card -->
+            <div class="batch-video-card">
+              <div class="batch-player-screen" id="batchPlayerWrap">
+                <video id="batchVideoPlayer" controls playsinline></video>
+                <div class="batch-player-loader" id="batchPlayerPlaceholder" style="display: none;">
+                  <div class="spinner"></div>
+                  <div id="batchPlayerPlaceholderText">Video đang xử lý...</div>
+                </div>
+              </div>
+              <div class="batch-video-meta">
+                <h3 id="batchDetailTitle" class="batch-title-text">Tiêu đề video</h3>
+                <div class="batch-tags-row" id="batchDetailTags">
+                  <span class="badge" id="badgeDetailRatio">9:16</span>
+                  <span class="badge" id="badgeDetailScenes">8 cảnh</span>
+                  <span class="badge" id="badgeDetailStyle">Anime</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="batch-detail-btns fx fx-g8 fx-wrap">
+              <button type="button" class="btn btn-warning fx-1" id="btnBatchRunSingle" onclick="runSingleBatchVideo()" style="display: none;" title="Chạy tạo video này">
+                ▶ Chạy video này
+              </button>
+              <button type="button" class="btn btn-outline fx-1" id="btnBatchOpenShotDesk" onclick="openCurrentBatchInShotDesk()">
+                🎬 Mở trong Shot Desk
+              </button>
+              <button type="button" class="btn btn-primary fx-1" id="btnBatchDownloadVideo" onclick="downloadCurrentBatchVideo()">
+                📥 Tải video MP4
+              </button>
+              <button type="button" class="btn btn-ghost fx-1" id="btnBatchDownloadSubtitles" onclick="downloadCurrentBatchSubtitles()" style="display: none;" title="Tải file phụ đề SRT">
+                📝 Phụ đề SRT
+              </button>
+            </div>
+
+            <!-- Gói đăng bài mạng xã hội -->
+            <div class="batch-social-card">
+              <div class="social-header fx fx-between fx-ac">
+                <div class="fx fx-ac fx-g6">
+                  <span>📦</span> <strong>Làm gói đăng bài</strong>
+                </div>
+                <button type="button" class="btn btn-ghost btn-xs" onclick="copyEntireBundle()">📋 Copy tất cả</button>
+              </div>
+              <div class="social-field">
+                <div class="fx fx-between fx-ac u-mb4">
+                  <span class="social-label">Tiêu đề Viral:</span>
+                  <button type="button" class="btn-copy-link" onclick="copyBundleField('title')">Copy</button>
+                </div>
+                <div class="social-text-box" id="bundleTitleVal">...</div>
+              </div>
+              <div class="social-field">
+                <div class="fx fx-between fx-ac u-mb4">
+                  <span class="social-label">Caption & Lời dẫn:</span>
+                  <button type="button" class="btn-copy-link" onclick="copyBundleField('caption')">Copy</button>
+                </div>
+                <div class="social-text-box social-caption" id="bundleCaptionVal">...</div>
+              </div>
+              <div class="social-field">
+                <div class="fx fx-between fx-ac u-mb4">
+                  <span class="social-label">Hashtag thịnh hành:</span>
+                  <button type="button" class="btn-copy-link" onclick="copyBundleField('hashtags')">Copy</button>
+                </div>
+                <div class="social-hashtags" id="bundleHashtagsVal"></div>
+              </div>
+            </div>
+
+            <!-- Phân cảnh kịch bản chi tiết -->
+            <div class="batch-scenes-card">
+              <div class="scenes-card-header fx fx-between fx-ac">
+                <div class="fx fx-ac fx-g6">
+                  <span>🎬</span> <strong>Kịch bản phân cảnh</strong>
+                </div>
+                <span class="badge" id="storyboardScenesCount">8 cảnh</span>
+              </div>
+              <div class="batch-scenes-list" id="batchScenesList"></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
     </div>
 
     <!-- ─ Panel: Video Tiếp Thị Liên Kết (Affiliate Marketing) ────── -->
@@ -1604,8 +2715,8 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js" defer></script>
-<script src="static/js/ui.js" defer></script>
+<script src="static/js/app.js?v=20261123_07" defer></script>
+<script src="static/js/ui.js?v=20261123_03" defer></script>
 
 <!-- Floating Multi-Shot Batch Action Bar -->
 <div id="sdBatchActionBar" class="sd-batch-toolbar">
@@ -1711,6 +2822,32 @@
         <button class="btn btn-primary" id="btnSaveApiKeyModal">💾 Lưu key</button>
         <button class="btn btn-ghost" id="btnSkipApiKeyModal">Dùng không cần key</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MODAL: MẪU PROMPT TẠO VIDEO HÀNG LOẠT ═══════════════════ -->
+<div id="modalBatchTemplates" class="modal-backdrop" style="display:none;">
+  <div class="modal-window batch-templates-dialog" style="max-width:760px;width:92%;">
+    <div class="modal-header">
+      <div class="u-fw700 u-fs16 u-c-accent fx fx-ac fx-g8">
+        <span>📖</span> Thư viện Mẫu Prompt Thịnh Hành
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="closeBatchTemplatesModal()">✕</button>
+    </div>
+    <div class="modal-body" style="max-height:70vh;overflow-y:auto;padding-right:6px;">
+      <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">
+        Bấm vào bất kỳ chủ đề nào dưới đây để tự động thêm vào danh sách prompt bên trái. Bạn có thể chọn nhiều chủ đề liên tiếp.
+      </p>
+      <div class="batch-templates-container" id="batchTemplatesGrid">
+        <div class="batch-templates-loading fx fx-ac fx-jc-c u-p20">
+          <span class="spinner"></span> &nbsp;Đang tải danh mục mẫu prompt...
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer fx fx-between fx-ac u-mt16">
+      <span class="u-c-muted u-fs12">💡 Mẹo: Bạn có thể chỉnh sửa lại nội dung prompt sau khi thêm vào danh sách.</span>
+      <button class="btn btn-primary" onclick="closeBatchTemplatesModal()">Xong & Đóng</button>
     </div>
   </div>
 </div>

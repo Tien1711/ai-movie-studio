@@ -102,7 +102,7 @@ async def _download_validated(
     async with client.stream("GET", url, timeout=timeout) as resp:
         resp.raise_for_status()
         ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-        if ctype and not ctype.startswith(expected_ct):
+        if ctype and not ctype.startswith(expected_ct) and ctype not in ("application/octet-stream", "binary/octet-stream"):
             raise RuntimeError(
                 f"File tải về có Content-Type không hợp lệ: {ctype!r} (cần {expected_ct}*) — URL: {url[:120]}"
             )
