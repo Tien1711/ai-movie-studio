@@ -90,6 +90,24 @@ _VN_EN_KEYWORDS: Dict[str, str] = {
     "đá": "stone", "hang": "cave", "rồng": "dragon",
 }
 
+# Character Block chuẩn cho chim thần — dán NGUYÊN VĂN vào mọi prompt ảnh có chim
+# (fix 2026-11-23: video Ăn Khế Trả Vàng ch.1 vẽ lúc phượng hoàng vàng, lúc diệc
+# xám vì prompt chỉ có từ khóa "bird" chung chung).
+MAGIC_BIRD_BLOCK = (
+    "a majestic golden phoenix with radiant golden feathers, "
+    "long flowing elegant tail feathers, warm divine glow"
+)
+
+# Ràng buộc chống ảnh AI tự bịa thêm người/vật lạ (best-effort: mô hình ảnh vẫn có
+# thể bỏ qua). Diễn đạt mềm — chỉ cấm "bịa thêm", không cấm tuyệt đối "người" —
+# để không xóa nhân vật hợp lệ như đám đông trong làng.
+_NO_EXTRA_SUBJECTS = (
+    "only the characters, animals and objects mentioned in the scene, "
+    "no invented extra people or creatures"
+)
+
+_BIRD_WORDS = ("chim", "phượng")
+
 
 def _clean_text(raw: str) -> str:
     """Gọn khoảng trắng, giải entity HTML, bỏ ký tự điều khiển."""
@@ -499,7 +517,7 @@ _TWIST_WORDS = ("bỗng nhiên", "bất ngờ", "hóa ra", "không ngờ", "đ�
                 "nào ngờ", "ai ngờ", "ngờ đâu", "bỗng dưng")
 _HOOK_PREFIXES = (
     "Bạn có dám nghe hết câu chuyện này không? ",
-    "Chỉ trong 60 giây, câu chuyện này sẽ khiến bạn không thể rời mắt. ",
+    "Câu chuyện này sẽ khiến bạn không thể rời mắt. ",
     "Khoan đã — đừng lướt qua, vì câu chuyện này có một cái kết không ai ngờ. ",
 )
 
@@ -546,11 +564,17 @@ def _dramatic_score(sentence: str) -> int:
 
 
 def _scene_keywords(text: str, limit: int = 4) -> List[str]:
-    """Lấy tối đa `limit` từ khóa Anh từ văn bản cảnh (theo thứ tự xuất hiện)."""
+    """Lấy tối đa `limit` từ khóa Anh từ văn bản cảnh (theo thứ tự xuất hiện).
+
+    Khớp theo TỪ (word boundary), không khớp chuỗi con — fix 2026-11-23: trước đây
+    `"ma" in text` bắt cả "may/mắn/mang/mãi" nên cảnh vô tội cũng bị gắn keyword
+    "ghost" vào prompt ảnh (video Ăn Khế Trả Vàng ch.1: prompt cảnh 4 có "ghost" →
+    ảnh AI vẽ bóng phụ nữ áo trắng mờ lúc 0:33).
+    """
     low = text.lower()
     found: List[str] = []
     for vn, en in _VN_EN_KEYWORDS.items():
-        if vn in low and en not in found:
+        if re.search(r"\b" + re.escape(vn) + r"\b", low) and en not in found:
             found.append(en)
         if len(found) >= limit:
             break
@@ -566,10 +590,17 @@ def _scene_prompt(scene_text: str, visual_style: str, aspect_ratio: str,
              else "16:9 widescreen format" if aspect_ratio == "16:9"
              else "1:1 square format")
     kws = _scene_keywords(scene_text)
+    low = scene_text.lower()
+    if any(w in low for w in _BIRD_WORDS):
+        # Khóa chim thần: thay "bird" chung chung bằng Character Block nguyên văn,
+        # giống hệt mọi cảnh có chim để ảnh AI không đổi loài.
+        kws = [MAGIC_BIRD_BLOCK if k == "bird" else k for k in kws]
+        if MAGIC_BIRD_BLOCK not in kws:
+            kws.append(MAGIC_BIRD_BLOCK)
     subject = ", ".join(kws) if kws else "Vietnamese folk tale scene"
     mood_part = f", {mood}" if mood else ""
-    return (f"Cinematic scene, {subject}, Vietnamese folk tale atmosphere"
-            f"{mood_part}, {ratio}, {suffix}")
+    return (f"Cinematic scene, {subject}, {_NO_EXTRA_SUBJECTS}, "
+            f"Vietnamese folk tale atmosphere{mood_part}, {ratio}, {suffix}")
 
 
 def _group_sentences(sentences: List[str], scenes_count: int) -> List[List[str]]:

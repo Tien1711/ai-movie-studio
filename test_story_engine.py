@@ -318,7 +318,10 @@ def test_adapt_all_modes_structure():
 def test_adapt_short_has_hook_and_cliffhanger():
     script = adapt_chapter(_CHAPTER, "short", 5, "cinematic")
     first = script["scenes"][0]["voiceover"]
-    assert "?" in first or "60 giây" in first or "Khoan đã" in first
+    assert "?" in first or "Khoan đã" in first or "không thể rời mắt" in first
+    # Hook không được tuyên bố thời lượng sai (fix 2026-11-23: "60 giây" trong
+    # khi video thực tế dài hơn).
+    assert "60 giây" not in first and "giây" not in first
     assert "bắt đầu" in script["scenes"][-1]["voiceover"]
 
 

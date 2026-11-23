@@ -555,6 +555,82 @@ def compute_timeline_offsets(clips: List[str], transitions: Optional[List[str]] 
     return offsets
 
 
+# ── Phụ đề ngắn cho Reels/TikTok/YouTube Shorts (fix 2026-11-23) ─────────────
+# Trước đây create_srt ghi 1 cue/cảnh = toàn bộ voiceover (tới 420 ký tự) →
+# burn-in hiện khối 7–9 dòng, che 40–50% khung hình (video Ăn Khế Trả Vàng ch.1).
+# Giờ mỗi cue tối đa 2 dòng, mỗi dòng ≤ 42 ký tự; thời gian chia tỉ lệ theo số
+# ký tự trong cửa sổ speech. Voiceover ngắn vẫn ra 1 cue như cũ.
+_SRT_MAX_CHARS_PER_LINE = 42
+_SRT_MAX_LINES_PER_CUE = 2
+_SRT_SENT_END_RE = re.compile(r"(?<=[.!?…])\s+")
+_SRT_CLAUSE_END_RE = re.compile(r"(?<=,)\s+")
+
+
+def _wrap_subtitle_lines(segment: str, max_chars: int = _SRT_MAX_CHARS_PER_LINE) -> List[str]:
+    """Ngắt 1 đoạn văn thành các dòng ≤ max_chars, ưu tiên ngắt sau dấu kết câu,
+    rồi sau dấu phẩy, cuối cùng mới ngắt từ. Chỉ chèn ngắt dòng, không đổi chữ:
+    nối các dòng bằng 1 khoảng trắng sẽ khôi phục đúng đoạn gốc."""
+    segment = re.sub(r"\s+", " ", segment or "").strip()
+    if not segment:
+        return []
+    if len(segment) <= max_chars:
+        return [segment]
+    # Tách thành mệnh đề ở ranh giới câu / dấu phẩy (giữ dấu câu ở cuối mệnh đề).
+    chunks: List[str] = []
+    for sent in _SRT_SENT_END_RE.split(segment):
+        chunks.extend(c for c in _SRT_CLAUSE_END_RE.split(sent) if c.strip())
+    lines: List[str] = []
+    cur = ""
+    for ch in chunks:
+        ch = ch.strip()
+        if not ch:
+            continue
+        if not cur:
+            cur = ch
+        elif len(cur) + 1 + len(ch) <= max_chars:
+            cur = f"{cur} {ch}"
+        else:
+            lines.append(cur)
+            cur = ch
+    if cur:
+        lines.append(cur)
+    # Mệnh đề nào vẫn dài hơn giới hạn: ngắt từ; từ đơn quá dài thì cắt cứng.
+    wrapped: List[str] = []
+    for line in lines:
+        if len(line) <= max_chars:
+            wrapped.append(line)
+            continue
+        cur = ""
+        for w in line.split(" "):
+            while len(w) > max_chars:
+                if cur:
+                    wrapped.append(cur)
+                    cur = ""
+                wrapped.append(w[:max_chars])
+                w = w[max_chars:]
+            if not cur:
+                cur = w
+            elif len(cur) + 1 + len(w) <= max_chars:
+                cur = f"{cur} {w}"
+            else:
+                wrapped.append(cur)
+                cur = w
+        if cur:
+            wrapped.append(cur)
+    return wrapped
+
+
+def _split_subtitle_cues(text: str) -> List[str]:
+    """Chia voiceover 1 cảnh thành các cue phụ đề (mỗi cue ≤ 2 dòng, ≤ 42 ký tự/dòng).
+    Ngắt cứng " | " (đã thành "\\n" trước đó) luôn mở cue mới."""
+    cues: List[str] = []
+    for hard in (text or "").split("\n"):
+        lines = _wrap_subtitle_lines(hard)
+        for j in range(0, len(lines), _SRT_MAX_LINES_PER_CUE):
+            cues.append("\n".join(lines[j:j + _SRT_MAX_LINES_PER_CUE]))
+    return cues
+
+
 def create_srt(
     results: List[Dict],
     output_srt: str,
@@ -567,6 +643,8 @@ def create_srt(
     - Tự động nhận diện chính xác thời điểm âm thanh/tiếng nói bắt đầu (Audio Speech Onset).
     - Phụ đề chỉ xuất hiện ĐÚNG KHI ÂM THANH BẮT ĐẦU CẤT LÊN, không xuất hiện sớm trước khung cảnh.
     - Tự động bù trừ độ lệch thời gian khi có hiệu ứng chuyển cảnh (transitions / sound bridge).
+    - Mỗi cảnh chia thành nhiều cue ngắn (tối đa 2 dòng/cue, ≤ 42 ký tự/dòng), thời gian
+      các cue chia tỉ lệ theo số ký tự trong cửa sổ speech của cảnh.
     """
     n = len(results)
     if not timeline_offsets or len(timeline_offsets) < n:
@@ -614,8 +692,31 @@ def create_srt(
             if sub_end <= sub_start:
                 sub_end = round(shot_start + dur, 3)
 
-            f.write(f"{sub_index}\n{_fmt_srt_time(sub_start)} --> {_fmt_srt_time(sub_end)}\n{text}\n\n")
-            sub_index += 1
+            # Chia voiceover thành các cue ngắn (tối đa 2 dòng/cue, ≤ 42 ký tự/dòng)
+            # để burn-in không che nửa khung hình; thời gian chia tỉ lệ theo số ký tự
+            # trong cửa sổ speech [sub_start, sub_end] của cảnh.
+            cues = _split_subtitle_cues(text)
+            if not cues:
+                continue
+            cue_chars = [len(c.replace("\n", "")) for c in cues]
+            total_chars = sum(cue_chars) or 1
+            bounds = [sub_start]
+            acc = 0
+            for n_chars in cue_chars[:-1]:
+                acc += n_chars
+                bounds.append(sub_start + (sub_end - sub_start) * acc / total_chars)
+            bounds.append(sub_end)
+            # Làm tròn mili-giây, ép đơn điệu tăng (≥1ms) để không có cue rỗng;
+            # cue cuối chốt đúng sub_end.
+            bounds = [round(b, 3) for b in bounds]
+            for k in range(1, len(bounds) - 1):
+                if bounds[k] <= bounds[k - 1]:
+                    bounds[k] = round(bounds[k - 1] + 0.001, 3)
+            bounds[-1] = round(sub_end, 3)
+
+            for ci, cue in enumerate(cues):
+                f.write(f"{sub_index}\n{_fmt_srt_time(bounds[ci])} --> {_fmt_srt_time(bounds[ci + 1])}\n{cue}\n\n")
+                sub_index += 1
 
     return output_srt
 
