@@ -747,6 +747,89 @@
   color: #f97316 !important;
 }
 </style>
+
+<!-- ── Xưởng tự động (Auto Factory): theo cùng cách làm của panel batch ──
+     (style inline trong index.html, tông tối + cam #f97316 như batch) -->
+<style id="factoryStyles">
+.factory-layout-grid {
+  display: grid;
+  grid-template-columns: minmax(340px, 5fr) 7fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .factory-layout-grid { grid-template-columns: 1fr; }
+}
+.factory-card {
+  background: #14141c;
+  border: 1px solid #262636;
+  border-radius: 12px;
+  padding: 18px;
+}
+.factory-card h3 { margin: 0; font-size: 15px; font-weight: 700; color: #f3f4f6; }
+.factory-card-sub { margin: 4px 0 0; font-size: 12.5px; color: #94a3b8; }
+.factory-col-order .factory-card { position: sticky; top: 16px; }
+.factory-source-toggle { display: flex; flex-wrap: wrap; gap: 6px; }
+.factory-source-toggle .btn-segmented { flex: 1 1 auto; }
+.factory-hint { margin: 6px 0 0; font-size: 12px; color: #94a3b8; line-height: 1.5; }
+.factory-hint b { color: #f3f4f6; }
+.factory-range { width: 100%; accent-color: #f97316; cursor: pointer; }
+.factory-topics-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 180px; overflow-y: auto;
+}
+.factory-topics-list li {
+  font-size: 12.5px; color: #e2e8f0; background: #0e0e14;
+  border: 1px solid #262636; border-radius: 6px; padding: 6px 10px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.factory-topics-list li.factory-topics-loading { color: #94a3b8; }
+.factory-topics-list li.factory-topics-empty { color: #94a3b8; }
+.factory-fallback-note { margin: 6px 0 0; font-size: 12px; color: #fbbf24; }
+.factory-order-btn { width: 100%; margin-top: 4px; }
+.factory-estimate { margin: 8px 0 0; font-size: 12px; color: #94a3b8; text-align: center; }
+.factory-empty {
+  margin-top: 12px; padding: 20px 14px; text-align: center;
+  font-size: 13px; color: #94a3b8; background: #0e0e14;
+  border: 1px dashed #2e2e42; border-radius: 8px; line-height: 1.6;
+}
+.factory-jobs-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.factory-job {
+  display: flex; gap: 12px; padding: 12px;
+  background: #0e0e14; border: 1px solid #262636; border-radius: 10px;
+}
+.factory-job-thumb {
+  position: relative; width: 72px; height: 128px; flex-shrink: 0;
+  border-radius: 8px; overflow: hidden; background: #1a1a24;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px;
+}
+.factory-job-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.factory-job-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.factory-job-title-row { display: flex; align-items: flex-start; gap: 8px; }
+.factory-job-title {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #f3f4f6;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.factory-job-progress { height: 6px; border-radius: 999px; background: #262636; overflow: hidden; }
+.factory-job-progress > div { height: 100%; border-radius: 999px; background: #f97316; transition: width .4s; }
+.factory-job-progress.done > div { background: #22c55e; }
+.factory-job-meta { font-size: 12px; color: #94a3b8; }
+.factory-job-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.factory-job-error { font-size: 12px; color: #f87171; }
+.factory-modal-window { max-width: 560px; width: 92%; }
+.factory-modal-window textarea { width: 100%; resize: vertical; }
+.factory-modal-backdrop {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center;
+}
+.factory-modal-backdrop .modal-window {
+  background: #14141c; border: 1px solid #2c2c3e; color: #f3f4f6;
+  border-radius: 12px; padding: 18px; max-height: 85vh; overflow-y: auto;
+}
+</style>
 </head>
 <body>
 
@@ -785,6 +868,11 @@
       <span class="icon">📑</span> Tạo video hàng loạt
       <span class="badge badge-hot">HOT</span>
       <span class="nav-kbd">Alt+B</span>
+    </div>
+    <div class="nav-item" data-panel="factory" id="nav-factory" title="Xưởng tự động (Alt+F)">
+      <span class="icon">🏭</span> Xưởng tự động
+      <span class="badge badge-hot">MỚI</span>
+      <span class="nav-kbd">Alt+F</span>
     </div>
     <div class="nav-item" data-panel="affiliate" id="nav-affiliate" title="Video Tiếp Thị — Affiliate (Alt+A)">
       <span class="icon">🛍️</span> Video Tiếp Thị (Affiliate)
@@ -1603,6 +1691,159 @@
           </div>
         </div>
 
+      </div>
+    </div>
+
+    <!-- ─ Panel: Xưởng tự động (Auto Factory) ────── -->
+    <div class="panel" id="panel-factory">
+      <div class="panel-head batch-head">
+        <div>
+          <h2><span class="icon-head">🏭</span> Xưởng tự động</h2>
+          <div class="panel-sub">Một cú bấm ra nhiều video hoàn chỉnh: AI viết kịch bản, đọc giọng, vẽ ảnh, dựng video và làm sẵn gói đăng bài cho từng video.</div>
+        </div>
+      </div>
+
+      <div class="factory-layout-grid">
+        <!-- CỘT TRÁI: Đặt hàng -->
+        <div class="batch-col factory-col-order">
+          <div class="factory-card">
+            <h3>Đặt hàng</h3>
+            <p class="factory-card-sub">Chọn nguồn nội dung và số lượng video.</p>
+
+            <div class="batch-form-block" style="margin-top:14px;">
+              <label class="batch-block-label">Nguồn nội dung</label>
+              <div class="factory-source-toggle">
+                <button type="button" class="btn-segmented active" id="btnFactorySrcTrending" onclick="setFactorySource('trending')">📈 Ý tưởng đang hot</button>
+                <button type="button" class="btn-segmented" id="btnFactorySrcNews" onclick="setFactorySource('news')">📰 Tin tức mới</button>
+                <button type="button" class="btn-segmented" id="btnFactorySrcManual" onclick="setFactorySource('manual')">✏️ Tự nhập chủ đề</button>
+              </div>
+              <p class="factory-hint" id="factorySourceHint">Lấy từ những gì khán giả Việt đang tìm trên Google, AI biến thành ý tưởng video gốc.</p>
+            </div>
+
+            <div class="batch-form-block" id="factoryManualWrap" style="display:none;">
+              <label class="batch-block-label">Chủ đề (mỗi dòng 1 video, tối đa 10)</label>
+              <textarea id="factoryTopicsInput" class="batch-textarea" rows="5" placeholder="Ví dụ:&#10;Chuyện ma ở ngôi nhà cổ Đà Lạt&#10;3 bài học từ người cha nghèo"></textarea>
+            </div>
+
+            <div class="batch-form-block" id="factoryPreviewWrap">
+              <div class="fx fx-between fx-ac">
+                <label class="batch-block-label">Chủ đề sẽ sản xuất</label>
+                <button type="button" class="btn btn-ghost btn-xs" onclick="loadFactoryTopics(true)">🔄 Làm mới</button>
+              </div>
+              <ul class="factory-topics-list" id="factoryTopicsList">
+                <li class="factory-topics-loading">Đang lấy chủ đề…</li>
+              </ul>
+              <p class="factory-fallback-note" id="factoryFallbackNote" style="display:none;">⚠️ Nguồn RSS lỗi — đang dùng chủ đề dự phòng có sẵn.</p>
+            </div>
+
+            <div class="batch-form-block">
+              <div class="fx fx-between fx-ac">
+                <label class="batch-block-label">Số video</label>
+                <span class="batch-field-val" id="factoryCountVal">3 video</span>
+              </div>
+              <input type="range" id="factoryCountRange" class="factory-range" min="1" max="10" step="1" value="3" oninput="updateFactoryEstimate()">
+            </div>
+
+            <div class="batch-form-block">
+              <div class="fx fx-between fx-ac">
+                <label class="batch-block-label">Số cảnh mỗi video</label>
+                <span class="batch-field-val" id="factoryScenesVal">5 cảnh · ~30 giây</span>
+              </div>
+              <input type="range" id="factoryScenesRange" class="factory-range" min="3" max="8" step="1" value="5" oninput="updateFactoryEstimate()">
+            </div>
+
+            <div class="batch-form-block">
+              <label class="batch-block-label">Phong cách hình ảnh</label>
+              <select id="factoryStyleSelect" class="form-select u-w100">
+                <option value="cinematic" selected>Điện ảnh chân thực (Cinematic)</option>
+                <option value="donghua">3D Tiên hiệp / Huyền huyễn (Donghua)</option>
+                <option value="anime">Anime Nhật Bản (Anime)</option>
+                <option value="horror_dark">Kinh dị &amp; Ma mị (Horror / Dark)</option>
+                <option value="comic">Truyện tranh Webtoon (Comic / Manhwa)</option>
+                <option value="3d_pixar">Hoạt hình 3D Pixar / Disney</option>
+                <option value="ink_wash">Cổ phong Thủy mặc (Ink Wash)</option>
+                <option value="cyberpunk">Cyberpunk Viễn tưởng</option>
+                <option value="photoreal">Ảnh chụp đời thực (Photoreal)</option>
+                <option value="watercolor">Màu nước nghệ thuật (Watercolor)</option>
+                <option value="oil_painting">Tranh sơn dầu cổ điển</option>
+              </select>
+            </div>
+
+            <div class="batch-form-block">
+              <label class="batch-block-label">Giọng đọc</label>
+              <select id="factoryVoiceSelect" class="form-select u-w100">
+                <option value="vi-VN-HoaiMyNeural">HoaiMy (nữ) · vi-VN</option>
+              </select>
+            </div>
+
+            <div class="batch-form-block">
+              <label class="batch-block-label">AI tạo hình</label>
+              <select id="factoryImageSourceSelect" class="form-select u-w100">
+                <option value="muse" selected>Muse AI (mặc định)</option>
+                <option value="free" disabled>Miễn phí (FLUX) — sắp có</option>
+              </select>
+              <p class="factory-hint">Đang dùng: <b>Muse AI</b>. Nguồn tạo hình khác sẽ mở sau.</p>
+            </div>
+
+            <div class="batch-form-block">
+              <label class="batch-block-label">Khung hình</label>
+              <div class="batch-ratio-pills">
+                <button type="button" class="btn-segmented active" data-factory-ratio="9:16" onclick="setFactoryRatio('9:16')">9:16</button>
+                <button type="button" class="btn-segmented" data-factory-ratio="16:9" onclick="setFactoryRatio('16:9')">16:9</button>
+                <button type="button" class="btn-segmented" data-factory-ratio="1:1" onclick="setFactoryRatio('1:1')">1:1</button>
+              </div>
+            </div>
+
+            <button type="button" class="btn btn-orange btn-run-all factory-order-btn" id="btnFactoryOrder" onclick="submitFactoryOrder()">▶ Bắt đầu sản xuất</button>
+            <p class="factory-estimate" id="factoryEstimate">⏱ Ước tính khoảng 6 phút 15 giây — cứ để đó, xưởng tự chạy.</p>
+          </div>
+        </div>
+
+        <!-- CỘT PHẢI: Danh sách việc -->
+        <div class="batch-col factory-col-jobs">
+          <div class="factory-card">
+            <div class="fx fx-between fx-ac">
+              <h3>Việc trong xưởng</h3>
+              <button type="button" class="btn btn-ghost btn-xs" onclick="loadFactoryQueue()">🔄 Làm mới</button>
+            </div>
+            <p class="factory-card-sub">Video do Xưởng tự động đặt hàng (chung hàng đợi với Tạo video hàng loạt).</p>
+            <div id="factoryJobsEmpty" class="factory-empty">Chưa có việc nào. Chọn nguồn nội dung rồi bấm <b>Bắt đầu sản xuất</b> để xưởng làm việc.</div>
+            <ul class="factory-jobs-list" id="factoryJobsList" style="display:none;"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Gói đăng bài của Xưởng (class riêng factory-modal-backdrop:
+         KHÔNG dùng .modal-backdrop vì handler Escape của app sẽ .remove()
+         modal đầu tiên trong DOM) -->
+    <div id="factoryPublishModal" class="factory-modal-backdrop" style="display:none;">
+      <div class="modal-window factory-modal-window">
+        <div class="modal-header">
+          <div class="u-fw700 u-fs16 u-c-accent fx fx-ac fx-g8"><span>📦</span> Gói đăng bài</div>
+          <button class="btn btn-ghost btn-sm" onclick="closeFactoryPublishModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="social-field">
+            <div class="fx fx-between fx-ac u-mb4">
+              <span class="social-label">Tiêu đề:</span>
+              <button type="button" class="btn-copy-link" onclick="copyFactoryField('title')">Copy</button>
+            </div>
+            <textarea id="factoryPubTitle" class="batch-textarea" rows="2" readonly></textarea>
+          </div>
+          <div class="social-field">
+            <div class="fx fx-between fx-ac u-mb4">
+              <span class="social-label">Mô tả + hashtag:</span>
+              <button type="button" class="btn-copy-link" onclick="copyFactoryField('description')">Copy</button>
+            </div>
+            <textarea id="factoryPubDesc" class="batch-textarea" rows="6" readonly></textarea>
+          </div>
+          <p class="factory-hint">Chưa đăng thẳng lên YouTube/TikTok — sao chép tiêu đề/mô tả rồi dán khi đăng, hoặc tải gói .zip (gồm video, thumbnail, phụ đề, metadata).</p>
+        </div>
+        <div class="modal-footer fx fx-between fx-ac u-mt16">
+          <a id="factoryPubVideoBtn" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener">▶ Xem video</a>
+          <a id="factoryPubZipBtn" class="btn btn-orange btn-sm" href="#" download>⬇ Tải gói .zip</a>
+        </div>
       </div>
     </div>
 

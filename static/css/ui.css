@@ -348,6 +348,7 @@ label { color: var(--text-secondary); }
 .fx { display: flex; } .fx-inline { display: inline-flex; }
 .fx-col { flex-direction: column; } .fx-ac { align-items: center; } .fx-as { align-items: flex-start; }
 .fx-jc-sb { justify-content: space-between; } .fx-jc-fe { justify-content: flex-end; } .fx-jc-c { justify-content: center; }
+.fx-between { justify-content: space-between; } /* alias: index.html dùng fx-between ở nhiều header/row (batch + factory) */
 .fx-wrap { flex-wrap: wrap; }
 .fx-g2 { gap: 2px; } .fx-g4 { gap: 4px; } .fx-g6 { gap: 6px; } .fx-g8 { gap: 8px; } .fx-g10 { gap: 10px; }
 .fx-g12 { gap: 12px; } .fx-g14 { gap: 14px; } .fx-g16 { gap: 16px; } .fx-g20 { gap: 20px; }

@@ -32,7 +32,7 @@ load_dotenv()
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from batch_engine import run_batch, generate_keyframe_image, heal_prompt_with_ai, apply_style_locks, sanitize_prompt_heuristics
 from composer import compose_full_movie, audit_movie_scenes, compose_scene_video
@@ -4841,6 +4841,7 @@ from batch_video_engine import (
     BATCH_VISUAL_STYLES,
     BATCH_DIR,
 )
+import auto_factory
 
 class BatchCreateRequest(BaseModel):
     prompts: List[str] = Field(default=[], max_length=100)
@@ -5013,6 +5014,151 @@ async def bulk_action_batch_videos(req: BulkActionRequest):
         return {"message": f"Đã xóa thành công {count} video được chọn", "count": count, "action": "delete"}
     else:
         return JSONResponse({"error": f"Hành động '{req.action}' không hợp lệ (chỉ hỗ trợ 'run' hoặc 'delete')"}, status_code=400)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# XƯỞNG TỰ ĐỘNG (Auto Factory) — đặt hàng 1 cú bấm ra nhiều video
+# (xem auto_factory.py: nguồn RSS, gói đăng bài; video chạy qua
+# BatchVideoManager có sẵn, worker có sẵn tự chạy)
+# ══════════════════════════════════════════════════════════════════════════
+
+class FactoryOrderRequest(BaseModel):
+    source: str = Field(default="trending", max_length=20)
+    topics: Optional[List[str]] = Field(default=None, max_length=10)
+    count: int = Field(default=3, ge=1, le=10)
+    scenes_count: int = Field(default=5, ge=3, le=8)
+    visual_style: str = Field(default="cinematic", max_length=50)
+    voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=100)
+    aspect_ratio: str = Field(default="9:16", max_length=10)
+    image_source: str = Field(default="muse", max_length=20)
+    mode: str = Field(default="free", max_length=20)
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str) -> str:
+        if v not in ("trending", "news", "manual"):
+            raise ValueError("Nguồn nội dung chỉ nhận 'trending', 'news' hoặc 'manual'")
+        return v
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls, v: str) -> str:
+        if v not in ("9:16", "16:9", "1:1"):
+            raise ValueError(f"Tỷ lệ khung hình '{v}' không hợp lệ. Cho phép: 9:16, 16:9, 1:1")
+        return v
+
+    @field_validator("visual_style")
+    @classmethod
+    def validate_visual_style(cls, v: str) -> str:
+        if v not in BATCH_VISUAL_STYLES:
+            raise ValueError(f"Phong cách '{v}' không hợp lệ. Cho phép: {list(BATCH_VISUAL_STYLES.keys())}")
+        return v
+
+    @field_validator("voice")
+    @classmethod
+    def validate_voice(cls, v: str) -> str:
+        clean = v.strip()
+        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+            raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
+        return clean
+
+    @field_validator("image_source")
+    @classmethod
+    def validate_image_source(cls, v: str) -> str:
+        if v != "muse":
+            raise ValueError("Nguồn tạo hình hiện chỉ hỗ trợ 'muse' (Muse AI)")
+        return v
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ("free", "character"):
+            raise ValueError("Chế độ tạo (mode) chỉ nhận 'free' hoặc 'character'")
+        return v
+
+    @model_validator(mode="after")
+    def validate_manual_topics(self):
+        if self.source == "manual":
+            topics = [t.strip() for t in (self.topics or []) if t and t.strip()]
+            if not topics:
+                raise ValueError("Chế độ 'manual' bắt buộc nhập ít nhất 1 chủ đề (topics)")
+            self.topics = topics
+        return self
+
+
+@app.get("/api/factory/styles")
+async def get_factory_styles():
+    """11 phong cách hình ảnh của Xưởng tự động (theo đúng thứ tự hiển thị)."""
+    return {"styles": auto_factory.factory_styles()}
+
+
+@app.get("/api/factory/topics")
+async def get_factory_topics(source: str = "trending", refresh: bool = False):
+    """Lấy chủ đề tự động từ RSS (cache 30 phút; RSS lỗi thì fallback pool).
+    refresh=true: bỏ qua cache, lấy mới từ RSS."""
+    if source not in ("trending", "news"):
+        return JSONResponse({"error": "Nguồn nội dung chỉ nhận 'trending' hoặc 'news'"}, status_code=422)
+    return auto_factory.fetch_topics(source, use_cache=not refresh)
+
+
+@app.post("/api/factory/order")
+async def create_factory_order(req: FactoryOrderRequest):
+    """Đặt hàng 1 cú bấm: lấy chủ đề tự động rồi tạo N video qua hàng đợi
+    batch (worker có sẵn tự chạy, không tạo worker mới)."""
+    fallback = False
+    if req.source == "manual":
+        topics = [t.strip() for t in (req.topics or []) if t and t.strip()]
+    else:
+        fetched = auto_factory.fetch_topics(req.source)
+        topics = fetched["topics"][: req.count]
+        fallback = fetched["fallback"]
+    if not topics:
+        return JSONResponse({"error": "Không lấy được chủ đề nào để sản xuất"}, status_code=422)
+    created = BATCH_MANAGER.add_batch(
+        prompts=topics,
+        aspect_ratio=req.aspect_ratio,
+        scenes_count=req.scenes_count,
+        visual_style=req.visual_style,
+        voice=req.voice,
+        mode=req.mode,
+        auto_run=True,
+    )
+    for item in created:
+        BATCH_MANAGER.update_video(item["id"], {"factory_source": req.source})
+    return {
+        "message": f"Đã đặt {len(created)} video vào xưởng (nguồn: {req.source})",
+        "source": req.source,
+        "fallback": fallback,
+        "requested": req.count,
+        "created": created,
+        "total": len(created),
+        "estimated_seconds": auto_factory.estimate_seconds(len(created), req.scenes_count),
+    }
+
+
+@app.get("/api/factory/publish-pack/{video_id}")
+async def get_factory_publish_pack(video_id: str):
+    """Tải gói đăng bài ZIP của 1 video đã hoàn tất (video + thumbnail +
+    tiêu đề/mô tả/hashtag + phụ đề + metadata)."""
+    try:
+        zip_path = auto_factory.build_publish_pack(video_id)
+    except FileNotFoundError:
+        return JSONResponse({"error": "Không tìm thấy video"}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return FileResponse(str(zip_path), media_type="application/zip",
+                        filename=f"publish-pack-{video_id}.zip")
+
+
+@app.get("/api/factory/thumbnail/{video_id}")
+async def get_factory_thumbnail(video_id: str):
+    """Ảnh thumbnail của video (trích từ final.mp4, có cache trong thư mục video)."""
+    thumb = auto_factory.get_thumbnail(video_id)
+    if not thumb:
+        return JSONResponse({"error": "Chưa có thumbnail cho video này"}, status_code=404)
+    return FileResponse(str(thumb), media_type="image/jpeg")
 
 
 if __name__ == "__main__":
