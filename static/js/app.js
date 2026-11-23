@@ -280,6 +280,7 @@ function showPanel(name) {
   if (name === 'affiliate') initAffiliateStudio();
   if (name === 'batch-create') initBatchCreateStudio();
   if (name === 'factory') initFactoryPanel();
+  if (name === 'story') initStoryPanel();
   if (name === 'create') refreshQueueHint(); // Nhóm 1: trạng thái hàng đợi trước khi bấm Sản xuất
 }
 
@@ -9936,3 +9937,509 @@ window.addEventListener('DOMContentLoaded', () => {
   // Vẽ mục "Nhân vật của phim" ngay cả khi thư viện chưa tải xong.
   if (typeof renderFilmCharacters === 'function') renderFilmCharacters();
 });
+
+// ══════════════════════════════════════════════════════════════════════
+// TRUYỆN THÀNH VIDEO (Story-to-Video)
+// ══════════════════════════════════════════════════════════════════════
+window.storyState = {
+  initialized: false,
+  tab: 'library',
+  projectId: null,
+  project: null,
+  adaptMode: 'short',
+  adaptModes: [],
+  aspectRatio: '9:16',
+  scenesCount: 5,
+  adaptChapterIndex: null,
+  adaptScenes: null,
+  pollTimer: null,
+};
+
+function initStoryPanel() {
+  if (window.storyState.initialized) {
+    loadStoryVideos();
+    startStoryVideosPolling();
+    return;
+  }
+  window.storyState.initialized = true;
+  const vSel = document.getElementById('storyVoiceSelect');
+  if (vSel && typeof voiceSelectHtml === 'function' && typeof VOICES !== 'undefined' && VOICES.length > 0) {
+    vSel.innerHTML = voiceSelectHtml('vi-VN-HoaiMyNeural');
+  }
+  updateStoryScenesLabel();
+  loadStoryLibrary();
+  loadStoryAdaptModes();
+  loadStoryVideos();
+  startStoryVideosPolling();
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeStoryAdaptModal(); closeStoryReadModal(); }
+  });
+}
+
+function startStoryVideosPolling() {
+  if (window.storyState.pollTimer) clearInterval(window.storyState.pollTimer);
+  window.storyState.pollTimer = setInterval(() => {
+    const panel = document.getElementById('panel-story');
+    if (panel && panel.classList.contains('active') && !document.hidden) {
+      loadStoryVideos();
+    }
+  }, 5000);
+}
+
+function setStoryTab(tab) {
+  window.storyState.tab = tab;
+  document.querySelectorAll('[data-story-tab]').forEach(b => {
+    b.classList.toggle('active', b.dataset.storyTab === tab);
+  });
+  ['library', 'search', 'url', 'upload', 'paste', 'adapt'].forEach(t => {
+    const pane = document.getElementById('storyTab' + t.charAt(0).toUpperCase() + t.slice(1));
+    if (pane) pane.style.display = t === tab ? 'block' : 'none';
+  });
+}
+
+function setStoryRatio(ratio) {
+  window.storyState.aspectRatio = ratio;
+  document.querySelectorAll('[data-story-ratio]').forEach(b => {
+    b.classList.toggle('active', b.dataset.storyRatio === ratio);
+  });
+}
+
+function updateStoryScenesLabel() {
+  const scenes = parseInt(document.getElementById('storyScenesRange')?.value || '5', 10);
+  window.storyState.scenesCount = scenes;
+  const val = document.getElementById('storyScenesVal');
+  if (val) val.textContent = `${scenes} cảnh · ~${scenes * 6} giây`;
+}
+
+function storyConfig() {
+  return {
+    visual_style: document.getElementById('storyStyleSelect')?.value || 'cinematic',
+    voice: document.getElementById('storyVoiceSelect')?.value || 'vi-VN-HoaiMyNeural',
+    aspect_ratio: window.storyState.aspectRatio,
+    scenes_count: window.storyState.scenesCount,
+    mode: window.storyState.adaptMode,
+    extra_req: document.getElementById('storyAdaptExtra')?.value || '',
+  };
+}
+
+function storySetMsg(elId, text, ok) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'story-msg' + (text ? (ok ? ' ok' : ' err') : '');
+}
+
+// ── Kho tác phẩm ───────────────────────────────────────────────────────
+async function loadStoryLibrary() {
+  const grid = document.getElementById('storyLibraryGrid');
+  if (!grid) return;
+  try {
+    const res = await apiFetch('/api/story/library');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Không tải được kho tác phẩm');
+    const stories = data.stories || [];
+    if (stories.length === 0) {
+      grid.innerHTML = '<p class="factory-card-sub">Kho tác phẩm đang trống.</p>';
+      return;
+    }
+    grid.innerHTML = stories.map(s => `
+      <div class="story-card">
+        <span class="badge badge-hot">${escapeHtml(s.category || 'Truyện')}</span>
+        <h4>${escapeHtml(s.title)}</h4>
+        <div class="story-card-meta">✍️ ${escapeHtml(s.author || 'Dân gian')} · ${s.word_count || 0} từ · ${s.chapter_count || 0} chương</div>
+        <p>${escapeHtml(s.summary || '')}</p>
+        <div class="story-card-actions">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="storyReadSample('${escapeHtml(s.id)}')">📖 Đọc thử</button>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="storyAdaptFromLibrary('${escapeHtml(s.id)}')">🎭 Xào nấu</button>
+          <button type="button" class="btn btn-orange btn-sm" onclick="storyCreateVideosFromLibrary('${escapeHtml(s.id)}')">🎬 Tạo video</button>
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    grid.innerHTML = `<p class="story-msg err">❌ ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+async function storyReadSample(storyId) {
+  try {
+    const res = await apiFetch(`/api/story/library/${encodeURIComponent(storyId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Không mở được truyện');
+    document.getElementById('storyReadTitle').textContent = `📖 ${data.title} — Đọc thử`;
+    document.getElementById('storyReadBody').textContent =
+      (data.chapters || []).map(c => `${c.title}\n\n${c.text}`).join('\n\n— — —\n\n');
+    document.getElementById('storyReadCreateBtn').onclick = () => {
+      closeStoryReadModal();
+      storyCreateVideosFromLibrary(storyId);
+    };
+    document.getElementById('storyReadModal').style.display = 'flex';
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  }
+}
+
+function closeStoryReadModal() {
+  const m = document.getElementById('storyReadModal');
+  if (m) m.style.display = 'none';
+}
+
+async function storyCreateProjectFromLibrary(storyId) {
+  const res = await apiFetch(`/api/story/library/${encodeURIComponent(storyId)}/create-project`, { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Không tạo được truyện từ kho');
+  await openStoryProject(data.project.id);
+  return data.project;
+}
+
+async function storyAdaptFromLibrary(storyId) {
+  try {
+    const project = await storyCreateProjectFromLibrary(storyId);
+    showToast(`📖 Đã mở truyện “${project.title}”.`, 'success');
+    openStoryAdaptModal(0);
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  }
+}
+
+async function storyCreateVideosFromLibrary(storyId) {
+  try {
+    const project = await storyCreateProjectFromLibrary(storyId);
+    await createStoryVideos(null, project.id);
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  }
+}
+
+// ── Tìm trên web ───────────────────────────────────────────────────────
+async function searchStoryWeb() {
+  const q = document.getElementById('storySearchInput')?.value.trim();
+  const box = document.getElementById('storySearchResults');
+  if (!box) return;
+  if (!q) { box.innerHTML = '<p class="story-msg err">Nhập từ khóa cần tìm trước.</p>'; return; }
+  box.innerHTML = '<p class="factory-card-sub">Đang tìm…</p>';
+  try {
+    const res = await apiFetch(`/api/story/search?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Tìm kiếm lỗi');
+    const results = data.results || [];
+    if (results.length === 0) {
+      box.innerHTML = '<p class="factory-card-sub">Không tìm thấy truyện nào khớp. Thử từ khóa khác, hoặc dán văn bản trực tiếp.</p>';
+      return;
+    }
+    box.innerHTML = results.map(r => `
+      <div class="story-search-result">
+        <b>${escapeHtml(r.title)}</b> <span class="badge badge-hot">${escapeHtml(r.source === 'library' ? 'Kho tác phẩm' : r.source === 'wikipedia' ? 'Wikipedia' : 'Wikisource')}</span>
+        <p>${escapeHtml(r.snippet || '')}</p>
+        <button type="button" class="btn btn-primary btn-sm" onclick="fetchStoryWeb('${escapeHtml(r.title).replace(/'/g, "\\'")}', '${escapeHtml(r.source)}', '${escapeHtml(r.story_id || '')}')">📥 Lấy toàn văn và mở truyện</button>
+      </div>`).join('');
+  } catch (e) {
+    box.innerHTML = `<p class="story-msg err">❌ ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+async function fetchStoryWeb(title, source, storyId) {
+  try {
+    const q = source === 'library' && storyId
+      ? `title=${encodeURIComponent(storyId)}&source=library`
+      : `title=${encodeURIComponent(title)}&source=${encodeURIComponent(source)}`;
+    const res = await apiFetch(`/api/story/fetch-web?${q}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Không lấy được toàn văn');
+    await openStoryProject(data.project.id);
+    showToast(`📖 Đã mở truyện “${data.project.title}” (${data.project.chapter_count} chương).`, 'success');
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  }
+}
+
+// ── Nhập từ link / tải file / dán văn bản ──────────────────────────────
+async function importStoryUrl() {
+  const url = document.getElementById('storyUrlInput')?.value.trim();
+  const title = document.getElementById('storyUrlTitle')?.value.trim();
+  if (!url) { storySetMsg('storyUrlMsg', 'Nhập link bài truyện trước.'); return; }
+  storySetMsg('storyUrlMsg', 'Đang lấy nội dung từ link…', true);
+  try {
+    const cfg = storyConfig();
+    const res = await apiFetch('/api/story/import-url', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, title, style: cfg.visual_style }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Nhập từ link lỗi');
+    storySetMsg('storyUrlMsg', `✅ ${data.message}`, true);
+    await openStoryProject(data.project.id);
+  } catch (e) {
+    storySetMsg('storyUrlMsg', `❌ ${e.message}`);
+  }
+}
+
+async function uploadStoryFile() {
+  const input = document.getElementById('storyFileInput');
+  const file = input?.files?.[0];
+  if (!file) { storySetMsg('storyUploadMsg', 'Chọn 1 file truyện (TXT/MD/DOCX/EPUB) trước.'); return; }
+  storySetMsg('storyUploadMsg', 'Đang tải lên và tách chương…', true);
+  try {
+    const cfg = storyConfig();
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('title', document.getElementById('storyUploadTitle')?.value.trim() || '');
+    fd.append('author', document.getElementById('storyUploadAuthor')?.value.trim() || '');
+    fd.append('style', cfg.visual_style);
+    fd.append('chars_per_chapter', '6000');
+    const res = await apiFetch('/api/story/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Tải file lỗi');
+    storySetMsg('storyUploadMsg', `✅ ${data.message}`, true);
+    if (input) input.value = '';
+    await openStoryProject(data.project.id);
+  } catch (e) {
+    storySetMsg('storyUploadMsg', `❌ ${e.message}`);
+  }
+}
+
+async function pasteStoryText() {
+  const title = document.getElementById('storyPasteTitle')?.value.trim();
+  const text = document.getElementById('storyPasteText')?.value.trim();
+  if (!title) { storySetMsg('storyPasteMsg', 'Nhập tên truyện trước.'); return; }
+  if (!text) { storySetMsg('storyPasteMsg', 'Dán văn bản truyện vào ô bên dưới trước.'); return; }
+  storySetMsg('storyPasteMsg', 'Đang tách chương…', true);
+  try {
+    const cfg = storyConfig();
+    const chars = parseInt(document.getElementById('storyPasteChars')?.value || '6000', 10) || 6000;
+    const res = await apiFetch('/api/story/paste', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title, author: document.getElementById('storyPasteAuthor')?.value.trim() || 'Không rõ',
+        text, chars_per_chapter: chars, style: cfg.visual_style,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Tạo truyện lỗi');
+    storySetMsg('storyPasteMsg', `✅ ${data.message}`, true);
+    await openStoryProject(data.project.id);
+  } catch (e) {
+    storySetMsg('storyPasteMsg', `❌ ${e.message}`);
+  }
+}
+
+// ── Truyện đang mở: chương + video ─────────────────────────────────────
+async function openStoryProject(projectId) {
+  try {
+    const res = await apiFetch(`/api/story/projects/${encodeURIComponent(projectId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Không mở được truyện');
+    window.storyState.projectId = data.id;
+    window.storyState.project = data;
+    renderStoryProject(data);
+    loadStoryVideos();
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  }
+}
+
+function renderStoryProject(project) {
+  document.getElementById('storyProjectEmpty').style.display = 'none';
+  document.getElementById('storyProjectWrap').style.display = 'block';
+  document.getElementById('storyProjectTitle').textContent = project.title;
+  document.getElementById('storyProjectMeta').textContent =
+    `✍️ ${project.author || 'Không rõ'} · ${(project.word_count || 0).toLocaleString('vi-VN')} từ · ${project.chapter_count || 0} chương · Nguồn: ${project.source || ''}`;
+  const list = document.getElementById('storyChapterList');
+  const scripts = project.scripts || {};
+  list.innerHTML = (project.chapters || []).map((ch, i) => {
+    const hasScript = !!scripts[String(i)];
+    return `
+    <div class="story-chapter-row">
+      <span class="story-chapter-title">${escapeHtml(ch.title)}${hasScript ? ' <span class="badge badge-hot">Đã có kịch bản</span>' : ''}</span>
+      <span class="story-chapter-words">${(ch.word_count || 0).toLocaleString('vi-VN')} từ</span>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="openStoryAdaptModal(${i})">🎭 Xào nấu</button>
+      <button type="button" class="btn btn-orange btn-sm" onclick="createStoryVideos(${i})">🎬 Tạo video</button>
+    </div>`;
+  }).join('');
+}
+
+// ── Xào nấu AI ─────────────────────────────────────────────────────────
+async function loadStoryAdaptModes() {
+  const grid = document.getElementById('storyModeGrid');
+  if (!grid) return;
+  try {
+    const res = await apiFetch('/api/story/adapt-modes');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Không tải được chế độ xào nấu');
+    window.storyState.adaptModes = data.modes || [];
+    grid.innerHTML = window.storyState.adaptModes.map(m => `
+      <div class="story-mode-card ${m.id === window.storyState.adaptMode ? 'active' : ''}" data-story-mode="${m.id}" onclick="setStoryAdaptMode('${m.id}')">
+        <b>${escapeHtml(m.name)}</b><span>${escapeHtml(m.desc)}</span>
+      </div>`).join('');
+  } catch (e) {
+    grid.innerHTML = `<p class="story-msg err">❌ ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function setStoryAdaptMode(mode) {
+  window.storyState.adaptMode = mode;
+  document.querySelectorAll('[data-story-mode]').forEach(el => {
+    el.classList.toggle('active', el.dataset.storyMode === mode);
+  });
+}
+
+async function openStoryAdaptModal(chapterIndex) {
+  const project = window.storyState.project;
+  if (!project) { showToast('❌ Mở 1 truyện trước rồi mới xào nấu chương.', 'error'); return; }
+  const ch = (project.chapters || [])[chapterIndex];
+  if (!ch) { showToast('❌ Không tìm thấy chương này.', 'error'); return; }
+  const cfg = storyConfig();
+  const modeName = (window.storyState.adaptModes.find(m => m.id === cfg.mode) || {}).name || cfg.mode;
+  window.storyState.adaptChapterIndex = chapterIndex;
+  document.getElementById('storyAdaptModalTitle').textContent = `🎭 Xào nấu: ${ch.title}`;
+  document.getElementById('storyAdaptModalHint').textContent =
+    `Chế độ: ${modeName} · ${cfg.scenes_count} cảnh · Phong cách: ${cfg.visual_style}. Sửa trực tiếp lời thoại/prompt bên dưới rồi bấm Lưu kịch bản.`;
+  document.getElementById('storyAdaptModalBody').innerHTML = '<p class="factory-card-sub">Đang chuyển thể chương…</p>';
+  document.getElementById('storyAdaptModal').style.display = 'flex';
+  try {
+    const res = await apiFetch(`/api/story/projects/${encodeURIComponent(project.id)}/adapt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: cfg.mode, chapter_index: chapterIndex,
+        scenes_count: cfg.scenes_count, visual_style: cfg.visual_style,
+        extra_req: cfg.extra_req,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Xào nấu lỗi');
+    const adapted = (data.adapted || [])[0];
+    window.storyState.adaptScenes = adapted ? adapted.scenes : [];
+    renderStoryAdaptScenes(window.storyState.adaptScenes);
+    // Cập nhật lại project (đã có kịch bản mới)
+    window.storyState.project = await (await apiFetch(`/api/story/projects/${encodeURIComponent(project.id)}`)).json();
+    renderStoryProject(window.storyState.project);
+  } catch (e) {
+    document.getElementById('storyAdaptModalBody').innerHTML = `<p class="story-msg err">❌ ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function renderStoryAdaptScenes(scenes) {
+  const body = document.getElementById('storyAdaptModalBody');
+  if (!scenes || scenes.length === 0) {
+    body.innerHTML = '<p class="story-msg err">Không chuyển thể được cảnh nào từ chương này.</p>';
+    return;
+  }
+  body.innerHTML = scenes.map((sc, i) => `
+    <div class="story-scene-edit">
+      <div class="story-scene-head">Cảnh ${sc.index || i + 1} · ${escapeHtml(sc.role || '')} · ~${sc.duration || 6}s</div>
+      <label class="batch-block-label">Lời thoại</label>
+      <textarea class="batch-textarea story-scene-vo" rows="2" data-scene="${i}">${escapeHtml(sc.voiceover || '')}</textarea>
+      <label class="batch-block-label" style="margin-top:6px;">Prompt hình ảnh</label>
+      <textarea class="batch-textarea story-scene-prompt" rows="2" data-scene="${i}">${escapeHtml(sc.prompt || '')}</textarea>
+    </div>`).join('');
+}
+
+function storyAdaptScenesFromForm() {
+  const vos = [...document.querySelectorAll('.story-scene-vo')];
+  const prs = [...document.querySelectorAll('.story-scene-prompt')];
+  const base = window.storyState.adaptScenes || [];
+  return vos.map((voEl, i) => ({
+    index: i + 1,
+    role: (base[i] && base[i].role) || (i === 0 ? 'hook' : 'buildup'),
+    voiceover: voEl.value.trim(),
+    prompt: (prs[i] ? prs[i].value : '').trim(),
+    duration: (base[i] && base[i].duration) || 6,
+  }));
+}
+
+async function saveStoryAdaptEdits() {
+  const project = window.storyState.project;
+  const ci = window.storyState.adaptChapterIndex;
+  if (!project || ci === null || ci === undefined) return;
+  const scenes = storyAdaptScenesFromForm();
+  if (scenes.some(s => !s.voiceover || !s.prompt)) {
+    showToast('❌ Mỗi cảnh cần có đủ lời thoại và prompt hình ảnh.', 'error');
+    return;
+  }
+  try {
+    const cfg = storyConfig();
+    const res = await apiFetch(`/api/story/projects/${encodeURIComponent(project.id)}/scripts/${ci}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenes, mode: cfg.mode, visual_style: cfg.visual_style }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Lưu kịch bản lỗi');
+    window.storyState.adaptScenes = scenes;
+    showToast('💾 Đã lưu kịch bản chương.', 'success');
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  }
+}
+
+function closeStoryAdaptModal() {
+  const m = document.getElementById('storyAdaptModal');
+  if (m) m.style.display = 'none';
+  window.storyState.adaptChapterIndex = null;
+  window.storyState.adaptScenes = null;
+}
+
+async function createStoryVideoFromModal() {
+  const ci = window.storyState.adaptChapterIndex;
+  if (ci === null || ci === undefined) return;
+  await saveStoryAdaptEdits();
+  closeStoryAdaptModal();
+  await createStoryVideos(ci);
+}
+
+// ── Tạo video từ chương ────────────────────────────────────────────────
+async function createStoryVideos(chapterIndex, projectId) {
+  const pid = projectId || window.storyState.projectId;
+  if (!pid) { showToast('❌ Mở 1 truyện trước rồi mới tạo video.', 'error'); return; }
+  const project = window.storyState.project;
+  const indexes = (chapterIndex === null || chapterIndex === undefined)
+    ? (project ? (project.chapters || []).map((_, i) => i) : [])
+    : [chapterIndex];
+  if (indexes.length === 0) { showToast('❌ Truyện này chưa có chương nào.', 'error'); return; }
+  const cfg = storyConfig();
+  try {
+    const res = await apiFetch(`/api/story/projects/${encodeURIComponent(pid)}/create-videos`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chapter_indexes: indexes, visual_style: cfg.visual_style,
+        voice: cfg.voice, aspect_ratio: cfg.aspect_ratio,
+        scenes_count: cfg.scenes_count, mode: cfg.mode, extra_req: cfg.extra_req,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Tạo video lỗi');
+    showToast(`🎬 ${data.message}`, 'success');
+    loadStoryVideos();
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  }
+}
+
+async function loadStoryVideos() {
+  const listEl = document.getElementById('storyVideosList');
+  const emptyEl = document.getElementById('storyVideosEmpty');
+  if (!listEl) return;
+  const pid = window.storyState.projectId;
+  if (!pid) {
+    listEl.style.display = 'none';
+    if (emptyEl) emptyEl.style.display = 'block';
+    return;
+  }
+  try {
+    const res = await apiFetch('/api/batch-videos/queue?status=all&sort=newest');
+    const data = await res.json();
+    if (!res.ok) return;
+    const videos = (data.videos || []).filter(v => v.story_project_id === pid);
+    if (videos.length === 0) {
+      listEl.style.display = 'none';
+      if (emptyEl) emptyEl.style.display = 'block';
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = 'none';
+    listEl.style.display = 'flex';
+    const sig = videos.map(v => `${v.id}:${v.status}:${v.progress}`).join('|');
+    if (listEl.getAttribute('data-queue-sig') !== sig) {
+      listEl.setAttribute('data-queue-sig', sig);
+      listEl.innerHTML = videos.map(v => renderFactoryItemHtml(v)).join('');
+    }
+  } catch (e) {
+    console.warn('Lỗi đọc video của truyện:', e);
+  }
+}

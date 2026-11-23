@@ -835,9 +835,20 @@ class BatchVideoManager:
         voice: str = "vi-VN-HoaiMyNeural",
         mode: str = "free",
         character_id: Optional[str] = None,
-        auto_run: bool = True
+        auto_run: bool = True,
+        scripts: Optional[List[Dict[str, Any]]] = None,
+        extra: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        """Nhận danh sách prompt theo dòng, tự tạo các job vào hàng đợi."""
+        """Nhận danh sách prompt theo dòng, tự tạo các job vào hàng đợi.
+
+        - scripts: kịch bản có sẵn cho từng video (dạng dict như kết quả của
+          generate_batch_script_local: title/viral_title/caption/hashtags/
+          scenes). Khi có thì dùng scenes cho sẵn, KHÔNG sinh lại script —
+          dùng cho Truyện thành video (scenes đã adapt từ chương truyện).
+          Video dùng scripts sẽ được gắn cờ script_locked để worker không
+          tự làm mới kịch bản.
+        - extra: dict gán thêm vào mỗi item (vd: story_source, story_project_id).
+        """
         created_items: List[Dict[str, Any]] = []
         now = time.time()
 
@@ -856,15 +867,27 @@ class BatchVideoManager:
                 (v_dir / "clips").mkdir(exist_ok=True)
                 (v_dir / "audio").mkdir(exist_ok=True)
 
-                # Sinh kịch bản phân cảnh ngay cho video này
-                script_data = generate_batch_script_local(
-                    raw_prompt=line,
-                    scenes_count=scenes_count,
-                    visual_style=visual_style,
-                    aspect_ratio=aspect_ratio,
-                    mode=mode,
-                    character_id=character_id
-                )
+                # Sinh kịch bản phân cảnh ngay cho video này — hoặc dùng
+                # kịch bản cho sẵn (Truyện thành video: scenes đã adapt từ chương)
+                preset = scripts[idx] if scripts and idx < len(scripts) and scripts[idx] else None
+                if preset and preset.get("scenes"):
+                    script_data = {
+                        "title": preset.get("title") or line,
+                        "viral_title": preset.get("viral_title") or preset.get("title") or line,
+                        "caption": preset.get("caption") or "",
+                        "hashtags": preset.get("hashtags") or [],
+                        "scenes": preset.get("scenes"),
+                        "character": preset.get("character"),
+                    }
+                else:
+                    script_data = generate_batch_script_local(
+                        raw_prompt=line,
+                        scenes_count=scenes_count,
+                        visual_style=visual_style,
+                        aspect_ratio=aspect_ratio,
+                        mode=mode,
+                        character_id=character_id
+                    )
 
                 item = {
                     "id": vid_id,
@@ -881,6 +904,8 @@ class BatchVideoManager:
                     "mode": mode,
                     "character_id": character_id,
                     "character": script_data.get("character"),
+                    # Kịch bản khóa: worker không tự làm mới (xem _process_single_video)
+                    "script_locked": bool(preset and preset.get("scenes")),
                     "created_at": now + idx * 0.001,
                     "updated_at": now,
                     "scenes": script_data["scenes"],
@@ -892,6 +917,8 @@ class BatchVideoManager:
                     "final_video_url": None,
                     "error": None
                 }
+                if extra:
+                    item.update(extra)
 
                 # Lưu metadata cục bộ của video
                 (v_dir / "project.json").write_text(
@@ -1339,8 +1366,10 @@ def _process_single_video(video_id: str):
         scenes = v.get("scenes", [])
 
         # Tự động làm mới kịch bản nếu phát hiện các cảnh cũ bị lặp lại giọng đọc
+        # (KHÔNG áp dụng cho video có script_locked — vd: Truyện thành video,
+        # scenes đã adapt từ chương truyện, worker phải giữ nguyên)
         vo_set = set(s.get("voiceover", "") for s in scenes)
-        if len(scenes) >= 3 and (len(vo_set) <= 3 or len(vo_set) < len(scenes) * 0.8):
+        if not v.get("script_locked") and len(scenes) >= 3 and (len(vo_set) <= 3 or len(vo_set) < len(scenes) * 0.8):
             logger.info("Phát hiện kịch bản cũ bị lặp thoại, tự động nâng cấp sang narrative beat pool đa dạng...")
             new_script = generate_batch_script_local(
                 raw_prompt=v.get("prompt") or v.get("title", ""),

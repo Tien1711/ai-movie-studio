@@ -29,7 +29,7 @@ import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
-from fastapi import FastAPI, BackgroundTasks, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -4842,6 +4842,7 @@ from batch_video_engine import (
     BATCH_DIR,
 )
 import auto_factory
+import story_engine
 
 class BatchCreateRequest(BaseModel):
     prompts: List[str] = Field(default=[], max_length=100)
@@ -5159,6 +5160,370 @@ async def get_factory_thumbnail(video_id: str):
     if not thumb:
         return JSONResponse({"error": "Chưa có thumbnail cho video này"}, status_code=404)
     return FileResponse(str(thumb), media_type="image/jpeg")
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# TRUYỆN THÀNH VIDEO (Story-to-Video) — truyện dài → video từng chương
+# (xem story_engine.py: tách chương, nguồn truyện, xào nấu deterministic;
+# video chạy qua BatchVideoManager có sẵn, scenes inject sẵn, worker tự chạy)
+# ══════════════════════════════════════════════════════════════════════════
+
+class StoryPasteRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    author: str = Field(default="Không rõ", max_length=100)
+    text: str = Field(..., min_length=50)
+    chars_per_chapter: int = Field(default=6000, ge=1000, le=20000)
+    style: str = Field(default="cinematic", max_length=50)
+
+    @field_validator("style")
+    @classmethod
+    def validate_style(cls, v: str) -> str:
+        if v not in BATCH_VISUAL_STYLES:
+            raise ValueError(f"Phong cách '{v}' không hợp lệ")
+        return v
+
+    @model_validator(mode="after")
+    def validate_text_length(self):
+        if len(self.text) > story_engine.MAX_STORY_CHARS:
+            raise ValueError(
+                f"Nội dung vượt giới hạn {story_engine.MAX_STORY_CHARS:,} ký tự "
+                f"(đang có {len(self.text):,} ký tự)")
+        return self
+
+
+class StoryImportUrlRequest(BaseModel):
+    url: str = Field(..., min_length=8, max_length=2000)
+    title: str = Field(default="", max_length=200)
+    chars_per_chapter: int = Field(default=6000, ge=1000, le=20000)
+    style: str = Field(default="cinematic", max_length=50)
+
+    @field_validator("style")
+    @classmethod
+    def validate_style(cls, v: str) -> str:
+        if v not in BATCH_VISUAL_STYLES:
+            raise ValueError(f"Phong cách '{v}' không hợp lệ")
+        return v
+
+
+class StoryAdaptRequest(BaseModel):
+    mode: str = Field(default="short", max_length=20)
+    chapter_index: Optional[int] = Field(default=None, ge=0)
+    scenes_count: int = Field(default=5, ge=3, le=8)
+    visual_style: str = Field(default="cinematic", max_length=50)
+    extra_req: str = Field(default="", max_length=500)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in story_engine.ADAPT_MODES:
+            raise ValueError(f"Chế độ xào nấu '{v}' không hợp lệ. Cho phép: {sorted(story_engine.ADAPT_MODES)}")
+        return v
+
+    @field_validator("visual_style")
+    @classmethod
+    def validate_style(cls, v: str) -> str:
+        if v not in BATCH_VISUAL_STYLES:
+            raise ValueError(f"Phong cách '{v}' không hợp lệ")
+        return v
+
+
+class StoryCreateVideosRequest(BaseModel):
+    chapter_indexes: List[int] = Field(..., min_length=1, max_length=20)
+    visual_style: str = Field(default="cinematic", max_length=50)
+    voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=100)
+    aspect_ratio: str = Field(default="9:16", max_length=10)
+    scenes_count: int = Field(default=5, ge=3, le=8)
+    mode: str = Field(default="short", max_length=20)
+    extra_req: str = Field(default="", max_length=500)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in story_engine.ADAPT_MODES:
+            raise ValueError(f"Chế độ xào nấu '{v}' không hợp lệ")
+        return v
+
+    @field_validator("visual_style")
+    @classmethod
+    def validate_style(cls, v: str) -> str:
+        if v not in BATCH_VISUAL_STYLES:
+            raise ValueError(f"Phong cách '{v}' không hợp lệ")
+        return v
+
+    @field_validator("voice")
+    @classmethod
+    def validate_voice(cls, v: str) -> str:
+        clean = v.strip()
+        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+            raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
+        return clean
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls, v: str) -> str:
+        if v not in ("9:16", "16:9", "1:1"):
+            raise ValueError(f"Tỷ lệ khung hình '{v}' không hợp lệ. Cho phép: 9:16, 16:9, 1:1")
+        return v
+
+
+class StorySaveScriptRequest(BaseModel):
+    scenes: List[Dict[str, Any]] = Field(..., min_length=1, max_length=12)
+    mode: str = Field(default="custom", max_length=20)
+    visual_style: str = Field(default="cinematic", max_length=50)
+
+    @field_validator("visual_style")
+    @classmethod
+    def validate_style(cls, v: str) -> str:
+        if v not in BATCH_VISUAL_STYLES:
+            raise ValueError(f"Phong cách '{v}' không hợp lệ")
+        return v
+
+    @model_validator(mode="after")
+    def validate_scenes(self):
+        for i, sc in enumerate(self.scenes):
+            vo = str(sc.get("voiceover") or "").strip()
+            pr = str(sc.get("prompt") or "").strip()
+            if not vo or not pr:
+                raise ValueError(f"Cảnh {i + 1} thiếu lời thoại hoặc prompt hình ảnh")
+            dur = sc.get("duration", 6)
+            if not isinstance(dur, (int, float)) or not 3 <= dur <= 15:
+                raise ValueError(f"Cảnh {i + 1} có thời lượng không hợp lệ (3–15 giây)")
+        return self
+
+
+def _story_project_or_none(project_id: str):
+    return story_engine.load_project(project_id)
+
+
+@app.get("/api/story/library")
+async def get_story_library():
+    """Danh sách truyện trong kho có sẵn (bản kể lại ngắn, public domain)."""
+    return {"stories": story_engine.list_library()}
+
+
+@app.get("/api/story/library/{story_id}")
+async def get_story_library_item(story_id: str):
+    """Toàn bộ 1 truyện trong kho (kèm các chương)."""
+    story = story_engine.get_library_story(story_id)
+    if not story:
+        return JSONResponse({"error": f"Không tìm thấy truyện '{story_id}' trong kho"}, status_code=404)
+    return story
+
+
+@app.get("/api/story/adapt-modes")
+async def get_story_adapt_modes():
+    """5 chế độ xào nấu (chuyển thể deterministic, không dùng LLM ngoài)."""
+    return {"modes": [
+        {"id": k, "name": v["name"], "desc": v["desc"]}
+        for k, v in story_engine.ADAPT_MODES.items()
+    ]}
+
+
+@app.get("/api/story/search")
+async def search_story_web(q: str = ""):
+    """Tìm truyện: kho có sẵn trước, rồi Wikipedia + Wikisource tiếng Việt."""
+    if not q.strip():
+        return JSONResponse({"error": "Từ khóa tìm kiếm không được để trống"}, status_code=422)
+    try:
+        return story_engine.search_web(q)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+
+
+@app.get("/api/story/fetch-web")
+async def fetch_story_web(title: str = "", source: str = "wikipedia"):
+    """Lấy toàn văn 1 bài từ Wikipedia/Wikisource/kho rồi tạo project."""
+    if not title.strip():
+        return JSONResponse({"error": "Tiêu đề không được để trống"}, status_code=422)
+    if source not in ("library", "wikipedia", "wikisource"):
+        return JSONResponse({"error": "Nguồn web chỉ nhận 'library', 'wikipedia' hoặc 'wikisource'"}, status_code=422)
+    try:
+        text = story_engine.fetch_web_text(title, source)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    author = {"library": "Dân gian", "wikipedia": "Wikipedia tiếng Việt",
+              "wikisource": "Wikisource tiếng Việt"}[source]
+    try:
+        project = story_engine.create_project(title.strip(), author, text, source="web")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    return {"message": f"Đã tạo truyện '{project['title']}' ({project['chapter_count']} chương)", "project": project}
+
+
+@app.post("/api/story/import-url")
+async def import_story_url(req: StoryImportUrlRequest):
+    """Nhập truyện từ 1 link: fetch rồi trích văn bản chính, tạo project."""
+    try:
+        text = story_engine.extract_text_from_url(req.url)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    title = req.title.strip()
+    if not title:
+        host = re.sub(r"^https?://", "", req.url).split("/")[0]
+        title = f"Truyện từ {host}"
+    try:
+        project = story_engine.create_project(
+            title, "Không rõ", text, source="url",
+            style=req.style, chars_per_chapter=req.chars_per_chapter)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    return {"message": f"Đã tạo truyện '{project['title']}' ({project['chapter_count']} chương)", "project": project}
+
+
+@app.post("/api/story/upload")
+async def upload_story_file(
+    file: UploadFile = File(...),
+    title: str = Form(default=""),
+    author: str = Form(default="Không rõ"),
+    style: str = Form(default="cinematic"),
+    chars_per_chapter: int = Form(default=6000),
+):
+    """Tải file truyện lên (TXT/MD/DOCX/EPUB, tối đa 60MB). PDF chưa hỗ trợ."""
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".pdf":
+        return JSONResponse({"error": "PDF chưa được hỗ trợ — hãy chuyển sang DOCX hoặc TXT trước rồi tải lên (mở PDF bằng Word/Google Docs rồi lưu thành .docx, hoặc copy văn bản rồi dán trực tiếp)."}, status_code=400)
+    if suffix not in (".txt", ".md", ".docx", ".epub"):
+        return JSONResponse({"error": f"Định dạng '{suffix or 'không rõ'}' chưa được hỗ trợ — chỉ nhận TXT, MD, DOCX, EPUB."}, status_code=422)
+    if style not in BATCH_VISUAL_STYLES:
+        return JSONResponse({"error": f"Phong cách '{style}' không hợp lệ"}, status_code=422)
+    chars_per_chapter = max(1000, min(20000, int(chars_per_chapter or 6000)))
+    try:
+        data = await _read_upload_capped(file, max_bytes=story_engine.MAX_UPLOAD_BYTES, label="File truyện")
+    except HTTPException as e:
+        if e.status_code == 413:
+            return JSONResponse({"error": "File truyện vượt quá giới hạn 60MB — hãy chia nhỏ file rồi tải lên từng phần"}, status_code=422)
+        raise
+    try:
+        text = story_engine.parse_text_bytes(data, filename)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    title = title.strip() or Path(filename).stem.replace("_", " ").replace("-", " ").strip() or "Truyện chưa đặt tên"
+    try:
+        project = story_engine.create_project(
+            title, author.strip() or "Không rõ", text, source="upload",
+            style=style, chars_per_chapter=chars_per_chapter)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    return {"message": f"Đã tạo truyện '{project['title']}' ({project['chapter_count']} chương)", "project": project}
+
+
+@app.post("/api/story/paste")
+async def paste_story_text(req: StoryPasteRequest):
+    """Dán văn bản truyện trực tiếp rồi tạo project (tối đa 500.000 ký tự)."""
+    try:
+        project = story_engine.create_project(
+            req.title, req.author, req.text, source="paste",
+            style=req.style, chars_per_chapter=req.chars_per_chapter)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    return {"message": f"Đã tạo truyện '{project['title']}' ({project['chapter_count']} chương)", "project": project}
+
+
+@app.post("/api/story/library/{story_id}/create-project")
+async def create_story_project_from_library(story_id: str):
+    """Tạo project từ 1 truyện trong kho có sẵn (giữ nguyên chương đã chia)."""
+    try:
+        project = story_engine.create_project_from_library(story_id)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return {"message": f"Đã tạo truyện '{project['title']}' ({project['chapter_count']} chương)", "project": project}
+
+
+@app.get("/api/story/projects")
+async def list_story_projects():
+    """Danh sách truyện đã nhập (mới nhất trước)."""
+    return {"projects": story_engine.list_projects()}
+
+
+@app.get("/api/story/projects/{project_id}")
+async def get_story_project(project_id: str):
+    """Toàn bộ 1 project truyện (kèm các chương + kịch bản đã adapt)."""
+    project = _story_project_or_none(project_id)
+    if not project:
+        return JSONResponse({"error": f"Không tìm thấy truyện '{project_id}'"}, status_code=404)
+    return project
+
+
+@app.post("/api/story/projects/{project_id}/adapt")
+async def adapt_story_project(project_id: str, req: StoryAdaptRequest):
+    """Xào nấu 1 chương (hoặc tất cả) thành kịch bản, lưu vào project để
+    sửa trực tiếp ở UI trước khi tạo video."""
+    project = _story_project_or_none(project_id)
+    if not project:
+        return JSONResponse({"error": f"Không tìm thấy truyện '{project_id}'"}, status_code=404)
+    chapters = project.get("chapters") or []
+    indexes = [req.chapter_index] if req.chapter_index is not None else list(range(len(chapters)))
+    if req.chapter_index is not None and (req.chapter_index < 0 or req.chapter_index >= len(chapters)):
+        return JSONResponse({"error": f"Chỉ số chương {req.chapter_index} không hợp lệ (truyện có {len(chapters)} chương)"}, status_code=422)
+    adapted = []
+    try:
+        for ci in indexes:
+            ch = chapters[ci]
+            script = story_engine.adapt_chapter(
+                ch["text"], req.mode, req.scenes_count, req.visual_style,
+                extra_req=req.extra_req)
+            script = {**script, "scenes_count": req.scenes_count,
+                      "visual_style": req.visual_style}
+            project.setdefault("scripts", {})[str(ci)] = script
+            adapted.append({
+                "chapter_index": ci, "chapter_title": ch["title"],
+                "mode": req.mode, "scene_count": len(script["scenes"]),
+                "scenes": script["scenes"],
+            })
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    story_engine.save_project(project)
+    return {"project_id": project_id, "adapted": adapted}
+
+
+@app.put("/api/story/projects/{project_id}/scripts/{chapter_index}")
+async def save_story_script(project_id: str, chapter_index: int, req: StorySaveScriptRequest):
+    """Lưu lại kịch bản 1 chương sau khi sửa trực tiếp ở UI (lời thoại/prompt)."""
+    project = _story_project_or_none(project_id)
+    if not project:
+        return JSONResponse({"error": f"Không tìm thấy truyện '{project_id}'"}, status_code=404)
+    chapters = project.get("chapters") or []
+    if chapter_index < 0 or chapter_index >= len(chapters):
+        return JSONResponse({"error": f"Chỉ số chương {chapter_index} không hợp lệ (truyện có {len(chapters)} chương)"}, status_code=422)
+    scenes = []
+    for i, sc in enumerate(req.scenes):
+        scenes.append({
+            "index": i + 1,
+            "role": sc.get("role") or ("hook" if i == 0 else "ending" if i == len(req.scenes) - 1 else "buildup"),
+            "prompt": str(sc.get("prompt") or "").strip(),
+            "voiceover": str(sc.get("voiceover") or "").strip(),
+            "duration": sc.get("duration", 6),
+        })
+    project.setdefault("scripts", {})[str(chapter_index)] = {
+        "mode": req.mode, "scenes": scenes, "scene_count": len(scenes),
+        "scenes_count": len(scenes), "visual_style": req.visual_style,
+    }
+    story_engine.save_project(project)
+    return {"message": f"Đã lưu kịch bản chương {chapter_index + 1}", "project_id": project_id,
+            "chapter_index": chapter_index, "scene_count": len(scenes)}
+
+
+@app.post("/api/story/projects/{project_id}/create-videos")
+async def create_story_project_videos(project_id: str, req: StoryCreateVideosRequest):
+    """Tạo 1 video cho mỗi chương đã chọn (scenes inject sẵn, worker tự chạy)."""
+    try:
+        created = story_engine.create_story_videos(
+            project_id, req.chapter_indexes, req.visual_style, req.voice,
+            req.aspect_ratio, req.scenes_count, mode=req.mode,
+            extra_req=req.extra_req)
+    except FileNotFoundError:
+        return JSONResponse({"error": f"Không tìm thấy truyện '{project_id}'"}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    return {
+        "message": f"Đã tạo {len(created)} video từ truyện (đang chạy trong hàng đợi)",
+        "project_id": project_id,
+        "created": created,
+        "total": len(created),
+    }
 
 
 if __name__ == "__main__":

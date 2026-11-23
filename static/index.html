@@ -874,6 +874,11 @@
       <span class="badge badge-hot">MỚI</span>
       <span class="nav-kbd">Alt+F</span>
     </div>
+    <div class="nav-item" data-panel="story" id="nav-story" title="Truyện thành video (Alt+T)">
+      <span class="icon">📖</span> Truyện thành video
+      <span class="badge badge-hot">MỚI</span>
+      <span class="nav-kbd">Alt+T</span>
+    </div>
     <div class="nav-item" data-panel="affiliate" id="nav-affiliate" title="Video Tiếp Thị — Affiliate (Alt+A)">
       <span class="icon">🛍️</span> Video Tiếp Thị (Affiliate)
       <span class="badge badge-hot">HOT</span>
@@ -1843,6 +1848,268 @@
         <div class="modal-footer fx fx-between fx-ac u-mt16">
           <a id="factoryPubVideoBtn" class="btn btn-ghost btn-sm" href="#" target="_blank" rel="noopener">▶ Xem video</a>
           <a id="factoryPubZipBtn" class="btn btn-orange btn-sm" href="#" download>⬇ Tải gói .zip</a>
+        </div>
+      </div>
+    </div>
+
+    <style id="storyStyles">
+.story-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+@media (max-width: 1100px) { .story-steps { grid-template-columns: repeat(2, 1fr); } }
+.story-step { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
+.story-step b { display: block; font-size: 13px; color: var(--text); }
+.story-step span { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.story-step .story-step-num { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: #f97316; color: #fff; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+.story-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.story-tab-btn { padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer; }
+.story-tab-btn.active { background: #f97316; border-color: #f97316; color: #fff; }
+.story-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.story-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
+.story-card h4 { margin: 0; font-size: 14px; color: var(--text); }
+.story-card .story-card-meta { font-size: 12px; color: var(--muted); }
+.story-card p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; flex: 1; }
+.story-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.story-msg { font-size: 12.5px; margin: 8px 0 0; min-height: 16px; }
+.story-msg.err { color: #f87171; }
+.story-msg.ok { color: #4ade80; }
+.story-chapter-row { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--surface); }
+.story-chapter-row .story-chapter-title { flex: 1; min-width: 0; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.story-chapter-row .story-chapter-words { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.story-mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 700px) { .story-mode-grid { grid-template-columns: 1fr; } }
+.story-mode-card { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; background: var(--surface); }
+.story-mode-card.active { border-color: #f97316; box-shadow: 0 0 0 1px #f97316; }
+.story-mode-card b { display: block; font-size: 13px; color: var(--text); }
+.story-mode-card span { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.story-scene-edit { border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 10px; background: var(--surface); }
+.story-scene-edit .story-scene-head { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.story-search-result { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; background: var(--surface); }
+.story-search-result b { font-size: 13px; color: var(--text); }
+.story-search-result p { margin: 4px 0 8px; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.story-read-body { max-height: 60vh; overflow-y: auto; white-space: pre-wrap; font-size: 13.5px; line-height: 1.7; color: var(--text); }
+.story-video-row { display: flex; gap: 10px; align-items: center; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--surface); }
+.story-video-row .story-video-title { flex: 1; min-width: 0; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    </style>
+
+    <!-- ─ Panel: Truyện thành video (Story-to-Video) ─────────────────── -->
+    <div class="panel" id="panel-story">
+      <div class="panel-head batch-head">
+        <div>
+          <h2><span class="icon-head">📖</span> Truyện thành video</h2>
+          <div class="panel-sub">Biến truyện dài thành video từng chương: chọn nguồn truyện, AI tách chương và phân cảnh, cấu hình hình ảnh và giọng đọc, dựng video từng chương.</div>
+        </div>
+      </div>
+
+      <div class="story-steps">
+        <div class="story-step"><span class="story-step-num">1</span><b>Chọn nguồn</b><span>Kho tác phẩm, tìm trên web, link, file hoặc dán văn bản.</span></div>
+        <div class="story-step"><span class="story-step-num">2</span><b>Tách chương và phân cảnh</b><span>AI tách chương, xào nấu thành kịch bản từng cảnh, sửa trực tiếp được.</span></div>
+        <div class="story-step"><span class="story-step-num">3</span><b>Hình ảnh và giọng đọc</b><span>Chọn phong cách hình ảnh, giọng đọc, khung hình, số cảnh mỗi video.</span></div>
+        <div class="story-step"><span class="story-step-num">4</span><b>Dựng video</b><span>Mỗi chương thành 1 tập video 9:16, 16:9 hoặc 1:1, kèm phụ đề.</span></div>
+      </div>
+
+      <div class="factory-layout-grid">
+        <!-- CỘT TRÁI: Truyện đang mở + cấu hình -->
+        <div class="batch-col factory-col-order">
+          <div class="factory-card">
+            <h3>📖 Truyện đang mở</h3>
+            <p class="factory-card-sub">Chọn truyện từ các nguồn bên phải để mở tại đây.</p>
+            <div id="storyProjectEmpty" class="factory-empty" style="margin-top:12px;">Chưa mở truyện nào. Chọn 1 truyện trong kho, tìm trên web, nhập link, tải file hoặc dán văn bản.</div>
+            <div id="storyProjectWrap" style="display:none; margin-top:12px;">
+              <h4 id="storyProjectTitle" style="margin:0 0 4px; font-size:15px; color:var(--text);"></h4>
+              <p class="factory-card-sub" id="storyProjectMeta"></p>
+              <div class="fx fx-between fx-ac" style="margin: 12px 0 8px;">
+                <label class="batch-block-label" style="margin:0;">Các chương</label>
+                <button type="button" class="btn btn-orange btn-xs" id="storyCreateAllBtn" onclick="createStoryVideos()">🎬 Tạo video tất cả chương</button>
+              </div>
+              <div id="storyChapterList"></div>
+            </div>
+          </div>
+
+          <div class="factory-card" style="margin-top:14px;">
+            <h3>🎨 Hình ảnh và giọng đọc</h3>
+            <p class="factory-card-sub">Áp dụng khi xào nấu và tạo video.</p>
+            <div class="batch-form-block" style="margin-top:12px;">
+              <label class="batch-block-label">Phong cách hình ảnh</label>
+              <select id="storyStyleSelect" class="form-select u-w100">
+                <option value="cinematic" selected>Điện ảnh chân thực (Cinematic)</option>
+                <option value="donghua">3D Tiên hiệp / Huyền huyễn (Donghua)</option>
+                <option value="anime">Anime Nhật Bản (Anime)</option>
+                <option value="horror_dark">Kinh dị &amp; Ma mị (Horror / Dark)</option>
+                <option value="comic">Truyện tranh Webtoon (Comic / Manhwa)</option>
+                <option value="3d_pixar">Hoạt hình 3D Pixar / Disney</option>
+                <option value="ink_wash">Cổ phong Thủy mặc (Ink Wash)</option>
+                <option value="cyberpunk">Cyberpunk Viễn tưởng</option>
+                <option value="photoreal">Ảnh chụp đời thực (Photoreal)</option>
+                <option value="watercolor">Màu nước nghệ thuật (Watercolor)</option>
+                <option value="oil_painting">Tranh sơn dầu cổ điển</option>
+              </select>
+            </div>
+            <div class="batch-form-block">
+              <label class="batch-block-label">Giọng đọc</label>
+              <select id="storyVoiceSelect" class="form-select u-w100">
+                <option value="vi-VN-HoaiMyNeural">HoaiMy (nữ) · vi-VN</option>
+              </select>
+            </div>
+            <div class="batch-form-block">
+              <div class="fx fx-between fx-ac">
+                <label class="batch-block-label">Số cảnh mỗi video</label>
+                <span class="batch-field-val" id="storyScenesVal">5 cảnh · ~30 giây</span>
+              </div>
+              <input type="range" id="storyScenesRange" class="factory-range" min="3" max="8" step="1" value="5" oninput="updateStoryScenesLabel()">
+            </div>
+            <div class="batch-form-block">
+              <label class="batch-block-label">Khung hình</label>
+              <div class="batch-ratio-pills">
+                <button type="button" class="btn-segmented active" data-story-ratio="9:16" onclick="setStoryRatio('9:16')">9:16</button>
+                <button type="button" class="btn-segmented" data-story-ratio="16:9" onclick="setStoryRatio('16:9')">16:9</button>
+                <button type="button" class="btn-segmented" data-story-ratio="1:1" onclick="setStoryRatio('1:1')">1:1</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- CỘT PHẢI: Nguồn truyện + video của truyện -->
+        <div class="batch-col factory-col-jobs">
+          <div class="factory-card">
+            <h3>Chọn nguồn truyện</h3>
+            <div class="story-tabs" style="margin-top:12px;">
+              <button type="button" class="story-tab-btn active" data-story-tab="library" onclick="setStoryTab('library')">📚 Kho tác phẩm</button>
+              <button type="button" class="story-tab-btn" data-story-tab="search" onclick="setStoryTab('search')">🔍 Tìm trên web</button>
+              <button type="button" class="story-tab-btn" data-story-tab="url" onclick="setStoryTab('url')">🔗 Nhập từ link</button>
+              <button type="button" class="story-tab-btn" data-story-tab="upload" onclick="setStoryTab('upload')">📁 Tải file lên</button>
+              <button type="button" class="story-tab-btn" data-story-tab="paste" onclick="setStoryTab('paste')">📝 Dán văn bản</button>
+              <button type="button" class="story-tab-btn" data-story-tab="adapt" onclick="setStoryTab('adapt')">🎭 Xào nấu AI</button>
+            </div>
+
+            <div id="storyTabLibrary">
+              <p class="factory-card-sub">4 truyện dân gian bản kể lại ngắn (public domain). Toàn văn truyện dài lấy qua web, file hoặc dán văn bản.</p>
+              <div class="story-library-grid" id="storyLibraryGrid" style="margin-top:10px;">
+                <p class="factory-card-sub">Đang tải kho tác phẩm…</p>
+              </div>
+            </div>
+
+            <div id="storyTabSearch" style="display:none;">
+              <div class="batch-form-block">
+                <label class="batch-block-label">Tìm truyện trên Wikipedia / Wikisource tiếng Việt</label>
+                <div class="fx fx-g8">
+                  <input id="storySearchInput" class="form-input" style="flex:1;" placeholder="Ví dụ: Tấm Cám, Thạch Sanh, Lục Vân Tiên…" onkeydown="if(event.key==='Enter')searchStoryWeb()">
+                  <button type="button" class="btn btn-primary" onclick="searchStoryWeb()">🔍 Tìm</button>
+                </div>
+              </div>
+              <div id="storySearchResults"></div>
+            </div>
+
+            <div id="storyTabUrl" style="display:none;">
+              <div class="batch-form-block">
+                <label class="batch-block-label">Link bài truyện (http/https, tối đa 2MB)</label>
+                <input id="storyUrlInput" class="form-input u-w100" placeholder="https://…">
+              </div>
+              <div class="batch-form-block">
+                <label class="batch-block-label">Tên truyện (để trống: lấy theo tên miền)</label>
+                <input id="storyUrlTitle" class="form-input u-w100" placeholder="Ví dụ: Truyện ma làng quê">
+              </div>
+              <button type="button" class="btn btn-primary" onclick="importStoryUrl()">🔗 Nhập từ link</button>
+              <p class="story-msg" id="storyUrlMsg"></p>
+            </div>
+
+            <div id="storyTabUpload" style="display:none;">
+              <div class="batch-form-block">
+                <label class="batch-block-label">File truyện (TXT / MD / DOCX / EPUB, tối đa 60MB)</label>
+                <input id="storyFileInput" type="file" accept=".txt,.md,.docx,.epub" class="form-input u-w100">
+                <p class="factory-hint">PDF chưa hỗ trợ — mở PDF bằng Word/Google Docs rồi lưu thành .docx, hoặc copy văn bản rồi dán vào tab Dán văn bản.</p>
+              </div>
+              <div class="batch-form-block">
+                <label class="batch-block-label">Tên truyện (để trống: lấy theo tên file)</label>
+                <input id="storyUploadTitle" class="form-input u-w100" placeholder="Ví dụ: Truyện ma làng quê">
+              </div>
+              <div class="batch-form-block">
+                <label class="batch-block-label">Tác giả</label>
+                <input id="storyUploadAuthor" class="form-input u-w100" placeholder="Không rõ">
+              </div>
+              <button type="button" class="btn btn-primary" onclick="uploadStoryFile()">📁 Tải lên và tách chương</button>
+              <p class="story-msg" id="storyUploadMsg"></p>
+            </div>
+
+            <div id="storyTabPaste" style="display:none;">
+              <div class="batch-form-block">
+                <label class="batch-block-label">Tên truyện</label>
+                <input id="storyPasteTitle" class="form-input u-w100" placeholder="Ví dụ: Truyện ma làng quê">
+              </div>
+              <div class="batch-form-block">
+                <label class="batch-block-label">Tác giả</label>
+                <input id="storyPasteAuthor" class="form-input u-w100" placeholder="Không rõ">
+              </div>
+              <div class="batch-form-block">
+                <label class="batch-block-label">Độ dài mỗi chương (ký tự)</label>
+                <input id="storyPasteChars" type="number" class="form-input u-w100" value="6000" min="1000" max="20000" step="500">
+                <p class="factory-hint">Truyện có tiêu đề Chương/Hồi/Phần thì tách theo tiêu đề; không có thì cắt theo độ dài này. Tối đa 500.000 ký tự.</p>
+              </div>
+              <div class="batch-form-block">
+                <label class="batch-block-label">Dán văn bản truyện</label>
+                <textarea id="storyPasteText" class="batch-textarea" rows="8" placeholder="Dán toàn văn truyện vào đây…"></textarea>
+              </div>
+              <button type="button" class="btn btn-primary" onclick="pasteStoryText()">📝 Tạo truyện và tách chương</button>
+              <p class="story-msg" id="storyPasteMsg"></p>
+            </div>
+
+            <div id="storyTabAdapt" style="display:none;">
+              <p class="factory-card-sub">Chọn 1 trong 5 chế độ xào nấu rồi chọn chương ở cột trái để chuyển thể. Chuyển thể deterministic (không dùng LLM ngoài): lời thoại lấy từ câu văn gốc, không bịa thêm tình tiết.</p>
+              <div class="story-mode-grid" id="storyModeGrid" style="margin-top:10px;"></div>
+              <div class="batch-form-block" style="margin-top:12px;">
+                <label class="batch-block-label">Yêu cầu thêm (tùy chọn — chỉ dùng làm lời dẫn, không bịa nội dung mới)</label>
+                <input id="storyAdaptExtra" class="form-input u-w100" placeholder="Ví dụ: Giọng kể chậm rãi, nhấn mạnh vào chi tiết rùng rợn">
+              </div>
+            </div>
+          </div>
+
+          <div class="factory-card" style="margin-top:14px;">
+            <div class="fx fx-between fx-ac">
+              <h3>🎬 Video của truyện</h3>
+              <button type="button" class="btn btn-ghost btn-xs" onclick="loadStoryVideos()">🔄 Làm mới</button>
+            </div>
+            <p class="factory-card-sub">Video do truyện đang mở tạo ra (chung hàng đợi với Tạo video hàng loạt).</p>
+            <div id="storyVideosEmpty" class="factory-empty" style="margin-top:10px;">Chưa có video nào. Mở 1 truyện rồi bấm “Tạo video” ở từng chương hoặc “Tạo video tất cả chương”.</div>
+            <ul class="factory-jobs-list" id="storyVideosList" style="display:none;"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Xào nấu chương (class riêng story-modal-backdrop:
+         KHÔNG dùng .modal-backdrop vì handler Escape của app sẽ .remove()
+         modal đầu tiên trong DOM) -->
+    <div id="storyAdaptModal" class="factory-modal-backdrop" style="display:none;">
+      <div class="modal-window factory-modal-window">
+        <div class="modal-header">
+          <div class="u-fw700 u-fs16 u-c-accent fx fx-ac fx-g8"><span>🎭</span> <span id="storyAdaptModalTitle">Xào nấu chương</span></div>
+          <button class="btn btn-ghost btn-sm" onclick="closeStoryAdaptModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="factory-hint" id="storyAdaptModalHint"></p>
+          <div id="storyAdaptModalBody"></div>
+        </div>
+        <div class="modal-footer fx fx-between fx-ac u-mt16">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="closeStoryAdaptModal()">Đóng</button>
+          <div class="fx fx-g8">
+            <button type="button" class="btn btn-primary btn-sm" id="storyAdaptSaveBtn" onclick="saveStoryAdaptEdits()">💾 Lưu kịch bản</button>
+            <button type="button" class="btn btn-orange btn-sm" onclick="createStoryVideoFromModal()">🎬 Tạo video chương này</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Đọc thử truyện trong kho -->
+    <div id="storyReadModal" class="factory-modal-backdrop" style="display:none;">
+      <div class="modal-window factory-modal-window">
+        <div class="modal-header">
+          <div class="u-fw700 u-fs16 u-c-accent fx fx-ac fx-g8"><span>📖</span> <span id="storyReadTitle">Đọc thử</span></div>
+          <button class="btn btn-ghost btn-sm" onclick="closeStoryReadModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="story-read-body" id="storyReadBody"></div>
+        </div>
+        <div class="modal-footer fx fx-between fx-ac u-mt16">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="closeStoryReadModal()">Đóng</button>
+          <button type="button" class="btn btn-orange btn-sm" id="storyReadCreateBtn">🎬 Tạo video từ truyện này</button>
         </div>
       </div>
     </div>
