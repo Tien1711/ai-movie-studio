@@ -27,6 +27,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = logging.getLogger("ai_movie_studio.batch_video")
 
 # Thư mục lưu trữ các video hàng loạt (tự động phân giải đường dẫn tương đối theo dự án)
@@ -1215,7 +1218,7 @@ def _generate_scene_image(
     """Tạo ảnh tĩnh độ phân giải cao cho phân cảnh thông qua Muse2API."""
     from batch_engine import generate_keyframe_image
     base_url = os.getenv("MUSE2API_URL", "http://localhost:18610")
-    api_key = os.getenv("MUSE2API_KEY") or os.getenv("MUSE_API_KEY") or None
+    api_key = os.getenv("MUSE2API_KEY") or os.getenv("MUSE_API_KEY")
     if not api_key:
         logger.warning("MUSE2API_KEY / MUSE_API_KEY chưa được cấu hình trong môi trường, bỏ qua gọi Muse AI.")
         return False
