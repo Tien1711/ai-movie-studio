@@ -2152,6 +2152,20 @@
             </div>
             
             <div class="u-col-12">
+              <!-- Nhập link sản phẩm Shopee / TikTok -->
+              <div>
+                <label class="field-label">
+                  🔗 Dán link sản phẩm Shopee / TikTok
+                </label>
+                <div class="fx fx-g8">
+                  <input type="text" id="affiliateLinkUrl" class="form-control u-w-full" placeholder="Ví dụ: https://shopee.vn/...-i.123.456 hoặc https://www.tiktok.com/@shop/video/123...">
+                  <button type="button" id="btnAffiliateImportLink" class="btn btn-primary btn-sm" onclick="importAffiliateLink()" style="white-space:nowrap;">
+                    ⬇ Lấy thông tin
+                  </button>
+                </div>
+                <div id="affiliateLinkStatus" class="u-fs11 u-c-muted u-mt4"></div>
+              </div>
+
               <!-- Product Name -->
               <div>
                 <label class="field-label">
@@ -2338,6 +2352,7 @@
                 <div class="card-title" id="affiliateScriptHeader">🎬 Kịch Bản Phân Cảnh Bán Hàng (Storyboard)</div>
                 <div class="u-fs12 u-c-muted u-mt2" id="affiliateScriptSub">
                   Xem và chỉnh sửa trực tiếp từng câu thoại, prompt quay và nút nghe thử trước khi xuất video.
+                  <span id="affiliateTotalDuration" class="u-fw700" style="color:var(--accent);"></span>
                 </div>
               </div>
               <div class="fx fx-g6 fx-wrap">

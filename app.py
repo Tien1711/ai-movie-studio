@@ -48,6 +48,7 @@ from affiliate_engine import (
     AffiliateScriptResponse,
     generate_affiliate_script_ai,
     generate_affiliate_script_local,
+    import_affiliate_product_link,
 )
 
 
@@ -4767,6 +4768,36 @@ async def get_affiliate_templates():
     }
 
 
+class AffiliateLinkImportRequest(BaseModel):
+    url: str = Field(default="", max_length=2000)
+
+
+@app.post("/api/affiliate/import-link")
+async def api_affiliate_import_link(req: AffiliateLinkImportRequest):
+    """Nhập thông tin sản phẩm từ link Shopee/TikTok để prefill form affiliate.
+
+    422: link sai định dạng hoặc host không hỗ trợ. 502: không tải được link.
+    Link hợp lệ nhưng không lấy được chi tiết vẫn trả 200 với fetched=False
+    + message rõ ràng (UI prefill phần lấy được, còn lại nhập tay).
+    Chạy fetch trong thread riêng để không chặn event loop (mỗi lượt ≤15s).
+    """
+    url = (req.url or "").strip()
+    if not url:
+        return JSONResponse(
+            {"error": "Vui lòng dán link sản phẩm Shopee hoặc TikTok"},
+            status_code=422,
+        )
+    try:
+        result = await asyncio.to_thread(import_affiliate_product_link, url)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"Không tải được link: {e}"}, status_code=502
+        )
+    return result
+
+
 @app.post("/api/affiliate/generate-script")
 async def api_generate_affiliate_script(req: ProductAffiliateRequest):
     """Sinh kịch bản video tiếp thị liên kết chuẩn chuyển đổi cao (TikTok Shop, Shopee, Reels)."""
@@ -4788,15 +4819,20 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
 
     scene_items = []
     for idx, s in enumerate(req.scenes, start=1):
+        # Thời lượng theo thoại từng cảnh (clip 5/6/8/10s): giữ duration kịch
+        # bản gửi lên, chỉ kẹp về 1–60s cho an toàn. Script cũ gửi 10 vẫn
+        # chạy đúng như trước (tương thích ngược).
+        try:
+            _dur = int(s.get("duration")) if s.get("duration") is not None else AFFILIATE_SCENE_DURATION
+        except (TypeError, ValueError):
+            _dur = AFFILIATE_SCENE_DURATION
+        _dur = max(1, min(60, _dur))
         scene_items.append(SceneItem(
             index=idx,
             prompt=s.get("prompt", ""),
             voiceover=s.get("voiceover", ""),
             voice=s.get("voice") or req.voice or "vieneu:AdamBua",
-            # Affiliate chuẩn 10s/cảnh = đúng clip API 10s trả về: ép ở đây kể
-            # cả khi script cũ gửi duration khác, để compose dùng trọn vẹn
-            # clip, không cắt đuôi, không loop.
-            duration=AFFILIATE_SCENE_DURATION,
+            duration=_dur,
             size=req.aspect_ratio or "9:16",
             reference_image=s.get("reference_image") or None
         ))
@@ -4825,7 +4861,8 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
     job_id = uuid.uuid4().hex[:12]
     job = new_job(job_id, len(movie_req.scenes), req=movie_req)
     _save_job_or_http500(job)
-    job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh × 10s (9:16, chain sequential) — Giọng: {movie_req.voice}")
+    _total_s = sum(s.duration for s in movie_req.scenes)
+    job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh, tổng ~{_total_s}s (9:16, chain sequential) — Giọng: {movie_req.voice}")
     _save_job_or_http500(job)
     # Nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
     _spawn_job_task(job_id, film_pipeline(job, movie_req))
