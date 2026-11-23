@@ -4880,7 +4880,7 @@ class BatchCreateRequest(BaseModel):
     @classmethod
     def validate_voice(cls, v: str) -> str:
         clean = v.strip()
-        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-:]+$", clean):
             raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
         return clean
 
@@ -5082,7 +5082,7 @@ class FactoryOrderRequest(BaseModel):
     @classmethod
     def validate_voice(cls, v: str) -> str:
         clean = v.strip()
-        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-:]+$", clean):
             raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
         return clean
 
@@ -5279,7 +5279,7 @@ class StoryCreateVideosRequest(BaseModel):
     @classmethod
     def validate_voice(cls, v: str) -> str:
         clean = v.strip()
-        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-]+$", clean):
+        if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-:]+$", clean):
             raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
         return clean
 

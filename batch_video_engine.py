@@ -876,7 +876,7 @@ class BatchVideoManager:
             start_num = max_order + 1
 
             valid_idx = 0
-            for raw_line in prompts:
+            for idx, raw_line in enumerate(prompts):
                 line = raw_line.strip()
                 if not line:
                     continue
