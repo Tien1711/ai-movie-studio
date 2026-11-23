@@ -128,7 +128,7 @@
      Dung Alt+CHU (khong dung so): app.js da bat phim 1/2/3 tran de doi
      subtab Shot Desk, nen phim so se kich hoat ca hai handler. Khong bat
      phim khi dang go trong input/textarea/select. */
-  const PANEL_KEYS = { c: 'create', b: 'batch-create', a: 'affiliate', k: 'shot-desk', n: 'characters', m: 'monitor', q: 'quick-video', l: 'library', o: 'settings', p: 'prompt-sheet' };
+  const PANEL_KEYS = { c: 'create', b: 'batch-create', f: 'factory', a: 'affiliate', k: 'shot-desk', n: 'characters', m: 'monitor', q: 'quick-video', l: 'library', o: 'settings', p: 'prompt-sheet' };
   document.addEventListener('keydown', (e) => {
     const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName) || e.target.isContentEditable;
     if (e.altKey && !e.ctrlKey && !e.metaKey && PANEL_KEYS[(e.key || '').toLowerCase()]) {

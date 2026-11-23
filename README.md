@@ -37,6 +37,16 @@
 - **Audio Ducking**: Tự động giảm âm lượng nhạc nền khi có tiếng thoại và nâng lên khi hết thoại.
 - **Server-Sent Events (SSE)**: Theo dõi tiến trình render thời gian thực theo từng phân cảnh.
 
+### 4. 🏭 Xưởng tự động (Auto Factory)
+- **Một cú bấm ra nhiều video hoàn chỉnh**: chọn nguồn nội dung, số video (1–10), số cảnh mỗi video (3–8), phong cách hình ảnh (11 style), giọng đọc — bấm **Bắt đầu sản xuất**, xưởng tự viết kịch bản, đọc giọng, vẽ ảnh, dựng video và làm sẵn gói đăng bài cho từng video.
+- **Nguồn nội dung tự động, không cần key mới**:
+  - 📈 **Ý tưởng đang hot**: Google Trends Việt Nam (RSS công khai).
+  - 📰 **Tin tức mới**: VnExpress RSS, tự động fallback sang Tuổi Trẻ nếu feed chính lỗi.
+  - ✏️ **Tự nhập chủ đề**: mỗi dòng là một video (tối đa 10).
+  - Kết quả RSS được cache 30 phút; nguồn lỗi thì tự dùng pool ý tưởng có sẵn và báo rõ trên giao diện.
+- **Gói đăng bài (.zip) cho mỗi video hoàn tất**: video `final.mp4`, `thumbnail.jpg` (trích frame đầu, đúng khung hình), `title.txt`, `description.txt` (tiêu đề + mô tả + hashtag tự sinh), `subtitles.srt` (nếu có), `metadata.json`.
+- **Giới hạn**: chưa đăng thẳng lên YouTube/TikTok (cần OAuth, ngoài phạm vi) — nút **Đăng bài** mở gói đăng bài để sao chép tiêu đề/mô tả hoặc tải file `.zip` về đăng tay.
+
 ---
 
 ## 🚀 Hướng Dẫn Cài Đặt & Khởi Chạy

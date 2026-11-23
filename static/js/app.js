@@ -279,6 +279,7 @@ function showPanel(name) {
   if (name === 'shot-desk') initShotDeskStudio();
   if (name === 'affiliate') initAffiliateStudio();
   if (name === 'batch-create') initBatchCreateStudio();
+  if (name === 'factory') initFactoryPanel();
   if (name === 'create') refreshQueueHint(); // Nhóm 1: trạng thái hàng đợi trước khi bấm Sản xuất
 }
 
@@ -9622,6 +9623,296 @@ function insertBatchPromptTemplate(promptText) {
   if (typeof showToast === 'function') {
     showToast(`Đã thêm prompt: "${promptText.substring(0, 35)}..."`, 'info');
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// XƯỞNG TỰ ĐỘNG (Auto Factory) — đặt hàng 1 cú bấm ra nhiều video.
+// Dùng chung hàng đợi /api/batch-videos/queue với Tạo video hàng loạt;
+// video chạy qua BatchVideoManager + worker có sẵn, không tạo worker mới.
+// ══════════════════════════════════════════════════════════════════════════
+window.factoryState = {
+  source: 'trending',
+  count: 3,
+  scenesCount: 5,
+  aspectRatio: '9:16',
+  topics: [],
+  fallback: false,
+  initialized: false,
+  pollTimer: null,
+  currentPublishId: null,
+};
+
+const FACTORY_SOURCE_HINTS = {
+  trending: 'Lấy từ những gì khán giả Việt đang tìm trên Google, AI biến thành ý tưởng video gốc.',
+  news: 'Lấy tin mới nhất từ VnExpress (dự phòng Tuổi Trẻ), AI biến thành ý tưởng video gốc.',
+  manual: 'Nhập chủ đề của riêng bạn — mỗi dòng là một video.',
+};
+
+function initFactoryPanel() {
+  if (window.factoryState.initialized) {
+    loadFactoryQueue();
+    startFactoryQueuePolling();
+    return;
+  }
+  window.factoryState.initialized = true;
+  // Giọng đọc: dùng lại danh sách giọng Edge đã tải sẵn của app.
+  const vSel = document.getElementById('factoryVoiceSelect');
+  if (vSel && typeof voiceSelectHtml === 'function' && typeof VOICES !== 'undefined' && VOICES.length > 0) {
+    vSel.innerHTML = voiceSelectHtml('vi-VN-HoaiMyNeural');
+  }
+  updateFactoryEstimate();
+  loadFactoryTopics(false);
+  loadFactoryQueue();
+  startFactoryQueuePolling();
+  // Đóng modal gói đăng bài bằng phím Escape (modal dùng class riêng
+  // factory-modal-backdrop nên handler Escape chung của app không chạm tới).
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeFactoryPublishModal();
+  });
+}
+
+function setFactorySource(src) {
+  window.factoryState.source = src;
+  ['trending', 'news', 'manual'].forEach(s => {
+    const btn = document.getElementById('btnFactorySrc' + s.charAt(0).toUpperCase() + s.slice(1));
+    if (btn) btn.classList.toggle('active', s === src);
+  });
+  const hint = document.getElementById('factorySourceHint');
+  if (hint) hint.textContent = FACTORY_SOURCE_HINTS[src];
+  document.getElementById('factoryManualWrap').style.display = src === 'manual' ? 'block' : 'none';
+  document.getElementById('factoryPreviewWrap').style.display = src === 'manual' ? 'none' : 'block';
+  if (src !== 'manual') loadFactoryTopics(false);
+  updateFactoryEstimate();
+}
+
+function setFactoryRatio(ratio) {
+  window.factoryState.aspectRatio = ratio;
+  document.querySelectorAll('[data-factory-ratio]').forEach(b => {
+    b.classList.toggle('active', b.dataset.factoryRatio === ratio);
+  });
+}
+
+function formatFactoryDuration(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m <= 0) return `${r} giây`;
+  return `${m} phút ${r} giây`;
+}
+
+function updateFactoryEstimate() {
+  const count = parseInt(document.getElementById('factoryCountRange')?.value || '3', 10);
+  const scenes = parseInt(document.getElementById('factoryScenesRange')?.value || '5', 10);
+  window.factoryState.count = count;
+  window.factoryState.scenesCount = scenes;
+  const countVal = document.getElementById('factoryCountVal');
+  if (countVal) countVal.textContent = `${count} video`;
+  const scenesVal = document.getElementById('factoryScenesVal');
+  if (scenesVal) scenesVal.textContent = `${scenes} cảnh · ~${scenes * 6} giây`;
+  const estEl = document.getElementById('factoryEstimate');
+  if (estEl) {
+    estEl.textContent = `⏱ Ước tính khoảng ${formatFactoryDuration(count * scenes * 25)} — cứ để đó, xưởng tự chạy. (Ước tính, thời gian thật phụ thuộc tải của AI.)`;
+  }
+}
+
+async function loadFactoryTopics(forceRefresh = false) {
+  const listEl = document.getElementById('factoryTopicsList');
+  const noteEl = document.getElementById('factoryFallbackNote');
+  if (!listEl) return;
+  const src = window.factoryState.source;
+  if (src === 'manual') return;
+  listEl.innerHTML = '<li class="factory-topics-loading">Đang lấy chủ đề…</li>';
+  try {
+    const res = await apiFetch(`/api/factory/topics?source=${encodeURIComponent(src)}${forceRefresh ? '&refresh=true' : ''}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Không lấy được chủ đề');
+    window.factoryState.topics = data.topics || [];
+    window.factoryState.fallback = !!data.fallback;
+    const shown = window.factoryState.topics.slice(0, window.factoryState.count || 3);
+    listEl.innerHTML = shown.length
+      ? shown.map(t => `<li title="${escapeHtml(t)}">${escapeHtml(t)}</li>`).join('')
+      : '<li class="factory-topics-empty">Chưa có chủ đề nào.</li>';
+    if (noteEl) noteEl.style.display = data.fallback ? 'block' : 'none';
+  } catch (e) {
+    listEl.innerHTML = '<li class="factory-topics-empty">Không lấy được chủ đề — thử lại sau.</li>';
+    if (noteEl) noteEl.style.display = 'none';
+  }
+}
+
+async function submitFactoryOrder() {
+  const btn = document.getElementById('btnFactoryOrder');
+  const state = window.factoryState;
+  const payload = {
+    source: state.source,
+    count: state.count,
+    scenes_count: state.scenesCount,
+    visual_style: document.getElementById('factoryStyleSelect')?.value || 'cinematic',
+    voice: document.getElementById('factoryVoiceSelect')?.value || 'vi-VN-HoaiMyNeural',
+    aspect_ratio: state.aspectRatio,
+    image_source: document.getElementById('factoryImageSourceSelect')?.value || 'muse',
+    mode: 'free',
+  };
+  if (state.source === 'manual') {
+    const topics = (document.getElementById('factoryTopicsInput')?.value || '')
+      .split('\n').map(t => t.trim()).filter(Boolean);
+    if (topics.length === 0) {
+      showToast('Nhập ít nhất 1 chủ đề (mỗi dòng 1 video).', 'error');
+      return;
+    }
+    if (topics.length > 10) {
+      showToast('Tối đa 10 chủ đề mỗi lần đặt.', 'error');
+      return;
+    }
+    payload.topics = topics;
+    payload.count = topics.length;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang đặt hàng…'; }
+  try {
+    const res = await apiFetch('/api/factory/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.error || 'Đặt hàng thất bại');
+    showToast(`🎉 ${data.message || 'Đã đặt hàng thành công'}`, 'success');
+    if (data.fallback) showToast('⚠️ Nguồn RSS lỗi — đã dùng chủ đề dự phòng có sẵn.', 'warning');
+    loadFactoryQueue();
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Bắt đầu sản xuất'; }
+  }
+}
+
+// 4 bước của xưởng: kịch bản → lồng tiếng → dựng video → phụ đề.
+// Suy ra từ trạng thái + % tiến độ (worker không ghi số bước riêng).
+function factoryStepsDone(v) {
+  if (v.status === 'completed') return 4;
+  if (v.status === 'failed') return 0;
+  const p = v.progress || 0;
+  if (p <= 0) return 0;
+  if (p < 30) return 1;
+  if (p < 80) return 2;
+  if (p < 88) return 3;
+  return 4;
+}
+
+function factoryStatusMeta(v) {
+  if (v.status === 'running') return { label: 'Đang chạy', cls: 'running' };
+  if (v.status === 'completed') return { label: 'Hoàn tất', cls: 'completed' };
+  if (v.status === 'failed') return { label: 'Lỗi', cls: 'failed' };
+  if (v.status === 'draft') return { label: 'Bản nháp', cls: 'draft' };
+  return { label: 'Chờ chạy', cls: 'queued' };
+}
+
+async function loadFactoryQueue() {
+  const listEl = document.getElementById('factoryJobsList');
+  const emptyEl = document.getElementById('factoryJobsEmpty');
+  if (!listEl) return;
+  try {
+    const res = await apiFetch('/api/batch-videos/queue?status=all&sort=newest');
+    const data = await res.json();
+    if (!res.ok) return;
+    // Chỉ hiện video do Xưởng đặt (factory_source); video batch thường không hiện ở đây.
+    const videos = (data.videos || []).filter(v => v.factory_source);
+    if (videos.length === 0) {
+      listEl.style.display = 'none';
+      if (emptyEl) emptyEl.style.display = 'block';
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = 'none';
+    listEl.style.display = 'flex';
+    // Chỉ re-render DOM khi dữ liệu có thay đổi để tránh nhấp nháy (như batch).
+    const sig = videos.map(v => `${v.id}:${v.status}:${v.progress}`).join('|');
+    if (listEl.getAttribute('data-queue-sig') !== sig) {
+      listEl.setAttribute('data-queue-sig', sig);
+      listEl.innerHTML = videos.map(v => renderFactoryItemHtml(v)).join('');
+    }
+  } catch (e) {
+    console.warn('Lỗi đọc việc trong xưởng:', e);
+  }
+}
+
+function renderFactoryItemHtml(v) {
+  const meta = factoryStatusMeta(v);
+  const steps = factoryStepsDone(v);
+  const durSec = (v.scenes_count || 5) * 6;
+  const durLabel = `${Math.floor(durSec / 60)}:${String(durSec % 60).padStart(2, '0')}`;
+  const thumb = `<img src="/api/factory/thumbnail/${encodeURIComponent(v.id)}" alt="" loading="lazy" onerror="this.remove()">`;
+  const progressHtml = v.status === 'running' ? `
+      <div class="factory-job-progress"><div style="width: ${v.progress || 10}%"></div></div>
+      <div class="factory-job-meta">⏳ ${escapeHtml(v.current_step || 'Đang xử lý...')} (${v.progress || 10}%)</div>` : '';
+  const doneHtml = v.status === 'completed' ? `
+      <div class="factory-job-progress done"><div style="width: 100%"></div></div>` : '';
+  const errHtml = (v.status === 'failed' && v.error) ? `<div class="factory-job-error">❌ ${escapeHtml(v.error)}</div>` : '';
+  const actions = v.status === 'completed' ? `
+      <button type="button" class="btn btn-primary btn-sm" onclick="openFactoryPublishModal('${v.id}')">📤 Đăng bài</button>
+      <a class="btn btn-ghost btn-sm" href="/api/factory/publish-pack/${encodeURIComponent(v.id)}" download>Tải gói .zip</a>
+      <a class="btn btn-ghost btn-sm" href="/api/batch-videos/${encodeURIComponent(v.id)}/video" target="_blank" rel="noopener">Xem video (~${durLabel})</a>` : '';
+  return `
+    <li class="factory-job">
+      <div class="factory-job-thumb">🎬${thumb}</div>
+      <div class="factory-job-body">
+        <div class="factory-job-title-row">
+          <span class="factory-job-title">${escapeHtml(v.title || v.prompt || 'Video không tên')}</span>
+          <span class="batch-status-badge ${meta.cls}">${meta.label}</span>
+        </div>
+        ${progressHtml}${doneHtml}${errHtml}
+        <div class="factory-job-meta">${steps}/4 bước · ${v.scenes_count || 5} cảnh · ${v.aspect_ratio || '9:16'}</div>
+        ${actions ? `<div class="factory-job-actions">${actions}</div>` : ''}
+      </div>
+    </li>`;
+}
+
+async function openFactoryPublishModal(videoId) {
+  window.factoryState.currentPublishId = videoId;
+  const modal = document.getElementById('factoryPublishModal');
+  try {
+    const res = await apiFetch(`/api/batch-videos/${encodeURIComponent(videoId)}`);
+    const v = await res.json();
+    if (!res.ok) throw new Error(v.error || 'Không tìm thấy video');
+    const bundle = v.bundle || {};
+    document.getElementById('factoryPubTitle').value = bundle.title || v.title || '';
+    const desc = [bundle.title || v.title || '', bundle.caption || '', (bundle.hashtags || []).join(' ')]
+      .filter(Boolean).join('\n\n');
+    document.getElementById('factoryPubDesc').value = desc;
+    document.getElementById('factoryPubZipBtn').href = `/api/factory/publish-pack/${encodeURIComponent(videoId)}`;
+    document.getElementById('factoryPubVideoBtn').href = `/api/batch-videos/${encodeURIComponent(videoId)}/video`;
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'error');
+    return;
+  }
+  if (modal) modal.style.display = 'flex';
+}
+
+function closeFactoryPublishModal() {
+  const modal = document.getElementById('factoryPublishModal');
+  if (modal) modal.style.display = 'none';
+  window.factoryState.currentPublishId = null;
+}
+
+async function copyFactoryField(field) {
+  const el = document.getElementById(field === 'title' ? 'factoryPubTitle' : 'factoryPubDesc');
+  if (!el) return;
+  try {
+    await navigator.clipboard.writeText(el.value);
+    showToast('📋 Đã sao chép.', 'success');
+  } catch (e) {
+    el.select();
+    document.execCommand('copy');
+    showToast('📋 Đã sao chép.', 'success');
+  }
+}
+
+function startFactoryQueuePolling() {
+  if (window.factoryState.pollTimer) clearInterval(window.factoryState.pollTimer);
+  window.factoryState.pollTimer = setInterval(() => {
+    const panel = document.getElementById('panel-factory');
+    if (panel && panel.classList.contains('active') && !document.hidden) {
+      loadFactoryQueue();
+    }
+  }, 5000);
 }
 
 // ── Polling hàng đợi ────────────────────────────────────────────────────────

@@ -72,6 +72,42 @@ BATCH_VISUAL_STYLES: Dict[str, Dict[str, str]] = {
         "prompt_suffix": "classical oil painting style, rich artistic textured brushstrokes, dramatic Rembrandt lighting, vintage museum fine art, masterpiece, 8k, no text, no watermark",
         "aspect_hint": "classic art"
     },
+    "donghua": {
+        "id": "donghua",
+        "name": "3D Tiên hiệp / Huyền huyễn (Donghua)",
+        "prompt_suffix": "Chinese donghua 3D animation style, xianxia fantasy world, flowing robes and mystical aura, epic wuxia atmosphere, luminous spiritual energy, highly detailed fantasy scenery, masterpiece, 8k, no text, no watermark",
+        "aspect_hint": "donghua fantasy"
+    },
+    "horror_dark": {
+        "id": "horror_dark",
+        "name": "Kinh dị & Ma mị (Horror / Dark)",
+        "prompt_suffix": "dark horror cinematic style, eerie fog and shadows, ominous pale moonlight, unsettling haunted atmosphere, desaturated cold tones, suspenseful dread, masterpiece, 8k, no text, no watermark",
+        "aspect_hint": "dark horror"
+    },
+    "comic": {
+        "id": "comic",
+        "name": "Truyện tranh Webtoon (Comic / Manhwa)",
+        "prompt_suffix": "Korean webtoon manhwa comic style, bold clean line art, vibrant cel shading, dynamic comic panel composition, expressive characters, masterpiece, 8k, no text, no watermark",
+        "aspect_hint": "webtoon comic"
+    },
+    "ink_wash": {
+        "id": "ink_wash",
+        "name": "Cổ phong Thủy mặc (Ink Wash)",
+        "prompt_suffix": "traditional Chinese ink wash painting style, elegant black ink brushstrokes on rice paper, misty mountains and flowing water, minimalist ancient oriental aesthetic, masterpiece, no text, no watermark",
+        "aspect_hint": "ink wash"
+    },
+    "photoreal": {
+        "id": "photoreal",
+        "name": "Ảnh chụp đời thực (Photoreal)",
+        "prompt_suffix": "ultra realistic photography, shot on DSLR with 50mm lens, natural daylight, true to life colors and skin texture, sharp realistic details, masterpiece, 8k, no text, no watermark",
+        "aspect_hint": "photorealistic"
+    },
+    "watercolor": {
+        "id": "watercolor",
+        "name": "Màu nước nghệ thuật (Watercolor)",
+        "prompt_suffix": "soft watercolor painting style, gentle flowing pigments, dreamy pastel washes, delicate artistic paper texture, light airy atmosphere, masterpiece, no text, no watermark",
+        "aspect_hint": "watercolor art"
+    },
     "vintage_retro": {
         "id": "vintage_retro",
         "name": "Cổ điển Hoài niệm 90s (Vintage Retro)",
