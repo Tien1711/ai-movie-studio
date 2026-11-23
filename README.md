@@ -47,6 +47,13 @@
 - **Gói đăng bài (.zip) cho mỗi video hoàn tất**: video `final.mp4`, `thumbnail.jpg` (trích frame đầu, đúng khung hình), `title.txt`, `description.txt` (tiêu đề + mô tả + hashtag tự sinh), `subtitles.srt` (nếu có), `metadata.json`.
 - **Giới hạn**: chưa đăng thẳng lên YouTube/TikTok (cần OAuth, ngoài phạm vi) — nút **Đăng bài** mở gói đăng bài để sao chép tiêu đề/mô tả hoặc tải file `.zip` về đăng tay.
 
+### 5. 📖 Truyện thành video (Story-to-Video)
+- **Truyện dài → video từng chương**: mỗi chương thành 1 tập video (9:16 / 16:9 / 1:1, kèm phụ đề), chạy qua hàng đợi batch có sẵn — không pipeline dựng mới.
+- **Nguồn truyện** (6 tab): kho tác phẩm có sẵn, tìm trên web (Wikipedia/Wikisource tiếng Việt, không cần key), nhập từ link, tải file lên (TXT/MD/DOCX/EPUB, tối đa 60MB), dán văn bản (tối đa 500.000 ký tự), xào nấu AI.
+- **Tách chương**: theo tiêu đề Chương/Hồi/Phần (số Ả Rập, La Mã hoặc chữ), không có tiêu đề thì cắt theo độ dài (mặc định 6.000 ký tự/chương, cấu hình được).
+- **Xào nấu AI — chuyển thể deterministic, không dùng LLM ngoài**: 5 chế độ (Video Ngắn 60s / ma mị kiểu Nguyễn Ngọc Ngạn / Hồi hộp & Gay cấn / Triết lý & Chữa lành / Tóm tắt nhanh). Lời thoại lấy từ câu văn gốc đã gọn lại, không bịa thêm tình tiết; kịch bản sửa trực tiếp được ở UI trước khi tạo video.
+- **Giới hạn**: kho có sẵn chỉ gồm 4 truyện dân gian bản kể lại ngắn (Tấm Cám, Thạch Sanh, Ăn Khế Trả Vàng, Bí Ẩn Con Ma Nhà Họ Hứa) — toàn văn truyện dài lấy qua web/file/dán văn bản. PDF chưa hỗ trợ — chuyển sang DOCX/TXT trước khi tải lên.
+
 ---
 
 ## 🚀 Hướng Dẫn Cài Đặt & Khởi Chạy
