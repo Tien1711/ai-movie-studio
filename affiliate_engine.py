@@ -329,9 +329,36 @@ AFFILIATE_SHOOTING_STYLES = {
 }
 
 # Chuẩn affiliate (đặt trước Data Models vì AffiliateScene dùng làm default).
-AFFILIATE_SCENE_DURATION = 10  # giây/cảnh — đúng clip API 10s trả về
+# Clip video API (muse2api /v1/videos) chỉ nhận các mốc 5/6/8/10s — KHÔNG nhận
+# số giây tùy ý. Vì vậy mỗi cảnh lấy mốc nhỏ nhất phủ được thoại của nó
+# (thoại ngắn → clip ngắn, thoại dài → clip dài); thoại dài hơn 10s vẫn lấy
+# mốc 10 và video loop để đọc kịp thoại (hành vi compose có sẵn, không cắt thoại).
+AFFILIATE_SCENE_DURATION = 10  # giây/cảnh — mốc tối đa của clip API (mặc định)
+AFFILIATE_CLIP_DURATIONS = (5, 6, 8, 10)  # các mốc clip API /v1/videos chấp nhận
+AFFILIATE_VOICEOVER_CHARS_PER_SEC = 11  # ước lượng TTS tiếng Việt (cùng quy ước story_engine)
 AFFILIATE_VOICEOVER_MAX_WORDS = 30  # ~25-30 từ tiếng Việt đọc vừa trong 10s
 PRODUCT_LOCK_MARKER = "PRODUCT CONTINUITY LOCK"
+
+
+def estimate_voiceover_seconds(text: str) -> float:
+    """Ước lượng độ dài đọc thoại tiếng Việt (giây): ~11 ký tự/giây."""
+    n = len((text or "").strip())
+    return n / AFFILIATE_VOICEOVER_CHARS_PER_SEC if n > 0 else 0.0
+
+
+def snap_clip_duration(est_seconds: float) -> int:
+    """Chọn mốc clip API nhỏ nhất phủ được độ dài thoại ước lượng.
+
+    Thoại ≤5s → 5; ≤6s → 6; ≤8s → 8; còn lại (kể cả dài hơn 10s) → 10.
+    """
+    try:
+        est = float(est_seconds)
+    except (TypeError, ValueError):
+        return AFFILIATE_SCENE_DURATION
+    for d in AFFILIATE_CLIP_DURATIONS:
+        if est <= d:
+            return d
+    return AFFILIATE_CLIP_DURATIONS[-1]
 
 
 # ── 2. Data Models ──────────────────────────────────────────────────────────
@@ -378,11 +405,13 @@ class AffiliateScriptResponse(BaseModel):
     scenes: List[AffiliateScene]
 
 
-# ── 2.5. Product DNA Lock + chuẩn hóa 10s ──────────────────────────────────
-# API video trả đúng 1 clip 10s/cảnh. Vì vậy mọi cảnh affiliate chuẩn 10s
-# (dùng trọn vẹn clip, không cắt đuôi, không loop) và mọi prompt đều dán
-# NGUYÊN VĂN cùng một Product DNA lock để tay/sản phẩm/bối cảnh không trôi
-# giữa các cảnh (cùng nguyên tắc Character Block của phim dài).
+# ── 2.5. Product DNA Lock + thời lượng theo thoại ───────────────────────────
+# Mỗi cảnh dài theo thoại của nó (clip 5/6/8/10s — mốc API chấp nhận): thoại
+# ngắn thì clip ngắn (không thừa giây hình đứng yên), thoại dài thì clip dài
+# (không bị cắt thoại). Thoại dài hơn 10s vẫn lấy clip 10s và video loop để
+# đọc kịp (hành vi compose có sẵn). Mọi prompt đều dán NGUYÊN VĂN cùng một
+# Product DNA lock để tay/sản phẩm/bối cảnh không trôi giữa các cảnh (cùng
+# nguyên tắc Character Block của phim dài).
 
 
 
@@ -471,7 +500,10 @@ def _normalize_affiliate_script(
 ) -> tuple[List[AffiliateScene], List[str]]:
     """Chuẩn hóa hậu xử lý cho kịch bản affiliate (dùng chung local + AI).
 
-    - Ép mọi cảnh duration = AFFILIATE_SCENE_DURATION (10s, đúng clip API).
+    - Thời lượng mỗi cảnh = mốc clip API nhỏ nhất phủ được thoại của cảnh đó
+      (5/6/8/10s) — KHÔNG ép mọi cảnh về 10s nữa (fix 2026-11-23: thoại 6s mà
+      clip 10s thì thừa 4s hình đứng yên; thoại 13s mà clip 10s thì video
+      phải loop). Thoại dài hơn 10s vẫn lấy clip 10s, video loop để đọc kịp.
     - Prompt nào thiếu lock thì APPEND lock (không viết lại prompt của LLM).
     - Thoại dài hơn AFFILIATE_VOICEOVER_MAX_WORDS từ thì chỉ ghi warning,
       KHÔNG cắt lặng lẽ (cắt thoại làm mất ý bán hàng).
@@ -480,14 +512,14 @@ def _normalize_affiliate_script(
     lock = build_product_dna_lock_for_request(req)
     warnings: List[str] = []
     for s in scenes:
-        s.duration = AFFILIATE_SCENE_DURATION
+        s.duration = snap_clip_duration(estimate_voiceover_seconds(s.voiceover))
         if PRODUCT_LOCK_MARKER not in (s.prompt or ""):
             s.prompt = f"{(s.prompt or '').strip()} {lock}".strip()
         words = len((s.voiceover or "").split())
         if words > AFFILIATE_VOICEOVER_MAX_WORDS:
             warnings.append(
-                f"Cảnh {s.index}: thoại {words} từ (>{AFFILIATE_VOICEOVER_MAX_WORDS} từ "
-                f"cho clip 10s) — đọc có thể không kịp, nên rút ngắn thoại."
+                f"Cảnh {s.index}: thoại {words} từ (>{AFFILIATE_VOICEOVER_MAX_WORDS} từ) "
+                f"— dài hơn clip tối đa 10s, video sẽ loop để đọc kịp thoại; nên rút ngắn thoại."
             )
     return scenes, warnings
 
@@ -1091,11 +1123,12 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
             )
         ]
 
-    # Chuẩn hóa 10s + lock (phòng khi framework nào đó quên): ép duration 10,
+    # Chuẩn hóa thời lượng theo thoại + lock (phòng khi framework nào đó quên):
+    # duration mỗi cảnh = mốc clip API nhỏ nhất phủ được thoại (5/6/8/10s),
     # append lock nếu thiếu, cảnh báo thoại dài quá 10s (không cắt lặng lẽ).
     scenes, _vo_warnings = _normalize_affiliate_script(scenes, req)
     notes = notes + [
-        "Mỗi cảnh chuẩn 10 giây đúng clip API trả về — dùng trọn vẹn, không cắt đuôi, không loop.",
+        "Mỗi cảnh dài theo thoại (clip 5/6/8/10s — thoại ngắn clip ngắn, thoại dài clip dài, tối đa 10s); thoại dài hơn 10s thì video loop để đọc kịp.",
         "Render nối tiếp (sequential chain): cảnh sau dùng last frame cảnh trước để giữ tay/sản phẩm/bối cảnh đồng nhất.",
     ] + _vo_warnings
 
@@ -1165,8 +1198,9 @@ async def generate_affiliate_script_ai(
         "    ...\n"
         "  ]\n"
         "}\n"
-        "5. Mỗi cảnh duration bắt buộc = 10 (clip API video trả đúng 10 giây/cảnh); "
-        "voiceover mỗi cảnh khoảng 25-30 từ tiếng Việt để đọc vừa trong 10 giây.\n"
+        "5. Mỗi cảnh duration là một trong 5/6/8/10 (clip API video chỉ nhận các mốc này): "
+        "chọn mốc nhỏ nhất phủ được voiceover — thoại ngắn (~5s) lấy 5, thoại dài (~10s) lấy 10; "
+        "voiceover mỗi cảnh khoảng 25-30 từ tiếng Việt.\n"
         "6. Dán NGUYÊN VĂN khối PRODUCT CONTINUITY LOCK sau vào CUỐI prompt của MỌI cảnh, không sửa một chữ:\n"
         f"{_dna_lock}"
     )
@@ -1236,7 +1270,7 @@ async def generate_affiliate_script_ai(
                             hook_strength="99/100",
                             marketing_notes=[
                                 "Được tạo bởi AI Muse Chat Model với tối ưu chuyển đổi trực tuyến.",
-                                "Mỗi cảnh chuẩn 10 giây đúng clip API trả về — dùng trọn vẹn, không cắt đuôi, không loop.",
+                                "Mỗi cảnh dài theo thoại (clip 5/6/8/10s — thoại ngắn clip ngắn, thoại dài clip dài, tối đa 10s); thoại dài hơn 10s thì video loop để đọc kịp.",
                                 "Render nối tiếp (sequential chain): cảnh sau dùng last frame cảnh trước để giữ tay/sản phẩm/bối cảnh đồng nhất.",
                             ] + _vo_warnings,
                             scenes=scenes_list
@@ -1246,3 +1280,349 @@ async def generate_affiliate_script_ai(
 
     # Fallback ngoại tuyến đảm bảo 100% không bao giờ gián đoạn
     return generate_affiliate_script_local(req)
+
+
+# ── 6. Nhập link sản phẩm (Shopee / TikTok) ──────────────────────────────────
+# Dán link sản phẩm -> bấm 1 cái -> prefill form affiliate (tên, danh mục,
+# giá, ảnh, shop) + ảnh sản phẩm làm reference cho Product DNA lock.
+#
+# KẾT QUẢ NGHIÊN CỨU BẰNG MẠNG THẬT (2026-11-23, thử từ máy kiểm chứng):
+# - TikTok oEmbed (www.tiktok.com/oembed?url=...): 200, nhưng payload TỐI GIẢN
+#   (chỉ video_id + iframe embed + kích thước) — KHÔNG có title/author/thumbnail.
+# - Trang video TikTok: JS shell, không có og tags, không có JSON nhúng.
+# - Trang sản phẩm Shopee: JS shell (+ dấu hiệu captcha), không có og tags.
+# - Shopee api/v4/item/get: 403 (chống bot). Endpoint PDP mới: 404.
+# => Server-side CHỈ lấy chắc được: (1) tên sản phẩm từ slug URL Shopee
+# (slug chính là tên sản phẩm), shopid/itemid từ URL; (2) xác nhận video
+# TikTok tồn tại + video_id qua oEmbed. Giá/ảnh/shop chỉ lấy được khi API
+# Shopee bất ngờ trả 200 (đã code sẵn đường này). Khi không lấy được gì thì
+# trả fetched=False + message rõ ràng, UI vẫn cho nhập tay (không kẹt).
+
+AFFILIATE_LINK_TIMEOUT_S = 15.0  # giây cho mỗi lượt tải
+AFFILIATE_LINK_MAX_BYTES = 2 * 1024 * 1024  # tối đa 2MB nội dung tải về
+AFFILIATE_LINK_HOSTS = {
+    "shopee.vn", "www.shopee.vn", "shopee.com", "www.shopee.com",
+    "tiktok.com", "www.tiktok.com",
+}
+AFFILIATE_LINK_SHORT_HOSTS = {"shope.ee", "vt.tiktok.com"}
+_AFFILIATE_LINK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
+# Từ khóa đoán danh mục từ tên sản phẩm (best-effort; trả "" nếu không đoán được).
+_CATEGORY_KEYWORDS = {
+    "gadgets": ("giá đỡ", "tai nghe", "sạc", "cáp", "đèn", "ốp lưng", "loa", "chuột", "bàn phím", "đồng hồ", "ốp"),
+    "home": ("nồi", "máy hút", "máy xay", "robot", "cây lau", "chảo", "bếp", "quạt", "máy lọc", "nồi chiên"),
+    "beauty": ("kem", "serum", "son", "sữa rửa mặt", "mặt nạ", "toner", "phấn", "dưỡng", "chống nắng"),
+    "fashion": ("áo", "quần", "giày", "kính", "túi", "váy", "đầm", "dép"),
+    "food": ("khô bò", "bánh tráng", "rong biển", "trà sữa", "hạt điều", "khô gà", "bánh", "kẹo"),
+    "health": ("bình nước", "thảm", "gối", "kẹo dẻo", "máy massage", "yoga", "vitamin"),
+}
+
+
+def _strip_vi_diacritics(s: str) -> str:
+    """Bỏ dấu tiếng Việt để so khớp từ khóa (slug URL Shopee không có dấu)."""
+    import unicodedata
+
+    s = unicodedata.normalize("NFD", s or "")
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    return s.replace("đ", "d").replace("Đ", "D")
+
+
+def guess_affiliate_category(product_name: str) -> str:
+    """Đoán danh mục từ tên sản phẩm (best-effort, trả "" nếu không đoán được).
+
+    So khớp không phân biệt dấu (tên lấy từ slug Shopee không có dấu).
+    """
+    low = _strip_vi_diacritics((product_name or "").lower())
+    if not low.strip():
+        return ""
+    for cat, kws in _CATEGORY_KEYWORDS.items():
+        if any(_strip_vi_diacritics(k.lower()) in low for k in kws):
+            return cat
+    return ""
+
+
+class _LinkResponse:
+    """Response tối giản cho fetch link (đủ cho parse + test mock)."""
+
+    def __init__(self, status_code: int, url: str, text: str = "", content: bytes = b""):
+        self.status_code = status_code
+        self.url = url
+        self.text = text
+        self.content = content
+
+    def json(self):
+        return json.loads(self.text)
+
+
+def _default_link_http_get(url: str, **kwargs) -> _LinkResponse:
+    """GET bằng httpx, theo redirect, giới hạn 2MB (hàm riêng để test mock được)."""
+    timeout = kwargs.pop("timeout", AFFILIATE_LINK_TIMEOUT_S)
+    headers = dict(kwargs.pop("headers", {}) or {})
+    headers.setdefault("User-Agent", _AFFILIATE_LINK_UA)
+    with httpx.stream(
+        "GET", url, timeout=timeout, follow_redirects=True, headers=headers, **kwargs
+    ) as resp:
+        body = b""
+        for chunk in resp.iter_bytes(chunk_size=65536):
+            body += chunk
+            if len(body) > AFFILIATE_LINK_MAX_BYTES:
+                raise ValueError("Nội dung tải về vượt quá 2MB")
+        text = body.decode("utf-8", errors="replace")
+        return _LinkResponse(resp.status_code, str(resp.url), text=text, content=body)
+
+
+def _og_tags(html: str) -> Dict[str, str]:
+    """Bóc og:title / og:image / og:description / product:price:amount từ HTML."""
+    out: Dict[str, str] = {}
+    for prop in ("og:title", "og:image", "og:description", "og:url",
+                 "product:price:amount", "product:original_price:amount"):
+        m = re.search(
+            r'<meta[^>]+property=["\']' + re.escape(prop) + r'["\'][^>]+content=["\']([^"\']+)',
+            html or "",
+        ) or re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']' + re.escape(prop) + r'["\']',
+            html or "",
+        )
+        if m:
+            out[prop] = m.group(1).strip()
+    return out
+
+
+def _shopee_ids_from_url(url: str) -> Dict[str, str]:
+    """Tách shopid/itemid từ URL Shopee dạng i.<shopid>.<itemid> hoặc /product/<shopid>/<itemid>."""
+    m = re.search(r"[.-]i\.(\d+)\.(\d+)(?:[/?#]|$)", url or "")
+    if not m:
+        m = re.search(r"/product/(\d+)/(\d+)(?:[/?#]|$)", url or "")
+    if not m:
+        return {}
+    return {"shop_id": m.group(1), "item_id": m.group(2)}
+
+
+def _shopee_name_from_slug(url: str) -> str:
+    """Tên sản phẩm từ slug URL Shopee (slug chính là tên sản phẩm).
+
+    VD: .../Gia-do-dien-thoai-xoay-360-do-...-i.1057167833.28821306303
+    -> "Gia do dien thoai xoay 360 do ..." (giữ nguyên dấu nếu slug có mã hóa).
+    """
+    from urllib.parse import unquote, urlparse
+
+    try:
+        path = urlparse(url or "").path
+    except Exception:
+        return ""
+    seg = path.rsplit("/", 1)[-1] if path else ""
+    seg = re.sub(r"-i\.\d+\.\d+$", "", seg)
+    # URL dạng /product/<shopid>/<itemid> không có slug: đoạn cuối chỉ là số
+    # -> không phải tên sản phẩm, trả rỗng (đừng lấy itemid làm tên).
+    if not seg or seg.isdigit():
+        return ""
+    name = unquote(seg).replace("-", " ").strip()
+    name = re.sub(r"\s+", " ", name)
+    return name
+
+
+def _tiktok_video_from_url(url: str) -> Dict[str, str]:
+    """Tách @tác giả + video_id từ URL TikTok dạng @user/video/<id>."""
+    m = re.search(r"tiktok\.com/@([^/]+)/video/(\d+)", url or "")
+    if m:
+        return {"author": m.group(1), "video_id": m.group(2)}
+    m = re.search(r"tiktok\.com/.*/video/(\d+)", url or "")
+    if m:
+        return {"video_id": m.group(1)}
+    return {}
+
+
+def _shopee_price_vnd(raw: Any) -> int:
+    """Giá Shopee API trả theo đơn vị 1/100000 VNĐ -> đổi ra VNĐ."""
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    if v <= 0:
+        return 0
+    return v // 100000 if v >= 100000 else v
+
+
+def _format_vnd(vnd: int) -> str:
+    """123000 -> '123.000₫'."""
+    try:
+        v = int(vnd)
+    except (TypeError, ValueError):
+        return ""
+    if v <= 0:
+        return ""
+    return f"{v:,}".replace(",", ".") + "₫"
+
+
+def import_affiliate_product_link(
+    url: str, http_get: Optional[Any] = None
+) -> Dict[str, Any]:
+    """Nhập thông tin sản phẩm từ link Shopee/TikTok (không cần key).
+
+    Trả về dict prefill cho form affiliate. Luôn trả 1 dict (không raise) trừ
+    2 trường hợp: URL sai/host không hỗ trợ -> ValueError (endpoint map 422);
+    tải link thất bại hoàn toàn (timeout/mạng) -> RuntimeError (map 502).
+    Khi link hợp lệ nhưng không lấy được chi tiết thì fetched=False + message
+    rõ ràng, UI vẫn cho nhập tay.
+    """
+    raw_url = (url or "").strip()
+    if not raw_url:
+        raise ValueError("Vui lòng dán link sản phẩm Shopee hoặc TikTok.")
+    if not re.match(r"^https?://", raw_url, re.IGNORECASE):
+        raise ValueError("Link phải bắt đầu bằng http:// hoặc https://.")
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(raw_url).hostname or "").lower()
+    except Exception:
+        raise ValueError("Link không hợp lệ.")
+    if host not in AFFILIATE_LINK_HOSTS and host not in AFFILIATE_LINK_SHORT_HOSTS:
+        raise ValueError(
+            f"Chỉ hỗ trợ link Shopee (shopee.vn, shope.ee) và TikTok "
+            f"(tiktok.com, vt.tiktok.com); host '{host}' chưa hỗ trợ."
+        )
+
+    get = http_get or _default_link_http_get
+    try:
+        first = get(raw_url)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Không tải được link ({e}). Kiểm tra lại mạng rồi thử lại.")
+
+    final_url = str(getattr(first, "url", raw_url) or raw_url)
+    try:
+        final_host = (urlparse(final_url).hostname or "").lower()
+    except Exception:
+        final_host = ""
+    if final_host not in AFFILIATE_LINK_HOSTS:
+        raise ValueError(
+            f"Link rút gọn dẫn tới host '{final_host or '?'}' — chỉ hỗ trợ "
+            f"Shopee và TikTok sau khi mở link."
+        )
+
+    platform = "shopee" if "shopee" in final_host else "tiktok"
+    result: Dict[str, Any] = {
+        "platform": platform,
+        "url": final_url,
+        "product_name": "",
+        "price_sale": "",
+        "price_original": "",
+        "image_url": "",
+        "shop_name": "",
+        "author": "",
+        "category": "",
+        "item_id": "",
+        "shop_id": "",
+        "video_id": "",
+        "source": "url_only",
+        "fetched": False,
+        "message": "",
+    }
+
+    if platform == "shopee":
+        ids = _shopee_ids_from_url(final_url)
+        result.update(ids)
+        slug_name = _shopee_name_from_slug(final_url)
+        # (1) Thử API Shopee (thường 403 chống bot — best-effort).
+        api_ok = False
+        if ids.get("item_id") and ids.get("shop_id"):
+            try:
+                api_url = (
+                    "https://shopee.vn/api/v4/item/get"
+                    f"?itemid={ids['item_id']}&shopid={ids['shop_id']}"
+                )
+                r = get(api_url, headers={"Referer": final_url})
+                if r.status_code == 200:
+                    data = (r.json().get("data") or {}) if hasattr(r, "json") else {}
+                    if data.get("name"):
+                        api_ok = True
+                        result["product_name"] = str(data["name"]).strip()
+                        price = _shopee_price_vnd(data.get("price"))
+                        price_max = _shopee_price_vnd(data.get("price_max"))
+                        if price:
+                            result["price_sale"] = f"Chỉ {_format_vnd(price)}"
+                        if price_max and price_max > price:
+                            result["price_original"] = _format_vnd(price_max)
+                        images = data.get("images") or []
+                        if images:
+                            result["image_url"] = (
+                                "https://down-vn.img.susercontent.com/file/" + str(images[0])
+                            )
+                        shop = data.get("shop") or {}
+                        if isinstance(shop, dict) and shop.get("name"):
+                            result["shop_name"] = str(shop["name"])
+                        if data.get("description"):
+                            result["description"] = str(data["description"])[:500]
+                        result["source"] = "shopee_api"
+            except Exception:
+                api_ok = False
+        # (2) og tags trên trang sản phẩm (trang Shopee là JS shell — thường trống).
+        if not api_ok and getattr(first, "status_code", 0) == 200:
+            og = _og_tags(getattr(first, "text", "") or "")
+            if og.get("og:title"):
+                result["product_name"] = og["og:title"]
+                result["image_url"] = og.get("og:image", "")
+                result["source"] = "og_tags"
+                api_ok = True
+        # (3) Fallback chắc chắn nhất: tên từ slug URL.
+        if not api_ok and slug_name:
+            result["product_name"] = slug_name
+            result["source"] = "shopee_slug"
+            result["fetched"] = True
+            result["message"] = (
+                "Đã lấy tên sản phẩm từ link (Shopee chặn tải chi tiết nên "
+                "chưa có giá/ảnh — nhập tay giá và tải ảnh sản phẩm nếu cần)."
+            )
+        elif api_ok:
+            result["fetched"] = True
+            result["message"] = "Đã lấy thông tin sản phẩm từ Shopee."
+        if not result["fetched"]:
+            result["message"] = (
+                "Không lấy được thông tin từ link Shopee này (Shopee chặn tải "
+                "chi tiết, link không có tên trong địa chỉ) — vui lòng nhập tay."
+            )
+    else:  # tiktok
+        vid = _tiktok_video_from_url(final_url)
+        result.update(vid)
+        # oEmbed xác nhận video tồn tại + lấy video_id (không có title/author/thumbnail).
+        oembed_ok = False
+        if vid.get("video_id"):
+            try:
+                from urllib.parse import quote
+
+                r = get(
+                    "https://www.tiktok.com/oembed?url=" + quote(final_url, safe=""),
+                    headers={"Accept": "application/json"},
+                )
+                if r.status_code == 200:
+                    data = r.json() if hasattr(r, "json") else {}
+                    if data.get("embed_product_id") or data.get("type") == "video":
+                        oembed_ok = True
+                        result["source"] = "tiktok_oembed"
+            except Exception:
+                oembed_ok = False
+        # og tags trên trang video (trang TikTok là JS shell — thường trống).
+        if getattr(first, "status_code", 0) == 200:
+            og = _og_tags(getattr(first, "text", "") or "")
+            if og.get("og:title"):
+                result["product_name"] = og["og:title"]
+                result["image_url"] = og.get("og:image", "")
+                result["source"] = "og_tags"
+                result["fetched"] = True
+                result["message"] = "Đã lấy thông tin video TikTok."
+        if not result["fetched"]:
+            if oembed_ok:
+                result["message"] = (
+                    "Đã xác nhận video TikTok tồn tại, nhưng TikTok không trả tên "
+                    "sản phẩm/ảnh qua link — nhập tên sản phẩm tay để tạo video."
+                )
+            else:
+                result["message"] = (
+                    "Không lấy được thông tin từ link TikTok này — kiểm tra lại link "
+                    "hoặc nhập tên sản phẩm tay."
+                )
+
+    if result.get("product_name"):
+        result["category"] = guess_affiliate_category(result["product_name"])
+    return result

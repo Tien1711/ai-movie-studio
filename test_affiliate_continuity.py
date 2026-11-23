@@ -1,7 +1,10 @@
-"""Test affiliate continuity — chain sequential + Product DNA lock + 10s chuẩn.
+"""Test affiliate continuity — chain sequential + Product DNA lock + duration theo thoại.
 
-Phạm vi: fix affiliate 2026-11-07 (sau merge PR #1, nhánh feature/affiliate-continuity-10s).
-- API video trả đúng 1 clip 10s/cảnh -> mọi cảnh affiliate chuẩn 10s.
+Phạm vi: fix affiliate 2026-11-07 (sau merge PR #1, nhánh feature/affiliate-continuity-10s)
++ đổi duration biến thiên 2026-11-23 (nhánh feat/affiliate-link-import).
+- Clip API chỉ nhận mốc 5/6/8/10s -> mỗi cảnh lấy mốc nhỏ nhất phủ được thoại
+  của nó (thoại ngắn clip ngắn, thoại dài clip dài; thoại >10s vẫn lấy 10 và
+  video loop để đọc kịp) — KHÔNG còn ép mọi cảnh về 10s.
 - Render nối tiếp (sequential chain) + Product DNA lock nguyên văn mọi prompt.
 - Không gọi API video thật ở bất kỳ test nào.
 """
@@ -24,7 +27,7 @@ def _req(**over):
     return affiliate_engine.ProductAffiliateRequest(**kw)
 
 
-# ── (a) Script local: mọi framework đều 10s + có lock ─────────────────────
+# ── (a) Script local: mọi framework duration theo thoại (5/6/8/10s) + có lock ─
 
 def test_a_local_script_all_frameworks_duration_10_and_locked():
     import affiliate_engine
@@ -32,17 +35,23 @@ def test_a_local_script_all_frameworks_duration_10_and_locked():
         res = affiliate_engine.generate_affiliate_script_local(_req(framework=fw))
         assert len(res.scenes) == 5, f"framework {fw} phải có 5 cảnh"
         for s in res.scenes:
-            assert s.duration == 10, (
+            # Duration = mốc clip nhỏ nhất phủ được thoại (không ép 10s nữa).
+            want = affiliate_engine.snap_clip_duration(
+                affiliate_engine.estimate_voiceover_seconds(s.voiceover))
+            assert s.duration == want, (
                 f"framework {fw} cảnh {s.index}: duration={s.duration}, "
-                "affiliate chuẩn 10s = clip API trả về")
+                f"thoại {len(s.voiceover)} ký tự -> mốc clip {want}")
+            assert s.duration in affiliate_engine.AFFILIATE_CLIP_DURATIONS, (
+                f"framework {fw} cảnh {s.index}: duration={s.duration} "
+                "không nằm trong các mốc clip API 5/6/8/10s")
             assert affiliate_engine.PRODUCT_LOCK_MARKER in s.prompt, (
                 f"framework {fw} cảnh {s.index}: prompt thiếu Product DNA lock")
             assert "360-degree rotating phone stand" in s.prompt, (
                 f"framework {fw} cảnh {s.index}: prompt thiếu tên sản phẩm EN")
         assert affiliate_engine.validate_affiliate_script(res.scenes, PRODUCT) == [], (
             f"framework {fw}: validate phải sạch sau khi sinh local")
-        assert any("10 giây" in n for n in res.marketing_notes), (
-            f"framework {fw}: marketing_notes phải ghi rõ chuẩn 10s")
+        assert any("theo thoại" in n for n in res.marketing_notes), (
+            f"framework {fw}: marketing_notes phải ghi rõ duration theo thoại")
 
 
 def test_a_build_commercial_prompt_lock_all_styles_roles():
@@ -76,7 +85,7 @@ def test_a_product_dna_lock_content_per_style():
     assert "neck down" in lock_faceless
 
 
-# ── (b) Hậu xử lý AI: thiếu lock thì append, ép 10s, thoại dài chỉ warning ─
+# ── (b) Hậu xử lý AI: thiếu lock thì append, duration theo thoại, thoại dài chỉ warning ─
 
 def test_b_normalize_appends_lock_forces_10_warns_long_voiceover():
     import affiliate_engine
@@ -85,14 +94,16 @@ def test_b_normalize_appends_lock_forces_10_warns_long_voiceover():
         affiliate_engine.AffiliateScene(
             index=1, title="C1", role="hook", duration=4,
             prompt="A plain hook shot of the product, no lock here.",
-            voiceover="Ngắn gọn vừa đủ mười giây."),
+            voiceover="Ngắn gọn vừa đủ mười giây."),  # 26 ký tự -> ~2.4s -> clip 5s
         affiliate_engine.AffiliateScene(
             index=2, title="C2", role="demo", duration=6,
             prompt="Demo shot.",
             voiceover=" ".join(["từ"] * 40)),  # 40 từ > 30: phải warning, KHÔNG cắt
     ]
     out, warnings = affiliate_engine._normalize_affiliate_script(scenes, req)
-    assert [s.duration for s in out] == [10, 10]
+    # Cảnh 1 thoại ngắn -> 5s (không còn mặc định 10s); cảnh 2 thoại 119 ký tự
+    # -> ~10.8s -> mốc tối đa 10s, video loop để đọc kịp.
+    assert [s.duration for s in out] == [5, 10]
     for s in out:
         assert affiliate_engine.PRODUCT_LOCK_MARKER in s.prompt
         assert "360-degree rotating phone stand" in s.prompt
@@ -123,11 +134,14 @@ def test_b_ai_fallback_no_key_returns_normalized_script(monkeypatch):
     monkeypatch.setattr(affiliate_engine.httpx, "AsyncClient", _NoNetworkAsyncClient)
     res = asyncio.run(affiliate_engine.generate_affiliate_script_ai(_req(), muse_api_key=None))
     assert len(res.scenes) == 5
-    assert all(s.duration == 10 for s in res.scenes)
+    for s in res.scenes:
+        want = affiliate_engine.snap_clip_duration(
+            affiliate_engine.estimate_voiceover_seconds(s.voiceover))
+        assert s.duration == want, f"cảnh {s.index}: duration={s.duration}, thoại -> {want}"
     assert all(affiliate_engine.PRODUCT_LOCK_MARKER in s.prompt for s in res.scenes)
 
 
-# ── (c) Render: chain sequential + ép 10s (TestClient, không gọi video thật) ─
+# ── (c) Render: chain sequential + duration theo thoại (TestClient, không gọi video thật) ─
 
 def test_c_affiliate_render_uses_sequential_chain_and_10s(monkeypatch):
     try:
@@ -146,7 +160,8 @@ def test_c_affiliate_render_uses_sequential_chain_and_10s(monkeypatch):
     job_id = None
     try:
         with TestClient(app_module.app) as client:
-            # Script CŨ gửi duration 5/6 -> backend phải ép về 10.
+            # Script gửi duration 5/6 -> backend GIỮ nguyên (không ép 10 nữa);
+            # duration 99 -> kẹp 60; thiếu duration -> mặc định 10.
             resp = client.post("/api/affiliate/render", json={
                 "title": "Test Affiliate Chain",
                 "voice": "vieneu:AdamBua",
@@ -156,6 +171,10 @@ def test_c_affiliate_render_uses_sequential_chain_and_10s(monkeypatch):
                      "duration": 5, "voice": "vieneu:AdamBua"},
                     {"prompt": "Demo shot", "voiceover": "Xem nè!",
                      "duration": 6, "voice": "vieneu:AdamBua"},
+                    {"prompt": "Long shot", "voiceover": "Thoại dài.",
+                     "duration": 99, "voice": "vieneu:AdamBua"},
+                    {"prompt": "No duration shot", "voiceover": "Không gửi duration.",
+                     "voice": "vieneu:AdamBua"},
                 ],
             })
             assert resp.status_code == 200, f"render phải 200, nhận {resp.status_code}: {resp.text[:300]}"
@@ -167,8 +186,8 @@ def test_c_affiliate_render_uses_sequential_chain_and_10s(monkeypatch):
             assert req["chain_mode"] == "sequential", (
                 f"affiliate phải render sequential, nhận chain_mode={req['chain_mode']!r}")
             durations = [s["duration"] for s in req["scenes"]]
-            assert durations == [10, 10], (
-                f"render phải ép mọi cảnh về 10s, nhận {durations}")
+            assert durations == [5, 6, 60, 10], (
+                f"render phải giữ duration gửi lên (kẹp 1–60, thiếu -> 10), nhận {durations}")
     finally:
         if job_id:
             shutil.rmtree(REPO_ROOT / "workspace" / job_id, ignore_errors=True)

@@ -8458,6 +8458,102 @@ function clearAffiliateImage() {
   }
 }
 
+// Thời lượng clip theo thoại — GIỮ ĐỒNG BỘ với affiliate_engine.snap_clip_duration
+// (API video chỉ nhận mốc 5/6/8/10s; ước lượng TTS tiếng Việt ~11 ký tự/giây).
+function affiliateSnapDuration(voiceover) {
+  const n = (voiceover || '').trim().length;
+  const est = n / 11;
+  for (const d of [5, 6, 8, 10]) if (est <= d) return d;
+  return 10;
+}
+
+// Sửa thoại -> duration hiển thị cập nhật theo ngay (ước lượng từ thoại),
+// để bảng kịch bản không bao giờ ghi sai thời lượng như lỗi QC 2026-11-23
+// (bảng ghi 10s/cảnh trong khi thoại thực dài hơn nhiều).
+function onAffiliateVoiceoverInput(idx, value) {
+  const s = window.affiliateCurrentScript?.scenes?.[idx];
+  if (!s) return;
+  s.voiceover = value;
+  const d = affiliateSnapDuration(value);
+  s.duration = d;
+  const sel = document.getElementById(`affSceneDur_${idx}`);
+  if (sel) sel.value = String(d);
+  updateAffiliateTotalDuration();
+}
+
+// Tổng thời lượng kế hoạch của cả kịch bản (cộng duration từng cảnh) —
+// hiển thị ngay dưới tiêu đề storyboard để không ai tưởng 5 cảnh = 50s
+// trong khi tổng thực khác.
+function updateAffiliateTotalDuration() {
+  const el = document.getElementById('affiliateTotalDuration');
+  if (!el) return;
+  const scenes = window.affiliateCurrentScript?.scenes || [];
+  if (!scenes.length) { el.textContent = ''; return; }
+  const total = scenes.reduce((sum, s) => sum + (parseInt(s.duration, 10) || 10), 0);
+  el.textContent = `⏱️ Tổng ước tính: ~${total}s — ${scenes.length} cảnh (thời lượng theo thoại từng cảnh, không phải cố định 10s).`;
+}
+
+// Nhập thông tin sản phẩm từ link Shopee/TikTok -> prefill form affiliate.
+// Chỉ ghi đè ô nào có dữ liệu trả về; lỗi thì báo rõ, KHÔNG xóa dữ liệu đã nhập.
+async function importAffiliateLink() {
+  const urlEl = document.getElementById('affiliateLinkUrl');
+  const btn = document.getElementById('btnAffiliateImportLink');
+  const statusEl = document.getElementById('affiliateLinkStatus');
+  const url = urlEl?.value.trim();
+  if (!url) {
+    if (statusEl) { statusEl.textContent = 'Vui lòng dán link sản phẩm Shopee hoặc TikTok.'; statusEl.style.color = '#ef4444'; }
+    urlEl?.focus();
+    return;
+  }
+  const oldText = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Đang lấy thông tin...'; }
+  if (statusEl) { statusEl.textContent = 'Đang lấy thông tin sản phẩm...'; statusEl.style.color = ''; }
+  try {
+    const r = await apiFetch('/api/affiliate/import-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Không lấy được thông tin sản phẩm');
+    if (data.product_name) {
+      const nameEl = document.getElementById('affiliateProdName');
+      if (nameEl) nameEl.value = data.product_name;
+    }
+    if (data.category) {
+      const catEl = document.getElementById('affiliateCategory');
+      if (catEl && [...catEl.options].some(o => o.value === data.category)) {
+        catEl.value = data.category;
+        // onAffiliateCategoryChange chỉ điền mặc định vào ô còn trống.
+        if (typeof onAffiliateCategoryChange === 'function') onAffiliateCategoryChange();
+      }
+    }
+    if (data.price_sale) {
+      const priceEl = document.getElementById('affiliatePriceSale');
+      if (priceEl) priceEl.value = data.price_sale;
+    }
+    if (data.image_url) {
+      window.affiliateProductImage = data.image_url;
+      const preview = document.getElementById('affiliateImgPreview');
+      const wrap = document.getElementById('affiliateImgPreviewWrap');
+      if (preview) preview.src = data.image_url;
+      if (wrap) wrap.style.display = 'flex';
+      if (window.affiliateCurrentScript?.scenes) {
+        window.affiliateCurrentScript.scenes.forEach(s => { s.reference_image = data.image_url; });
+        renderAffiliateScenes(window.affiliateCurrentScript.scenes);
+      }
+    }
+    if (statusEl) {
+      statusEl.textContent = (data.fetched ? '✅ ' : '⚠️ ') + (data.message || 'Đã lấy thông tin sản phẩm.');
+      statusEl.style.color = data.fetched ? '#4ade80' : '#fbbf24';
+    }
+  } catch (err) {
+    if (statusEl) { statusEl.textContent = '❌ ' + (err?.message || err); statusEl.style.color = '#ef4444'; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = oldText; }
+  }
+}
+
 async function generateAffiliateScriptAction() {
   const pName = document.getElementById('affiliateProdName')?.value.trim();
   if (!pName) {
@@ -8545,6 +8641,9 @@ function renderAffiliateScenes(scenes) {
 
   container.innerHTML = scenes.map((s, idx) => {
     const roleCfg = roleStyles[s.role] || roleStyles['demo'];
+    // Thời lượng theo thoại: API video chỉ nhận mốc 5/6/8/10s — giá trị lạ
+    // (script cũ) thì hiển thị 10, user chỉnh lại được bằng select.
+    const durVal = [5, 6, 8, 10].includes(Number(s.duration)) ? Number(s.duration) : 10;
     const voiceOpts = (typeof voiceSelectHtml === 'function') ? voiceSelectHtml(s.voice || 'vieneu:AdamBua') : '';
     const imgBadge = s.reference_image ? `<span class="badge" style="background:rgba(34,197,94,0.2);color:#4ade80;font-size:10px;">🔒 Product Lock</span>` : '';
 
@@ -8561,8 +8660,10 @@ function renderAffiliateScenes(scenes) {
           </div>
           <div class="fx fx-ac fx-g8">
             <label class="u-fs11 u-c-muted u-m0">Thời lượng:</label>
-            <input type="number" id="affSceneDur_${idx}" value="10" min="10" max="10" disabled title="Chuẩn 10 giây — đúng clip API 10s trả về, dùng trọn vẹn không cắt đuôi" style="width:48px;padding:2px 6px;text-align:center;font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);">
-            <span class="u-fs11 u-c-muted">giây (chuẩn 10s)</span>
+            <select id="affSceneDur_${idx}" onchange="if(window.affiliateCurrentScript?.scenes?.[${idx}]) window.affiliateCurrentScript.scenes[${idx}].duration=parseInt(this.value,10)||10; updateAffiliateTotalDuration();" title="Thời lượng clip theo thoại (API video chỉ nhận 5/6/8/10s)" style="width:56px;padding:2px 4px;text-align:center;font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);">
+              ${[5, 6, 8, 10].map(d => `<option value="${d}" ${durVal === d ? 'selected' : ''}>${d}s</option>`).join('')}
+            </select>
+            <span class="u-fs11 u-c-muted">giây (theo thoại)</span>
             <button type="button" class="btn btn-ghost btn-xs" onclick="deleteAffiliateScene(${idx})" style="color:#ef4444;" title="Xóa cảnh này">✕</button>
           </div>
         </div>
@@ -8577,7 +8678,7 @@ function renderAffiliateScenes(scenes) {
               🔊 Nghe thử thoại
             </button>
           </div>
-          <textarea id="affSceneVo_${idx}" rows="2" class="form-control" style="width:100%;font-size:13px;line-height:1.45;background:var(--bg3);border-color:rgba(255,255,255,0.1);">${s.voiceover || ''}</textarea>
+          <textarea id="affSceneVo_${idx}" rows="2" class="form-control" oninput="onAffiliateVoiceoverInput(${idx}, this.value)" style="width:100%;font-size:13px;line-height:1.45;background:var(--bg3);border-color:rgba(255,255,255,0.1);">${s.voiceover || ''}</textarea>
         </div>
 
         <!-- Prompt Video (English) -->
@@ -8598,6 +8699,7 @@ function renderAffiliateScenes(scenes) {
       </div>
     `;
   }).join('');
+  updateAffiliateTotalDuration();
 }
 
 async function testAffiliateSceneVoice(idx) {
@@ -8666,7 +8768,7 @@ function addAffiliateSceneCustom() {
     index: newIdx,
     title: `Cảnh ${newIdx}`,
     role: 'demo',
-    duration: 10, // Affiliate chuẩn 10s/cảnh = clip API trả về
+    duration: affiliateSnapDuration('Trải nghiệm thực tế sản phẩm vô cùng mượt mà và tiện lợi.'), // thời lượng theo thoại (mốc clip API 5/6/8/10s)
     prompt: `Commercial showcase shot, vertical 9:16 framing, studio lighting, 8k, photorealistic, masterpiece, no text, no watermark`,
     voiceover: `Trải nghiệm thực tế sản phẩm vô cùng mượt mà và tiện lợi.`,
     voice: document.getElementById('affiliateVoiceSelect')?.value || 'vieneu:AdamBua',
@@ -8709,12 +8811,13 @@ async function startAffiliateRenderJob() {
   }
 
   // Thu thập dữ liệu từ các input trên màn hình
-  // Affiliate chuẩn 10s/cảnh = clip API trả về (backend cũng ép 10 ở
-  // /api/affiliate/render kể cả khi script cũ gửi duration khác).
+  // Thời lượng theo thoại từng cảnh: lấy từ select trong renderAffiliateScenes
+  // (mốc clip API 5/6/8/10s), kẹp 1–60s; fallback 10 nếu chưa render script.
   const scenesPayload = window.affiliateCurrentScript.scenes.map((s, idx) => {
     const vo = document.getElementById(`affSceneVo_${idx}`)?.value || s.voiceover;
     const pr = document.getElementById(`affScenePrompt_${idx}`)?.value || s.prompt;
-    const dur = 10;
+    const durSel = document.getElementById(`affSceneDur_${idx}`);
+    const dur = Math.max(1, Math.min(60, parseInt(durSel?.value || s.duration || 10, 10) || 10));
     const vc = document.getElementById(`affSceneVoice_${idx}`)?.value || s.voice;
     return {
       prompt: pr,
@@ -8799,7 +8902,8 @@ function sendAffiliateToMainStudio() {
       window.affiliateCurrentScript.scenes.forEach((s, idx) => {
         const vo = document.getElementById(`affSceneVo_${idx}`)?.value || s.voiceover;
         const pr = document.getElementById(`affScenePrompt_${idx}`)?.value || s.prompt;
-        const dur = 10; // Affiliate chuẩn 10s/cảnh = clip API trả về
+        const durSel = document.getElementById(`affSceneDur_${idx}`);
+        const dur = Math.max(1, Math.min(60, parseInt(durSel?.value || s.duration || 10, 10) || 10)); // thời lượng theo thoại (mốc clip API 5/6/8/10s)
         const vc = document.getElementById(`affSceneVoice_${idx}`)?.value || s.voice;
         if (typeof addScene === 'function') {
           addScene(
