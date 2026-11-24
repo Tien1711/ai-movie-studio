@@ -49,6 +49,7 @@ from affiliate_engine import (
     generate_affiliate_script_ai,
     generate_affiliate_script_local,
     import_affiliate_product_link,
+    find_product_images,
 )
 
 
@@ -4794,6 +4795,40 @@ async def api_affiliate_import_link(req: AffiliateLinkImportRequest):
     except Exception as e:
         return JSONResponse(
             {"error": f"Không tải được link: {e}"}, status_code=502
+        )
+    return result
+
+
+class AffiliateFindImagesRequest(BaseModel):
+    product_name: str = Field(default="", max_length=500)
+    source_url: Optional[str] = Field(default=None, max_length=2000)
+
+
+@app.post("/api/affiliate/find-product-images")
+async def api_affiliate_find_product_images(req: AffiliateFindImagesRequest):
+    """Tìm ảnh ứng viên cho sản phẩm (tối đa 8) để người dùng chọn làm ảnh Product Lock.
+
+    Dùng khi ảnh sản phẩm hiện tại chỉ là thùng/vỏ (không thấy bên trong):
+    nguồn ưu tiên là ảnh nền tảng gốc từ source_url (Shopee API nhiều ảnh,
+    TikTok og_info 1 ảnh), sau đó là tìm kiếm ảnh web (DuckDuckGo, fallback
+    Bing). Trả 200 với images=[] + message rõ ràng khi không tìm được ảnh
+    nào (UI vẫn cho tải ảnh tay). 422 khi thiếu tên sản phẩm.
+    Chạy fetch trong thread riêng để không chặn event loop.
+    """
+    name = (req.product_name or "").strip()
+    if not name:
+        return JSONResponse(
+            {"error": "Vui lòng nhập tên sản phẩm để tìm ảnh"},
+            status_code=422,
+        )
+    try:
+        result = await asyncio.to_thread(
+            find_product_images, name, req.source_url or None)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"Không tìm được ảnh: {e}"}, status_code=502
         )
     return result
 

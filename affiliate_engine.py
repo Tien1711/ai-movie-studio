@@ -338,6 +338,69 @@ AFFILIATE_CLIP_DURATIONS = (5, 6, 8, 10)  # các mốc clip API /v1/videos chấ
 AFFILIATE_VOICEOVER_CHARS_PER_SEC = 11  # ước lượng TTS tiếng Việt (cùng quy ước story_engine)
 AFFILIATE_VOICEOVER_MAX_WORDS = 30  # ~25-30 từ tiếng Việt đọc vừa trong 10s
 PRODUCT_LOCK_MARKER = "PRODUCT CONTINUITY LOCK"
+FIDELITY_MARKER = "PRODUCT FIDELITY LOCK"
+
+# Khối khóa trung thực ảnh sản phẩm — dán NGUYÊN VĂN vào cuối prompt MỌI cảnh
+# affiliate (cùng cơ chế lock hiện tại). Quy tắc cứng của Tiến 2026-11-24:
+# tuyệt đối giữ ảnh sản phẩm 100% — không đổi màu sắc, hình dạng, kích thước.
+FIDELITY_BLOCK = (
+    f"[{FIDELITY_MARKER} — the product in this video MUST look EXACTLY like "
+    "the product in the reference image, 100% identical: same colors, same "
+    "shape, same size and proportions, same packaging, same logo, same label "
+    "text and artwork. Do NOT redraw, recolor, restyle, resize, reshape or "
+    "redesign the product in any way. Do NOT add, remove or change any detail "
+    "of the product. If the reference image shows only the outer box or "
+    "packaging, show ONLY the box/packaging — NEVER invent or imagine what "
+    "is inside the box.]"
+)
+
+
+def build_fidelity_block() -> str:
+    """Trả về khối khóa trung thực ảnh sản phẩm (nguyên văn, dùng cho mọi cảnh)."""
+    return FIDELITY_BLOCK
+
+
+# Cụm từ trong prompt cho phép AI thay đổi sản phẩm (validator gắn cờ).
+# Quét không phân biệt hoa/thường; khớp theo cụm từ tiếng Anh.
+_FIDELITY_RISK_PATTERNS = (
+    "redesign",
+    "redesigned",
+    "recolor",
+    "recolour",
+    "restyle",
+    "restyled",
+    "makeover",
+    "new look",
+    "new design",
+    "different color",
+    "different colour",
+    "different shape",
+    "change the color",
+    "change the colour",
+    "change the shape",
+    "in a different color",
+    "in a different colour",
+    "another color",
+    "another colour",
+    "redraw",
+    "reimagine",
+)
+
+
+def check_prompt_fidelity(prompt: str) -> List[str]:
+    """Quét prompt, trả về các cụm từ cho phép thay đổi sản phẩm (nếu có).
+
+    Trả [] khi prompt sạch. Dùng cho _normalize warnings + validate script.
+    Chính khối FIDELITY BLOCK cũng nhắc tới các từ này ở dạng phủ định
+    ("Do NOT redesign / recolor / restyle...") nên phải loại khối block ra
+    trước khi quét, nếu không mọi cảnh sẽ bị gắn cờ oan.
+    """
+    text = (prompt or "").replace(FIDELITY_BLOCK, "")
+    out: List[str] = []
+    for pat in _FIDELITY_RISK_PATTERNS:
+        if re.search(r"\b" + re.escape(pat) + r"\b", text, flags=re.I):
+            out.append(pat)
+    return out
 
 
 def estimate_voiceover_seconds(text: str) -> float:
@@ -490,9 +553,178 @@ def validate_affiliate_script(
             missing.append("product_lock")
         if core_name and core_name not in (prompt or "").lower():
             missing.append("product_name")
+        if check_prompt_fidelity(prompt or ""):
+            missing.append("fidelity_risk")
         if missing:
             issues.append({"index": idx, "missing": missing})
     return issues
+
+
+# ── 2.6. Tuân thủ chính sách bán hàng (quy tắc cứng 2026-11-24) ─────────────
+# TikTok Shop / Shopee cấm quảng cáo: tuyên bố chữa bệnh/khỏi bệnh, cam kết
+# tuyệt đối, kết quả phi thực tế, giảm giá/khan hiếm giả, từ tuyệt đối không
+# có chứng cứ. Thực phẩm bổ sung/dinh dưỡng (vd sữa Ensure) chỉ được nói
+# "hỗ trợ dinh dưỡng/sức khỏe", KHÔNG được nói "chữa/khỏi bệnh".
+#
+# - Vi phạm NẶNG (severe): viết lại tự động sang cách nói tuân thủ + warning.
+# - Vi phạm NHẸ (light): giữ nguyên câu + warning bắt người dùng xác nhận
+#   trước khi đăng (giá/khuyến mãi/số lượng phải là số thật của shop).
+
+# (regex, replacement, nhãn) — áp dụng theo thứ tự: cụm dài/trường hợp riêng
+# trước, cụm ngắn sau (vd "100% khỏi bệnh" phải xử lý trước "100% khỏi").
+_COMPLIANCE_SEVERE = (
+    (re.compile(r"100%\s*khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
+     "tuyên bố khỏi bệnh tuyệt đối"),
+    (re.compile(r"cam\s*kết\s+khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"chắc\s+chắn\s+khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"đảm\s+bảo\s+khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"bao\s+khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"chữa\s+khỏi\s+bệnh", re.I), "hỗ trợ cải thiện sức khỏe",
+     "tuyên bố chữa khỏi bệnh"),
+    (re.compile(r"trị\s+khỏi\s+bệnh", re.I), "hỗ trợ cải thiện sức khỏe",
+     "tuyên bố trị khỏi bệnh"),
+    (re.compile(r"chữa\s+khỏi", re.I), "hỗ trợ cải thiện",
+     "tuyên bố chữa khỏi bệnh"),
+    (re.compile(r"trị\s+khỏi", re.I), "hỗ trợ cải thiện",
+     "tuyên bố trị khỏi bệnh"),
+    (re.compile(r"chữa\s+bệnh", re.I), "hỗ trợ sức khỏe",
+     "tuyên bố chữa bệnh"),
+    (re.compile(r"chữa\s+lành", re.I), "chăm sóc",
+     "tuyên bố chữa lành (tác dụng trị liệu)"),
+    (re.compile(r"đặc\s+trị", re.I), "hỗ trợ chuyên biệt",
+     "tuyên bố đặc trị"),
+    (re.compile(r"khỏi\s+bệnh", re.I), "khỏe mạnh hơn",
+     "tuyên bố khỏi bệnh"),
+    (re.compile(r"khỏi\s+hẳn", re.I), "cải thiện rõ rệt",
+     "tuyên bố khỏi hẳn"),
+    (re.compile(r"100%\s*khỏi", re.I), "hỗ trợ hiệu quả",
+     "cam kết khỏi bệnh tuyệt đối"),
+    (re.compile(r"khỏi\s*100%", re.I), "hỗ trợ hiệu quả",
+     "cam kết khỏi bệnh tuyệt đối"),
+    (re.compile(r"cam\s*kết\s+khỏi", re.I), "hỗ trợ",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"chắc\s+chắn\s+khỏi", re.I), "hỗ trợ",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"đảm\s+bảo\s+khỏi", re.I), "hỗ trợ",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"bao\s+khỏi", re.I), "hỗ trợ",
+     "cam kết khỏi bệnh"),
+    (re.compile(r"hiệu\s+quả\s+tuyệt\s+đối", re.I), "hỗ trợ hiệu quả",
+     "cam kết hiệu quả tuyệt đối"),
+    # Kết quả phi thực tế: số đo + thời gian ngắn không tưởng.
+    (re.compile(r"giảm\s+\d+\s*kg\s+trong\s+\d+\s*ngày", re.I),
+     "hỗ trợ giảm cân dần dần", "kết quả phi thực tế (giảm cân cấp tốc)"),
+    (re.compile(r"giảm\s+\d+\s*cm\s+trong\s+\d+\s*ngày", re.I),
+     "hỗ trợ thon gọn dần dần", "kết quả phi thực tế"),
+    (re.compile(r"trắng\s+(ngay\s+)?sau\s+\d+\s*lần", re.I),
+     "hỗ trợ làm sáng da dần dần", "kết quả phi thực tế (trắng sau vài lần)"),
+    (re.compile(r"hết\s+(mụn|nám|thâm|tàn\s+nhang)\s+sau\s+\d+\s*lần", re.I),
+     "hỗ trợ cải thiện da dần dần", "kết quả phi thực tế"),
+    (re.compile(r"trắng\s+ngay\s+lần\s+đầu", re.I),
+     "hỗ trợ làm sáng da dần dần", "kết quả phi thực tế (trắng ngay lần đầu)"),
+    (re.compile(r"hết\s+(mụn|nám|thâm)\s+ngay\s+lần\s+đầu", re.I),
+     "hỗ trợ cải thiện da dần dần", "kết quả phi thực tế"),
+    # Tiếng Anh (prompt thương mại).
+    (re.compile(r"\bmiracle\s+cure\b", re.I), "effective support",
+     "tuyên bố chữa bệnh (tiếng Anh 'miracle cure')"),
+    (re.compile(r"\bcure[s]?\b", re.I), "support",
+     "tuyên bố chữa bệnh (tiếng Anh 'cure')"),
+)
+
+# (regex, nhãn) — vi phạm NHẸ: giữ nguyên câu, chỉ gắn warning xác nhận.
+_COMPLIANCE_LIGHT = (
+    (re.compile(r"tốt\s+nhất", re.I), "từ tuyệt đối 'tốt nhất' (cần chứng cứ)"),
+    (re.compile(r"số\s*1\b", re.I), "từ tuyệt đối 'số 1' (cần chứng cứ)"),
+    (re.compile(r"số\s+một\b", re.I), "từ tuyệt đối 'số một' (cần chứng cứ)"),
+    (re.compile(r"duy\s+nhất\s+hôm\s+nay", re.I),
+     "khan hiếm 'duy nhất hôm nay' (cần đúng thời gian thật)"),
+    (re.compile(r"duy\s+nhất", re.I), "từ tuyệt đối 'duy nhất' (cần chứng cứ)"),
+    (re.compile(r"100%\s*chính\s+hãng", re.I),
+     "tuyên bố '100% chính hãng' (cần chứng cứ)"),
+    (re.compile(r"chỉ\s+còn\s+\d+", re.I),
+     "khan hiếm 'chỉ còn ...' (cần đúng số lượng thật)"),
+    (re.compile(r"chỉ\s+hôm\s+nay", re.I),
+     "khan hiếm 'chỉ hôm nay' (cần đúng thời gian thật)"),
+    (re.compile(r"hết\s+hạn", re.I), "giục mua 'hết hạn' (cần đúng hạn thật)"),
+    (re.compile(r"hốt\s+sạch", re.I), "khan hiếm giả 'hốt sạch'"),
+    (re.compile(r"sắp\s+hết\s+hàng", re.I),
+     "khan hiếm 'sắp hết hàng' (cần đúng tồn kho thật)"),
+    (re.compile(r"quà\s+tặng\s+giới\s+hạn", re.I),
+     "quà tặng 'giới hạn' (cần đúng số lượng thật)"),
+    (re.compile(r"giảm\s+\d+\s*%", re.I),
+     "mức giảm giá % (cần đúng giá gốc thật)"),
+    (re.compile(r"tiết\s+kiệm\s+\d+\s*%", re.I),
+     "mức tiết kiệm % (cần đúng số liệu thật)"),
+    (re.compile(r"sale\s+sốc", re.I), "khuyến mãi 'sale sốc' (cần đúng giá thật)"),
+    (re.compile(r"giá\s+sốc", re.I), "khuyến mãi 'giá sốc' (cần đúng giá thật)"),
+    (re.compile(r"số\s+lượng\s+(flash\s+sale\s+)?có\s+hạn", re.I),
+     "khan hiếm 'số lượng có hạn' (cần đúng số lượng thật)"),
+    (re.compile(r"hàng\s+ngàn\s+lượt\s+đánh\s+giá\s+5\s+sao", re.I),
+     "số liệu đánh giá chưa kiểm chứng"),
+    (re.compile(r"chấm\s+điểm\s+\d+(\.\d+)?\s*(/|trên)\s*10", re.I),
+     "điểm đánh giá tự chấm (cần nguồn thật)"),
+    # Tiếng Anh (prompt thương mại).
+    (re.compile(r"\bbest in the world\b", re.I),
+     "absolute 'best in the world' (needs evidence)"),
+    (re.compile(r"\bnumber\s*1\b", re.I), "absolute 'number 1' (needs evidence)"),
+    (re.compile(r"\bonly today\b", re.I),
+     "urgency 'only today' (needs a real deadline)"),
+)
+
+
+def check_affiliate_compliance(text: str) -> List[Dict[str, Any]]:
+    """Quét text, trả về các phát hiện vi phạm chính sách bán hàng.
+
+    Mỗi phát hiện: {"level": "severe"|"light", "category": str,
+    "matched": str, "message": str}. Không sửa text. Khớp không phân biệt
+    hoa/thường; trùng lặp theo span (cụm dài nuốt cụm ngắn) bị loại bỏ.
+    """
+    findings: List[Dict[str, Any]] = []
+    taken: List[tuple] = []  # các span đã ghi nhận (để loại trùng lặp)
+
+    def _add(level: str, rx, category: str) -> None:
+        for m in rx.finditer(text or ""):
+            span = (m.start(), m.end())
+            if any(s <= span[0] and span[1] <= e for s, e in taken):
+                continue
+            taken.append(span)
+            findings.append({
+                "level": level,
+                "category": category,
+                "matched": m.group(0),
+                "message": category,
+            })
+
+    for rx, _rep, category in _COMPLIANCE_SEVERE:
+        _add("severe", rx, category)
+    for rx, category in _COMPLIANCE_LIGHT:
+        _add("light", rx, category)
+    return findings
+
+
+def rewrite_affiliate_compliance(text: str) -> tuple[str, List[Dict[str, Any]]]:
+    """Áp dụng viết lại cho các mẫu vi phạm NẶNG sang cách nói tuân thủ.
+
+    Trả (text_mới, changes) với changes = [{"matched", "replacement",
+    "category"}]. Chỉ thay cụm từ vi phạm, không bịa con số mới, không làm
+    mất ý bán hàng. Vi phạm nhẹ không được viết lại ở đây (chỉ warning).
+    """
+    out = text or ""
+    changes: List[Dict[str, Any]] = []
+    for rx, replacement, category in _COMPLIANCE_SEVERE:
+        def _sub(m, rx=rx, replacement=replacement, category=category):
+            changes.append({
+                "matched": m.group(0),
+                "replacement": replacement,
+                "category": category,
+            })
+            return replacement
+        out = rx.sub(_sub, out)
+    return out, changes
 
 
 def _normalize_affiliate_script(
@@ -500,11 +732,18 @@ def _normalize_affiliate_script(
 ) -> tuple[List[AffiliateScene], List[str]]:
     """Chuẩn hóa hậu xử lý cho kịch bản affiliate (dùng chung local + AI).
 
+    - Tuân thủ chính sách bán hàng (quy tắc cứng 2026-11-24): thoại vi phạm
+      NẶNG (chữa bệnh/khỏi bệnh, cam kết tuyệt đối, kết quả phi thực tế) thì
+      VIẾT LẠI sang cách nói tuân thủ + warning nêu rõ đã sửa gì; vi phạm NHẸ
+      (từ tuyệt đối, khan hiếm/giảm giá chưa kiểm chứng) thì giữ nguyên câu +
+      warning bắt người dùng xác nhận trước khi đăng.
     - Thời lượng mỗi cảnh = mốc clip API nhỏ nhất phủ được thoại của cảnh đó
       (5/6/8/10s) — KHÔNG ép mọi cảnh về 10s nữa (fix 2026-11-23: thoại 6s mà
       clip 10s thì thừa 4s hình đứng yên; thoại 13s mà clip 10s thì video
       phải loop). Thoại dài hơn 10s vẫn lấy clip 10s, video loop để đọc kịp.
-    - Prompt nào thiếu lock thì APPEND lock (không viết lại prompt của LLM).
+      Duration tính từ thoại ĐÃ viết lại (tuân thủ) để không lệch mốc clip.
+    - Prompt nào thiếu lock thì APPEND lock + fidelity block (không viết lại
+      prompt của LLM). Prompt chứa cụm cho phép đổi sản phẩm thì warning.
     - Thoại dài hơn AFFILIATE_VOICEOVER_MAX_WORDS từ thì chỉ ghi warning,
       KHÔNG cắt lặng lẽ (cắt thoại làm mất ý bán hàng).
     Trả về (scenes, warnings).
@@ -512,9 +751,44 @@ def _normalize_affiliate_script(
     lock = build_product_dna_lock_for_request(req)
     warnings: List[str] = []
     for s in scenes:
+        # 1. Tuân thủ chính sách: viết lại thoại vi phạm nặng, warning nhẹ.
+        new_vo, _changes = rewrite_affiliate_compliance(s.voiceover or "")
+        for ch in _changes:
+            warnings.append(
+                f"Cảnh {s.index}: đã viết lại câu vi phạm chính sách bán hàng: "
+                f"'{ch['matched']}' → '{ch['replacement']}' ({ch['category']})."
+            )
+        if new_vo != (s.voiceover or ""):
+            s.voiceover = new_vo
+        for f in check_affiliate_compliance(s.voiceover or ""):
+            if f["level"] == "light":
+                warnings.append(
+                    f"Cảnh {s.index}: kiểm tra lại trước khi đăng — {f['message']}: "
+                    f"'{f['matched']}'."
+                )
+        # Prompt: chỉ gắn warning (không viết lại prompt tự động).
+        for f in check_affiliate_compliance(s.prompt or ""):
+            if f["level"] == "severe":
+                warnings.append(
+                    f"Cảnh {s.index}: prompt chứa cụm vi phạm chính sách bán hàng: "
+                    f"'{f['matched']}' ({f['category']}) — sửa tay trước khi render."
+                )
+            else:
+                warnings.append(
+                    f"Cảnh {s.index}: prompt chứa {f['message']}: "
+                    f"'{f['matched']}' — kiểm tra lại trước khi đăng."
+                )
+        for risky in check_prompt_fidelity(s.prompt or ""):
+            warnings.append(
+                f"Cảnh {s.index}: prompt chứa cụm có thể làm AI đổi sản phẩm: "
+                f"'{risky}' — kiểm tra lại hình sản phẩm trước khi render."
+            )
+        # 2. Duration từ thoại đã viết lại.
         s.duration = snap_clip_duration(estimate_voiceover_seconds(s.voiceover))
         if PRODUCT_LOCK_MARKER not in (s.prompt or ""):
             s.prompt = f"{(s.prompt or '').strip()} {lock}".strip()
+        if FIDELITY_MARKER not in (s.prompt or ""):
+            s.prompt = f"{(s.prompt or '').strip()} {FIDELITY_BLOCK}".strip()
         words = len((s.voiceover or "").split())
         if words > AFFILIATE_VOICEOVER_MAX_WORDS:
             warnings.append(
@@ -756,12 +1030,17 @@ def build_commercial_prompt(
         role, product_name, category, key_feature,
         koc_persona_id, aspect_ratio, shooting_style,
     )
-    if PRODUCT_LOCK_MARKER in base:
-        return base
-    lock = build_product_dna_lock(
-        product_name, category, key_feature, koc_persona_id, shooting_style
-    )
-    return f"{base} {lock}"
+    out = base
+    if PRODUCT_LOCK_MARKER not in out:
+        out = (
+            f"{out} "
+            f"{build_product_dna_lock(product_name, category, key_feature, koc_persona_id, shooting_style)}"
+        ).strip()
+    # Khóa trung thực ảnh sản phẩm (quy tắc cứng 2026-11-24): sản phẩm phải
+    # giống y hệt ảnh reference — không vẽ lại/đổi màu/đổi hình/đổi kích thước.
+    if FIDELITY_MARKER not in out:
+        out = f"{out} {FIDELITY_BLOCK}".strip()
+    return out
 
 
 # ── 4. Bộ Sinh Kịch Bản Tiếp Thị Ngoại Tuyến Siêu Tốc (Local Generator) ────────
@@ -1202,7 +1481,14 @@ async def generate_affiliate_script_ai(
         "chọn mốc nhỏ nhất phủ được voiceover — thoại ngắn (~5s) lấy 5, thoại dài (~10s) lấy 10; "
         "voiceover mỗi cảnh khoảng 25-30 từ tiếng Việt.\n"
         "6. Dán NGUYÊN VĂN khối PRODUCT CONTINUITY LOCK sau vào CUỐI prompt của MỌI cảnh, không sửa một chữ:\n"
-        f"{_dna_lock}"
+        f"{_dna_lock}\n"
+        "7. Dán NGUYÊN VĂN khối PRODUCT FIDELITY LOCK sau vào CUỐI prompt của MỌI cảnh, ngay sau PRODUCT CONTINUITY LOCK, không sửa một chữ "
+        "(sản phẩm phải giống y hệt ảnh tham chiếu — không vẽ lại/đổi màu/đổi hình/đổi kích thước):\n"
+        f"{FIDELITY_BLOCK}\n"
+        "8. TUÂN THỦ CHÍNH SÁCH BÁN HÀNG (TikTok Shop/Shopee) — tuyệt đối không viết: tuyên bố chữa bệnh/khỏi bệnh ('chữa', 'trị khỏi', 'đặc trị', 'khỏi bệnh'), "
+        "cam kết tuyệt đối ('100% khỏi', 'hiệu quả tuyệt đối', 'chắc chắn khỏi'), kết quả phi thực tế ('giảm 5kg trong 3 ngày', 'trắng sau 1 lần'), "
+        "giảm giá/khan hiếm giả khi không có căn cứ ('giảm 90%', 'chỉ còn 1 suất', 'duy nhất hôm nay'), từ tuyệt đối không chứng cứ ('tốt nhất', 'số 1', 'duy nhất'). "
+        "Với thực phẩm bổ sung/dinh dưỡng (vd sữa) chỉ dùng cách nói 'hỗ trợ dinh dưỡng/sức khỏe', không dùng 'chữa/khỏi bệnh'.\n"
     )
 
     user_prompt = (
@@ -1413,6 +1699,41 @@ def _shopee_ids_from_url(url: str) -> Dict[str, str]:
     return {"shop_id": m.group(1), "item_id": m.group(2)}
 
 
+def _shopee_api_item(shop_id: str, item_id: str, get, referer: str = "https://shopee.vn/") -> Dict[str, Any]:
+    """Gọi Shopee api/v4/item/get, trả dict 'data' khi thành công, {} khi lỗi.
+
+    API này thường trả 403 chống bot — best-effort, KHÔNG raise. Dùng chung
+    cho import-link (lấy tên/giá/ảnh) và find-product-images (lấy mảng ảnh).
+    `get` là hàm http_get đã inject (cùng chữ ký _default_link_http_get).
+    """
+    try:
+        api_url = (
+            "https://shopee.vn/api/v4/item/get"
+            f"?itemid={item_id}&shopid={shop_id}"
+        )
+        r = get(api_url, headers={"Referer": referer})
+        if r.status_code != 200:
+            return {}
+        data = (r.json().get("data") or {}) if hasattr(r, "json") else {}
+        return data if isinstance(data, dict) and data.get("name") else {}
+    except Exception:
+        return {}
+
+
+def _shopee_image_urls(images: Any) -> List[str]:
+    """Đổi mảng images của Shopee API thành URL CDN đầy đủ (tối đa 8, lọc trùng)."""
+    out: List[str] = []
+    for img in (images or []):
+        if not img:
+            continue
+        url = "https://down-vn.img.susercontent.com/file/" + str(img)
+        if url not in out:
+            out.append(url)
+        if len(out) >= 8:
+            break
+    return out
+
+
 def _shopee_name_from_slug(url: str) -> str:
     """Tên sản phẩm từ slug URL Shopee (slug chính là tên sản phẩm).
 
@@ -1561,6 +1882,7 @@ def import_affiliate_product_link(
         "price_sale": "",
         "price_original": "",
         "image_url": "",
+        "image_urls": [],
         "shop_name": "",
         "author": "",
         "category": "",
@@ -1580,36 +1902,25 @@ def import_affiliate_product_link(
         # (1) Thử API Shopee (thường 403 chống bot — best-effort).
         api_ok = False
         if ids.get("item_id") and ids.get("shop_id"):
-            try:
-                api_url = (
-                    "https://shopee.vn/api/v4/item/get"
-                    f"?itemid={ids['item_id']}&shopid={ids['shop_id']}"
-                )
-                r = get(api_url, headers={"Referer": final_url})
-                if r.status_code == 200:
-                    data = (r.json().get("data") or {}) if hasattr(r, "json") else {}
-                    if data.get("name"):
-                        api_ok = True
-                        result["product_name"] = str(data["name"]).strip()
-                        price = _shopee_price_vnd(data.get("price"))
-                        price_max = _shopee_price_vnd(data.get("price_max"))
-                        if price:
-                            result["price_sale"] = f"Chỉ {_format_vnd(price)}"
-                        if price_max and price_max > price:
-                            result["price_original"] = _format_vnd(price_max)
-                        images = data.get("images") or []
-                        if images:
-                            result["image_url"] = (
-                                "https://down-vn.img.susercontent.com/file/" + str(images[0])
-                            )
-                        shop = data.get("shop") or {}
-                        if isinstance(shop, dict) and shop.get("name"):
-                            result["shop_name"] = str(shop["name"])
-                        if data.get("description"):
-                            result["description"] = str(data["description"])[:500]
-                        result["source"] = "shopee_api"
-            except Exception:
-                api_ok = False
+            data = _shopee_api_item(ids["shop_id"], ids["item_id"], get, referer=final_url)
+            if data:
+                api_ok = True
+                result["product_name"] = str(data["name"]).strip()
+                price = _shopee_price_vnd(data.get("price"))
+                price_max = _shopee_price_vnd(data.get("price_max"))
+                if price:
+                    result["price_sale"] = f"Chỉ {_format_vnd(price)}"
+                if price_max and price_max > price:
+                    result["price_original"] = _format_vnd(price_max)
+                result["image_urls"] = _shopee_image_urls(data.get("images"))
+                if result["image_urls"]:
+                    result["image_url"] = result["image_urls"][0]
+                shop = data.get("shop") or {}
+                if isinstance(shop, dict) and shop.get("name"):
+                    result["shop_name"] = str(shop["name"])
+                if data.get("description"):
+                    result["description"] = str(data["description"])[:500]
+                result["source"] = "shopee_api"
         # (2) og tags trên trang sản phẩm (trang Shopee là JS shell — thường trống).
         if not api_ok and getattr(first, "status_code", 0) == 200:
             og = _og_tags(getattr(first, "text", "") or "")
@@ -1648,6 +1959,8 @@ def import_affiliate_product_link(
             if og_info.get("title"):
                 result["product_name"] = og_info["title"]
                 result["image_url"] = og_info.get("image", "")
+                if og_info.get("image"):
+                    result["image_urls"] = [og_info["image"]]
                 result["source"] = "tiktok_og_info"
                 result["fetched"] = True
                 result["message"] = (
@@ -1703,3 +2016,181 @@ def import_affiliate_product_link(
     if result.get("product_name"):
         result["category"] = guess_affiliate_category(result["product_name"])
     return result
+
+
+# ── 7. Tìm ảnh sản phẩm chuẩn (khi ảnh chỉ có vỏ hộp) ───────────────────────
+# Quy tắc cứng 2026-11-24: nếu ảnh sản phẩm chỉ là thùng/vỏ (không thấy bên
+# trong) thì tự tìm kiếm để lấy ảnh sản phẩm chuẩn xác.
+#
+# Nguồn theo thứ tự ưu tiên (best-effort, KHÔNG thêm dependency):
+#   (1) ảnh từ nền tảng gốc khi có link: Shopee API trả mảng images (nhiều
+#       ảnh), TikTok og_info chỉ 1 ảnh;
+#   (2) DuckDuckGo image search (lấy vqd từ trang kết quả rồi gọi i.js);
+#   (3) Bing image search (bóc &quot;murl&quot; trong HTML).
+#
+# KẾT QUẢ THỬ BẰNG MẠNG THẬT (2026-11-24, từ máy kiểm chứng qua proxy):
+# - DuckDuckGo: lấy được vqd (HTTP 202) nhưng i.js trả botnet_challenge
+#   (response_type "botnet_challenge") — bị chặn từ IP egress này; từ máy
+#   người dùng (IP nhà mạng) có thể qua được, không chắc chắn.
+# - Bing images HTML: 200, bóc được 36 murl (URL ảnh trực tiếp) — CHẠY ĐƯỢC.
+# - html.duckduckgo.com/html: 200 nhưng trả kết quả WEB (link trang), không
+#   phải ảnh — không dùng làm nguồn ảnh.
+# => Code thử DuckDuckGo trước, rớt thì dùng Bing; cả hai đều rớt thì trả lỗi
+# rõ, UI vẫn cho tải ảnh tay. Việc tự động PHÁT HIỆN "ảnh chỉ có vỏ hộp"
+# không làm được chắc chắn nên để người dùng bấm nút tìm khi cần.
+#
+# LƯU Ý BẢN QUYỀN: ảnh tìm được là ảnh trên web (ảnh shop/người bán đăng);
+# người dùng tự chọn ảnh đúng sản phẩm của mình làm Product Lock. Không tự
+# động lấy ảnh lạ làm ảnh đại diện khi chưa có người chọn.
+
+_AFFILIATE_IMAGE_MAX = 8
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+_DDG_UA = _AFFILIATE_LINK_UA
+
+
+def _is_image_url(url: str) -> bool:
+    """Chỉ nhận URL ảnh http(s) (jpg/png/webp, cho phép query string).
+
+    Một số CDN ảnh nền tảng (Shopee down-vn.img.susercontent.com, TikTok
+    *.ibyteimg.com) không gắn đuôi file vào URL nên chấp nhận thêm theo host.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        p = urlparse(url or "")
+        if p.scheme not in ("http", "https") or not p.netloc:
+            return False
+        if p.path.lower().endswith(_IMAGE_EXTS):
+            return True
+        host = p.netloc.lower()
+        return host.endswith(("img.susercontent.com", "ibyteimg.com"))
+    except Exception:
+        return False
+
+
+def _dedup_image_urls(urls: List[str], limit: int = _AFFILIATE_IMAGE_MAX) -> List[str]:
+    out: List[str] = []
+    for u in urls or []:
+        u = (u or "").strip()
+        if u and u not in out:
+            out.append(u)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _duckduckgo_image_search(query: str, get) -> List[str]:
+    """Ảnh từ DuckDuckGo: lấy vqd rồi gọi i.js. Trả [] khi bị chặn/lỗi."""
+    from urllib.parse import quote
+
+    try:
+        page = get(
+            "https://duckduckgo.com/?q=" + quote(query, safe="") + "&iax=images&ia=images",
+            headers={"User-Agent": _DDG_UA},
+        )
+        if page.status_code != 200:
+            return []
+        m = re.search(r'vqd="([^"]+)"', getattr(page, "text", "") or "")
+        if not m:
+            m = re.search(r"vqd='([^']+)'", getattr(page, "text", "") or "")
+        if not m:
+            return []
+        vqd = m.group(1)
+        r = get(
+            "https://duckduckgo.com/i.js?l=vn-vi&o=json&q=" + quote(query, safe="")
+            + "&vqd=" + quote(vqd, safe="") + "&f=,,,&p=1",
+            headers={"User-Agent": _DDG_UA, "Referer": "https://duckduckgo.com/"},
+        )
+        if r.status_code != 200:
+            return []
+        data = r.json() if hasattr(r, "json") else {}
+        if not isinstance(data, dict) or data.get("response_type") == "botnet_challenge":
+            return []
+        out: List[str] = []
+        for item in data.get("results", []) or []:
+            img = (item or {}).get("image", "")
+            if _is_image_url(img):
+                out.append(img)
+        return out
+    except Exception:
+        return []
+
+
+def _bing_image_search(query: str, get) -> List[str]:
+    """Ảnh từ Bing images HTML: bóc &quot;murl&quot; (URL ảnh trực tiếp)."""
+    from urllib.parse import quote
+
+    try:
+        r = get(
+            "https://www.bing.com/images/search?q=" + quote(query, safe="")
+            + "&form=HDRSC2",
+            headers={"User-Agent": _DDG_UA},
+        )
+        if r.status_code != 200:
+            return []
+        html_text = getattr(r, "text", "") or ""
+        raw = re.findall(r"&quot;murl&quot;:&quot;([^&]+)&quot;", html_text)
+        raw += re.findall(r'"murl":"([^"]+)"', html_text)
+        return [u for u in raw if _is_image_url(u)]
+    except Exception:
+        return []
+
+
+def find_product_images(
+    product_name: str, source_url: Optional[str] = None, http_get: Optional[Any] = None
+) -> Dict[str, Any]:
+    """Tìm ảnh ứng viên cho sản phẩm (tối đa 8, để người dùng chọn làm Product Lock).
+
+    Thứ tự: (1) ảnh nền tảng gốc từ source_url (Shopee API nhiều ảnh, TikTok
+    og_info 1 ảnh); (2) DuckDuckGo; (3) Bing. Trả {"images": [{"url",
+    "source", "title"}], "query", "message"}. Không raise khi nguồn lỗi —
+    nguồn nào lỗi thì bỏ qua, hết nguồn thì message nêu rõ.
+    """
+    name = (product_name or "").strip()
+    if not name:
+        raise ValueError("Vui lòng nhập tên sản phẩm để tìm ảnh.")
+    get = http_get or _default_link_http_get
+    found: List[Dict[str, str]] = []
+    seen: set = set()
+
+    def _add(url: str, source: str) -> None:
+        if len(found) >= _AFFILIATE_IMAGE_MAX:
+            return
+        if _is_image_url(url) and url not in seen:
+            seen.add(url)
+            found.append({"url": url, "source": source, "title": name})
+
+    # (1) Ảnh nền tảng gốc (khi có link sản phẩm).
+    if source_url:
+        try:
+            imported = import_affiliate_product_link(source_url, http_get=get)
+            for u in imported.get("image_urls", []) or []:
+                _add(u, "shopee" if imported.get("platform") == "shopee" else "tiktok")
+            if imported.get("image_url"):
+                _add(imported["image_url"],
+                     "shopee" if imported.get("platform") == "shopee" else "tiktok")
+        except Exception:
+            pass
+
+    # (2) DuckDuckGo, rớt thì (3) Bing.
+    if len(found) < _AFFILIATE_IMAGE_MAX:
+        for u in _duckduckgo_image_search(name, get):
+            _add(u, "duckduckgo")
+    if len(found) < _AFFILIATE_IMAGE_MAX:
+        for u in _bing_image_search(name, get):
+            _add(u, "bing")
+
+    if not found:
+        return {
+            "images": [],
+            "query": name,
+            "message": (
+                "Không tìm được ảnh cho sản phẩm này (DuckDuckGo/Bing chặn hoặc "
+                "mất mạng) — vui lòng tải ảnh sản phẩm lên tay."
+            ),
+        }
+    return {
+        "images": found,
+        "query": name,
+        "message": f"Đã tìm được {len(found)} ảnh ứng viên — bấm 1 ảnh để đặt làm ảnh Product Lock.",
+    }

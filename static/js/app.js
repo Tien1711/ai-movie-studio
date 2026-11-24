@@ -8458,6 +8458,72 @@ function clearAffiliateImage() {
   }
 }
 
+// Đặt 1 ảnh làm ảnh Product Lock (dùng chung cho tải lên / nhập link / tìm ảnh).
+function setAffiliateProductImage(url) {
+  if (!url) return;
+  window.affiliateProductImage = url;
+  const preview = document.getElementById('affiliateImgPreview');
+  const wrap = document.getElementById('affiliateImgPreviewWrap');
+  if (preview) preview.src = url;
+  if (wrap) wrap.style.display = 'flex';
+  if (window.affiliateCurrentScript?.scenes) {
+    window.affiliateCurrentScript.scenes.forEach(s => {
+      s.reference_image = url;
+    });
+    renderAffiliateScenes(window.affiliateCurrentScript.scenes);
+  }
+}
+
+// Tìm ảnh sản phẩm chuẩn trên web (dùng khi ảnh hiện tại chỉ là thùng/vỏ).
+// Nguồn: ảnh nền tảng gốc từ link đã nhập (Shopee/TikTok), rồi DuckDuckGo,
+// fallback Bing. Bấm 1 ảnh trong lưới để đặt làm ảnh Product Lock.
+async function findAffiliateProductImages() {
+  const name = document.getElementById('affiliateProdName')?.value.trim();
+  const statusEl = document.getElementById('affiliateFindImagesStatus');
+  const wrap = document.getElementById('affiliateFindImagesWrap');
+  const grid = document.getElementById('affiliateFindImagesGrid');
+  const btn = document.getElementById('btnAffiliateFindImages');
+  if (wrap) wrap.style.display = 'block';
+  if (!name) {
+    if (statusEl) statusEl.textContent = 'Vui lòng nhập tên sản phẩm trước khi tìm ảnh.';
+    return;
+  }
+  const sourceUrl = document.getElementById('affiliateLinkUrl')?.value.trim() || null;
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Đang tìm ảnh...'; }
+  if (statusEl) statusEl.textContent = 'Đang tìm ảnh sản phẩm chuẩn...';
+  if (grid) grid.innerHTML = '';
+  try {
+    const r = await apiFetch('/api/affiliate/find-product-images', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ product_name: name, source_url: sourceUrl })
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Không tìm được ảnh');
+    const images = data.images || [];
+    if (statusEl) statusEl.textContent = data.message || `Đã tìm được ${images.length} ảnh ứng viên — bấm 1 ảnh để đặt làm ảnh Product Lock.`;
+    if (grid) {
+      images.forEach(img => {
+        const el = document.createElement('img');
+        el.src = img.url;
+        el.alt = img.title || '';
+        el.title = (img.source || 'web') + ' — bấm để đặt làm ảnh Product Lock';
+        el.style.cssText = 'width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:1px solid var(--border);cursor:pointer;';
+        el.onclick = () => {
+          setAffiliateProductImage(img.url);
+          if (statusEl) statusEl.textContent = '✅ Đã đặt ảnh này làm ảnh Product Lock.';
+        };
+        el.onerror = () => { el.style.opacity = '0.3'; };
+        grid.appendChild(el);
+      });
+    }
+  } catch (err) {
+    if (statusEl) statusEl.textContent = '❌ ' + (err?.message || err);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '🔍 Tìm ảnh sản phẩm chuẩn'; }
+  }
+}
+
 // Thời lượng clip theo thoại — GIỮ ĐỒNG BỘ với affiliate_engine.snap_clip_duration
 // (API video chỉ nhận mốc 5/6/8/10s; ước lượng TTS tiếng Việt ~11 ký tự/giây).
 function affiliateSnapDuration(voiceover) {

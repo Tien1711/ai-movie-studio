@@ -2252,13 +2252,20 @@
                   <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('affiliateImgUpload').click()" style="border:1px dashed var(--border);padding:8px 12px;">
                     📁 Tải ảnh sản phẩm lên
                   </button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="btnAffiliateFindImages" onclick="findAffiliateProductImages()" title="Tìm ảnh sản phẩm chuẩn trên web — dùng khi ảnh hiện tại chỉ là thùng/vỏ, không thấy bên trong" style="padding:8px 12px;">
+                    🔍 Tìm ảnh sản phẩm chuẩn
+                  </button>
                   <div id="affiliateImgPreviewWrap" style="display:none;align-items:center;gap:8px;">
                     <img loading="lazy" decoding="async" id="affiliateImgPreview" src="" style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--border);">
                     <button type="button" class="btn btn-ghost btn-xs" onclick="clearAffiliateImage()" style="color:#ef4444;">✕ Xóa</button>
                   </div>
                 </div>
                 <div class="u-fs11 u-c-muted u-mt4">
-                  💡 Ảnh này được AI dùng làm tham chiếu để sản phẩm trong video đồng nhất 100% với ảnh shop của bạn.
+                  💡 Ảnh này được AI dùng làm tham chiếu để sản phẩm trong video đồng nhất 100% với ảnh shop của bạn. Ảnh chỉ là thùng/vỏ? Bấm "Tìm ảnh sản phẩm chuẩn" để tìm ảnh bên trong sản phẩm.
+                </div>
+                <div id="affiliateFindImagesWrap" style="display:none;margin-top:8px;">
+                  <div id="affiliateFindImagesStatus" class="u-fs11 u-c-muted"></div>
+                  <div id="affiliateFindImagesGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:6px;"></div>
                 </div>
               </div>
             </div>
