@@ -1297,6 +1297,15 @@ async def generate_affiliate_script_ai(
 # TikTok tồn tại + video_id qua oEmbed. Giá/ảnh/shop chỉ lấy được khi API
 # Shopee bất ngờ trả 200 (đã code sẵn đường này). Khi không lấy được gì thì
 # trả fetched=False + message rõ ràng, UI vẫn cho nhập tay (không kẹt).
+#
+# BỔ SUNG 2026-11-24 (link thật của Tiến: vt.tiktok.com -> TikTok Shop):
+# - Link chia sẻ TikTok SHOP redirect tới /view/product/<id>?...&og_info=
+#   <JSON đã mã hóa URL> — trong og_info có SẴN title + image sản phẩm.
+#   Đây là nguồn đáng tin nhất cho link TikTok Shop (trang sản phẩm chỉ là
+#   JS shell 5KB, không og tags, không giá, không dữ liệu nhúng).
+# - Giá KHÔNG có trong link TikTok Shop -> nhập tay.
+# - httpx mặc định đọc proxy từ biến môi trường; NO_PROXY chứa IPv6 dạng
+#   ngoặc như [::1] làm httpx lỗi 'Invalid port' — đã dùng trust_env=False.
 
 AFFILIATE_LINK_TIMEOUT_S = 15.0  # giây cho mỗi lượt tải
 AFFILIATE_LINK_MAX_BYTES = 2 * 1024 * 1024  # tối đa 2MB nội dung tải về
@@ -1314,7 +1323,7 @@ _CATEGORY_KEYWORDS = {
     "beauty": ("kem", "serum", "son", "sữa rửa mặt", "mặt nạ", "toner", "phấn", "dưỡng", "chống nắng"),
     "fashion": ("áo", "quần", "giày", "kính", "túi", "váy", "đầm", "dép"),
     "food": ("khô bò", "bánh tráng", "rong biển", "trà sữa", "hạt điều", "khô gà", "bánh", "kẹo"),
-    "health": ("bình nước", "thảm", "gối", "kẹo dẻo", "máy massage", "yoga", "vitamin"),
+    "health": ("bình nước", "thảm", "gối", "kẹo dẻo", "máy massage", "yoga", "vitamin", "sữa", "ensure", "dinh dưỡng", "whey", "protein"),
 }
 
 
@@ -1355,12 +1364,18 @@ class _LinkResponse:
 
 
 def _default_link_http_get(url: str, **kwargs) -> _LinkResponse:
-    """GET bằng httpx, theo redirect, giới hạn 2MB (hàm riêng để test mock được)."""
+    """GET bằng httpx, theo redirect, giới hạn 2MB (hàm riêng để test mock được).
+
+    trust_env=False: KHÔNG đọc proxy từ biến môi trường — NO_PROXY chứa
+    IPv6 dạng ngoặc như [::1] làm httpx lỗi 'Invalid port' (gặp thật trên
+    máy kiểm chứng 2026-11-24). Studio chạy local, không cần proxy hệ thống.
+    """
     timeout = kwargs.pop("timeout", AFFILIATE_LINK_TIMEOUT_S)
     headers = dict(kwargs.pop("headers", {}) or {})
     headers.setdefault("User-Agent", _AFFILIATE_LINK_UA)
     with httpx.stream(
-        "GET", url, timeout=timeout, follow_redirects=True, headers=headers, **kwargs
+        "GET", url, timeout=timeout, follow_redirects=True, headers=headers,
+        trust_env=False, **kwargs
     ) as resp:
         body = b""
         for chunk in resp.iter_bytes(chunk_size=65536):
@@ -1430,6 +1445,43 @@ def _tiktok_video_from_url(url: str) -> Dict[str, str]:
     if m:
         return {"video_id": m.group(1)}
     return {}
+
+
+def _tiktok_product_from_url(url: str) -> Dict[str, str]:
+    """Tách product_id từ URL TikTok Shop dạng /view/product/<id>."""
+    m = re.search(r"tiktok\.com/view/product/(\d+)", url or "")
+    if m:
+        return {"product_id": m.group(1)}
+    return {}
+
+
+def _tiktok_og_info_from_url(url: str) -> Dict[str, str]:
+    """Bóc tên + ảnh sản phẩm từ tham số og_info trên URL chia sẻ TikTok Shop.
+
+    Link chia sẻ TikTok Shop (vt.tiktok.com) redirect tới
+    /view/product/<id>?...&og_info=<JSON đã mã hóa URL> — trong đó có sẵn
+    title + image của sản phẩm. Đây là nguồn ĐÁNG TIN NHẤT cho link TikTok
+    Shop vì trang sản phẩm chỉ là JS shell (không og tags, không giá).
+    Trả {} nếu không có og_info hoặc parse lỗi.
+    """
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    try:
+        qs = parse_qs(urlparse(url or "").query)
+        raw = (qs.get("og_info") or [""])[0]
+        if not raw:
+            return {}
+        data = json.loads(unquote(raw))
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, str] = {}
+        if data.get("title"):
+            out["title"] = str(data["title"]).strip()
+        if data.get("image"):
+            out["image"] = str(data["image"]).strip()
+        return out
+    except Exception:
+        return {}
 
 
 def _shopee_price_vnd(raw: Any) -> int:
@@ -1515,6 +1567,7 @@ def import_affiliate_product_link(
         "item_id": "",
         "shop_id": "",
         "video_id": "",
+        "product_id": "",
         "source": "url_only",
         "fetched": False,
         "message": "",
@@ -1583,8 +1636,32 @@ def import_affiliate_product_link(
                 "chi tiết, link không có tên trong địa chỉ) — vui lòng nhập tay."
             )
     else:  # tiktok
-        vid = _tiktok_video_from_url(final_url)
-        result.update(vid)
+        vid: Dict[str, str] = {}
+        # (0) Link TikTok SHOP (/view/product/<id>, thường từ vt.tiktok.com):
+        # tên + ảnh có sẵn trong tham số og_info của URL sau redirect — lấy
+        # ngay từ URL, không cần tải trang (trang sản phẩm chỉ là JS shell,
+        # không og tags, không giá). Giá không có trong link -> nhập tay.
+        prod = _tiktok_product_from_url(final_url)
+        if prod:
+            result.update(prod)
+            og_info = _tiktok_og_info_from_url(final_url)
+            if og_info.get("title"):
+                result["product_name"] = og_info["title"]
+                result["image_url"] = og_info.get("image", "")
+                result["source"] = "tiktok_og_info"
+                result["fetched"] = True
+                result["message"] = (
+                    "Đã lấy tên + ảnh sản phẩm từ link TikTok Shop "
+                    "(giá không có trong link — nhập tay giá bán)."
+                )
+            else:
+                result["message"] = (
+                    "Đây là link sản phẩm TikTok Shop nhưng link không kèm "
+                    "tên sản phẩm — nhập tên sản phẩm tay để tạo video."
+                )
+        if not result["fetched"] and not prod:
+            vid = _tiktok_video_from_url(final_url)
+            result.update(vid)
         # oEmbed xác nhận video tồn tại + lấy video_id (không có title/author/thumbnail).
         oembed_ok = False
         if vid.get("video_id"):

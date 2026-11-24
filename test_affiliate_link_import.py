@@ -162,6 +162,80 @@ def test_import_tiktok_oembed_confirms_video_only():
     assert "nhập" in r["message"]
 
 
+# ── TikTok Shop (link thật của Tiến 2026-11-24) ───────────────────────────
+# vt.tiktok.com -> redirect tới /view/product/<id>?...&og_info=<JSON mã hóa>
+# (og_info có sẵn title + image; trang sản phẩm chỉ là JS shell 5KB).
+
+TIKTOK_SHOP_PRODUCT_URL = (
+    "https://www.tiktok.com/view/product/1735860975637268198"
+    "?og_info=%7B%22title%22%3A%22COMBO+4+LON+S%E1%BB%AEA+ENSURE+GOLD+"
+    "D%E1%BA%A0NG+B%E1%BB%98T+H%C6%AF%C6%A0NG+VANI+800G%22%2C%22image%22"
+    "%3A%22https%3A%5C%2F%5C%2Fp16-oec-sg.ibyteimg.com%5C%2Ftos-alisg-i-"
+    "aphluv4xwc-sg%5C%2Fa2a88e63ce004a0db7f3d23f6dcfecdb~tplv-aphluv4xwc-"
+    "resize-webp%3A260%3A260.webp%22%7D"
+)
+
+
+def _get_tiktok_shop_product(url, **kwargs):
+    """Trang sản phẩm TikTok Shop: JS shell, không og tags — chỉ có og_info trong URL."""
+    return _FakeResp(200, url, JS_SHELL_HTML)
+
+
+def test_import_tiktok_shop_product_og_info():
+    """Link TikTok Shop: tên + ảnh lấy từ tham số og_info của URL sau redirect."""
+    r = affiliate_engine.import_affiliate_product_link(
+        TIKTOK_SHOP_PRODUCT_URL, http_get=_get_tiktok_shop_product)
+    assert r["platform"] == "tiktok"
+    assert r["product_id"] == "1735860975637268198"
+    assert r["product_name"] == "COMBO 4 LON SỮA ENSURE GOLD DẠNG BỘT HƯƠNG VANI 800G"
+    assert r["image_url"].startswith("https://p16-oec-sg.ibyteimg.com/")
+    assert r["source"] == "tiktok_og_info"
+    assert r["fetched"] is True
+    assert r["category"] == "health"  # SỮA ENSURE -> sức khỏe/dinh dưỡng
+    assert r["price_sale"] == ""  # giá KHÔNG có trong link TikTok Shop
+
+
+def test_import_tiktok_shop_product_no_og_info():
+    """Link TikTok Shop không kèm og_info -> không lấy được tên, báo nhập tay."""
+    r = affiliate_engine.import_affiliate_product_link(
+        "https://www.tiktok.com/view/product/1735860975637268198",
+        http_get=_get_tiktok_shop_product)
+    assert r["platform"] == "tiktok"
+    assert r["product_id"] == "1735860975637268198"
+    assert r["product_name"] == ""
+    assert r["fetched"] is False
+    assert "nhập" in r["message"]
+
+
+def test_import_tiktok_short_link_redirect_to_shop():
+    """vt.tiktok.com redirect tới /view/product/... có og_info -> lấy được tên."""
+    def _get_short_to_shop(url, **kwargs):
+        if "vt.tiktok.com" in url:
+            return _FakeResp(200, TIKTOK_SHOP_PRODUCT_URL, JS_SHELL_HTML)
+        return _FakeResp(200, url, JS_SHELL_HTML)
+
+    r = affiliate_engine.import_affiliate_product_link(
+        "https://vt.tiktok.com/ZS9Prv2Yp6eaa-BIk95/",
+        http_get=_get_short_to_shop)
+    assert r["platform"] == "tiktok"
+    assert r["product_name"] == "COMBO 4 LON SỮA ENSURE GOLD DẠNG BỘT HƯƠNG VANI 800G"
+    assert r["fetched"] is True
+
+
+def test_tiktok_shop_url_helpers():
+    """Unit: tách product_id + bóc og_info; og_info sai/mất -> {}."""
+    assert affiliate_engine._tiktok_product_from_url(TIKTOK_SHOP_PRODUCT_URL) == {
+        "product_id": "1735860975637268198"}
+    assert affiliate_engine._tiktok_product_from_url(TIKTOK_URL) == {}
+    og = affiliate_engine._tiktok_og_info_from_url(TIKTOK_SHOP_PRODUCT_URL)
+    assert og["title"] == "COMBO 4 LON SỮA ENSURE GOLD DẠNG BỘT HƯƠNG VANI 800G"
+    assert og["image"].startswith("https://p16-oec-sg.ibyteimg.com/")
+    assert affiliate_engine._tiktok_og_info_from_url(
+        "https://www.tiktok.com/view/product/123") == {}
+    assert affiliate_engine._tiktok_og_info_from_url(
+        "https://www.tiktok.com/view/product/123?og_info=khong-phai-json") == {}
+
+
 # ── Link rút gọn / lỗi ─────────────────────────────────────────────────────
 
 def test_import_short_link_redirect():
@@ -197,6 +271,7 @@ def test_guess_affiliate_category():
     assert affiliate_engine.guess_affiliate_category("Nồi chiên không dầu 5L") == "home"
     assert affiliate_engine.guess_affiliate_category("Serum vitamin C dưỡng trắng") == "beauty"
     assert affiliate_engine.guess_affiliate_category("Khô bò xé sợi cay") == "food"
+    assert affiliate_engine.guess_affiliate_category("COMBO 4 LON SỮA ENSURE GOLD 800G") == "health"
     assert affiliate_engine.guess_affiliate_category("Cái gì đó không rõ danh mục xyz") == ""
 
 
