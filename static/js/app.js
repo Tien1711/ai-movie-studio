@@ -8307,8 +8307,10 @@ function selectAffiliateSampleProduct(pName) {
     document.getElementById('affiliatePain').value = catData.default_pain;
     document.getElementById('affiliateFeatures').value = catData.default_features;
   }
-  document.getElementById('affiliatePriceSale').value = "Chỉ 89k (Giảm 50%)";
-  document.getElementById('affiliatePromotion').value = "Freeship đơn 0đ + Tặng kẹp phụ kiện";
+  // Giá/ưu đãi mẫu: KHÔNG điền giá bịa — user phải nhập giá thật của shop
+  // (fix PR #26 d: trước đây điền sẵn "Chỉ 89k (Giảm 50%)" + freeship giả).
+  document.getElementById('affiliatePriceSale').value = "";
+  document.getElementById('affiliatePromotion').value = "";
 }
 
 function onAffiliateShootingStyleChange() {
@@ -8637,6 +8639,42 @@ async function importAffiliateLink() {
   }
 }
 
+// Hộp cảnh báo tuân thủ chính sách bán hàng (fix PR #26 d): hiện warnings từ
+// response generate-script (data.warnings) + câu khuyến cáo sức khỏe
+// (data.compliance_disclaimer). Không chặn tạo kịch bản, chỉ cảnh báo rõ.
+function renderAffiliateComplianceWarnings(data) {
+  const box = document.getElementById('affiliateComplianceWarnings');
+  if (!box) return;
+  const warnings = (data && data.warnings) || [];
+  const disclaimer = (data && data.compliance_disclaimer) || '';
+  if (warnings.length === 0 && !disclaimer) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  const items = warnings.map(w => {
+    const text = String(w || '');
+    let style = 'background:rgba(245,158,11,0.10);border-color:rgba(245,158,11,0.45);color:#fbbf24;';
+    let icon = '⚠️';
+    if (text.includes('[GIÁ BỊA')) {
+      style = 'background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.55);color:#f87171;';
+      icon = '⛔';
+    } else if (text.includes('đã viết lại')) {
+      style = 'background:rgba(34,197,94,0.10);border-color:rgba(34,197,94,0.45);color:#4ade80;';
+      icon = '✅';
+    }
+    return `<div style="border:1px solid;border-radius:6px;padding:6px 8px;font-size:12px;line-height:1.5;${style}">${icon} ${esc(text)}</div>`;
+  }).join('');
+  const disc = disclaimer
+    ? `<div style="border:1px solid rgba(59,130,246,0.45);background:rgba(59,130,246,0.10);border-radius:6px;padding:6px 8px;font-size:12px;line-height:1.5;color:#93c5fd;">📋 Câu khuyến cáo bắt buộc — thêm vào MÔ TẢ video trước khi đăng: ${esc(disclaimer)}</div>`
+    : '';
+  box.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px;">
+      <div style="font-weight:700;font-size:12.5px;color:var(--text);">🛡️ Kiểm tra tuân thủ chính sách bán hàng — xem kỹ trước khi render/đăng:</div>
+      ${items}${disc}
+    </div>`;
+  box.style.display = 'block';
+}
+
 async function generateAffiliateScriptAction() {
   const pName = document.getElementById('affiliateProdName')?.value.trim();
   if (!pName) {
@@ -8655,8 +8693,8 @@ async function generateAffiliateScriptAction() {
   const payload = {
     product_name: pName,
     category: document.getElementById('affiliateCategory')?.value || 'gadgets',
-    price_sale: document.getElementById('affiliatePriceSale')?.value.trim() || 'Chỉ 99k',
-    promotion_deal: document.getElementById('affiliatePromotion')?.value.trim() || 'Freeship đơn 0đ + Quà tặng kèm',
+    price_sale: document.getElementById('affiliatePriceSale')?.value.trim() || '',
+    promotion_deal: document.getElementById('affiliatePromotion')?.value.trim() || '',
     key_features: document.getElementById('affiliateFeatures')?.value.trim() || '',
     pain_points: document.getElementById('affiliatePain')?.value.trim() || '',
     framework: document.getElementById('affiliateFramework')?.value || 'pas',
@@ -8684,6 +8722,9 @@ async function generateAffiliateScriptAction() {
 
     // Render scenes
     renderAffiliateScenes(data.scenes);
+
+    // Hộp cảnh báo tuân thủ (fix PR #26 d): warnings + câu khuyến cáo.
+    renderAffiliateComplianceWarnings(data);
 
     // Hiển thị campaign bar & render box
     const campBar = document.getElementById('affiliateCampaignBar');

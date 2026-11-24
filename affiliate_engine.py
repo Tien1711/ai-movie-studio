@@ -56,7 +56,7 @@ AFFILIATE_CATEGORIES = {
             "Cây lau nhà tự vắt xoay 360 độ thế hệ mới"
         ],
         "default_pain": "Dọn dẹp nấu nướng mệt mỏi, tốn hàng giờ mỗi ngày, dầu mỡ bám bẩn ám mùi",
-        "default_features": "Tự động hóa hoàn toàn, công nghệ hiện đại tiết kiệm 80% thời gian, lau sạch bóng chỉ sau 1 lần",
+        "default_features": "Tự động hóa hoàn toàn, công nghệ hiện đại giúp tiết kiệm thời gian dọn dẹp, lau sạch bóng dễ dàng",
         "default_voice": "vieneu:AdamBua",
         "style_tag": "cozy modern Scandinavian home, bright warm sunlight, pristine clean kitchen and living room"
     },
@@ -69,10 +69,10 @@ AFFILIATE_CATEGORIES = {
             "Serum Vitamin C mờ thâm sáng da ngừa lão hóa",
             "Son dưỡng môi collagen cấp ẩm căng mọng tự nhiên",
             "Sữa rửa mặt Amino Acid dịu nhẹ sạch sâu không khô da",
-            "Kem dưỡng phục hồi B5 làm dịu mẩn đỏ tức thì"
+            "Kem dưỡng phục hồi B5 làm dịu mẩn đỏ nhẹ nhàng"
         ],
         "default_pain": "Da dầu mụn bết dính, nám sạm xỉn màu, dùng nhiều loại mỹ phẩm đắt tiền mà không thấy hiệu quả",
-        "default_features": "Thành phần thiên nhiên lành tính, thẩm thấu siêu nhanh sau 3 giây, nâng tone sáng hồng rạng rỡ",
+        "default_features": "Thành phần thiên nhiên lành tính, thẩm thấu nhanh, cho da sáng hồng rạng rỡ",
         "default_voice": "vieneu:TrucLy",
         "style_tag": "high-end cosmetic skincare commercial, soft pastel aesthetics, water splash, luminous dewy skin glow"
     },
@@ -115,12 +115,12 @@ AFFILIATE_CATEGORIES = {
         "sample_products": [
             "Bình nước giữ nhiệt 2L có ống hút tiện lợi",
             "Thảm tập Yoga định tuyến chống trơn trượt 8mm",
-            "Gối công thái học chống đau mỏi cổ vai gáy",
-            "Kẹo dẻo ngủ ngon thảo mộc tự nhiên Melatonin",
-            "Máy massage mắt làm ấm thư giãn giảm thâm quầng"
+            "Gối công thái học nâng đỡ cổ vai gáy êm ái",
+            "Kẹo dẻo thảo mộc tự nhiên Melatonin hỗ trợ giấc ngủ",
+            "Máy massage mắt làm ấm thư giãn vùng mắt"
         ],
-        "default_pain": "Làm việc văn phòng mỏi nhừ cổ gáy, ngủ chập chờn mất ngủ, lười uống nước cả ngày",
-        "default_features": "Thiết kế chuẩn công thái học nâng đỡ toàn diện, thư giãn giảm căng thẳng tức thì chỉ sau 10 phút sử dụng",
+        "default_pain": "Cơ thể hay mệt mỏi, ăn uống thất thường, muốn chăm sóc sức khỏe mà bận rộn không có thời gian",
+        "default_features": "Thiết kế tiện lợi, hỗ trợ chăm sóc sức khỏe mỗi ngày, dùng đơn giản tại nhà",
         "default_voice": "vi-VN-NamMinhNeural",
         "style_tag": "healthy zen lifestyle, peaceful serene ambient light, comfortable relaxation vibe"
     }
@@ -432,8 +432,8 @@ class ProductAffiliateRequest(BaseModel):
     target_audience: Optional[str] = "Người dùng trẻ, dân văn phòng, học sinh sinh viên"
     price_original: Optional[str] = ""
     price_sale: Optional[str] = ""
-    discount_percent: Optional[str] = "50%"
-    promotion_deal: Optional[str] = "Freeship 0đ toàn quốc, tặng kèm phụ kiện giới hạn"
+    discount_percent: Optional[str] = ""  # Mặc định trống: KHÔNG bịa "50%" khi user chưa nhập.
+    promotion_deal: Optional[str] = ""  # Mặc định trống: KHÔNG bịa freeship/quà tặng khi user chưa nhập.
     key_features: Optional[str] = ""
     pain_points: Optional[str] = ""
     framework: str = "pas" # pas | hai_bua | review_koc | before_after | aida
@@ -466,6 +466,12 @@ class AffiliateScriptResponse(BaseModel):
     hook_strength: str = "99/100"
     marketing_notes: List[str] = []
     scenes: List[AffiliateScene]
+    # Cảnh báo tuân thủ (fix PR #26 c/d): cùng nội dung với các warning trong
+    # marketing_notes nhưng tách riêng để UI hiện hộp cảnh báo rõ ràng.
+    warnings: List[str] = []
+    # Câu khuyến cáo bắt buộc cho danh mục Sức khỏe / thực phẩm bổ sung —
+    # append vào MÔ TẢ video, KHÔNG đọc trong thoại từng cảnh.
+    compliance_disclaimer: Optional[str] = None
 
 
 # ── 2.5. Product DNA Lock + thời lượng theo thoại ───────────────────────────
@@ -572,9 +578,20 @@ def validate_affiliate_script(
 
 # (regex, replacement, nhãn) — áp dụng theo thứ tự: cụm dài/trường hợp riêng
 # trước, cụm ngắn sau (vd "100% khỏi bệnh" phải xử lý trước "100% khỏi").
+# QUAN TRỌNG (fix PR #26): mọi pattern chứa "100%" phải đứng TRƯỚC các pattern
+# "cam kết/chắc chắn/đảm bảo khỏi bệnh" — nếu không, "cam kết khỏi bệnh 100%"
+# sẽ bị thay cụm "cam kết khỏi bệnh" trước, còn trơ "100%" thành tuyên bố
+# tuyệt đối mới ("hỗ trợ sức khỏe 100%").
 _COMPLIANCE_SEVERE = (
+    # "100%" đi kèm tuyên bố khỏi bệnh/hiệu quả — xử lý TRƯỚC hết.
     (re.compile(r"100%\s*khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
      "tuyên bố khỏi bệnh tuyệt đối"),
+    (re.compile(r"khỏi\s+bệnh\s*100%", re.I), "hỗ trợ sức khỏe",
+     "tuyên bố khỏi bệnh tuyệt đối"),
+    (re.compile(r"100%\s*khỏi", re.I), "hỗ trợ hiệu quả",
+     "cam kết khỏi bệnh tuyệt đối"),
+    (re.compile(r"khỏi\s*100%", re.I), "hỗ trợ hiệu quả",
+     "cam kết khỏi bệnh tuyệt đối"),
     (re.compile(r"cam\s*kết\s+khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
      "cam kết khỏi bệnh"),
     (re.compile(r"chắc\s+chắn\s+khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
@@ -601,10 +618,6 @@ _COMPLIANCE_SEVERE = (
      "tuyên bố khỏi bệnh"),
     (re.compile(r"khỏi\s+hẳn", re.I), "cải thiện rõ rệt",
      "tuyên bố khỏi hẳn"),
-    (re.compile(r"100%\s*khỏi", re.I), "hỗ trợ hiệu quả",
-     "cam kết khỏi bệnh tuyệt đối"),
-    (re.compile(r"khỏi\s*100%", re.I), "hỗ trợ hiệu quả",
-     "cam kết khỏi bệnh tuyệt đối"),
     (re.compile(r"cam\s*kết\s+khỏi", re.I), "hỗ trợ",
      "cam kết khỏi bệnh"),
     (re.compile(r"chắc\s+chắn\s+khỏi", re.I), "hỗ trợ",
@@ -615,6 +628,35 @@ _COMPLIANCE_SEVERE = (
      "cam kết khỏi bệnh"),
     (re.compile(r"hiệu\s+quả\s+tuyệt\s+đối", re.I), "hỗ trợ hiệu quả",
      "cam kết hiệu quả tuyệt đối"),
+    # Hiệu quả tức thì + mốc thời gian ngắn (fix PR #26 — trước đây checker
+    # trả [] cho chính câu mặc định của app "tức thì chỉ sau 10 phút").
+    (re.compile(r"tức\s+thì", re.I), "dần dần",
+     "hiệu quả tức thì (cần thời gian sử dụng)"),
+    (re.compile(r"chỉ\s+sau\s+\d+\s*(phút|giờ|ngày)(\s+sử\s+dụng)?", re.I),
+     "sau một thời gian sử dụng", "hiệu quả nhanh sau mốc thời gian ngắn"),
+    (re.compile(r"ngay\s+sau\s+\d+\s*lần", re.I),
+     "sau một thời gian sử dụng", "hiệu quả ngay sau vài lần dùng"),
+    (re.compile(r"ngay\s+lần\s+đầu\s+(dùng|sử\s+dụng)", re.I),
+     "sau một thời gian sử dụng", "hiệu quả ngay lần đầu dùng"),
+    (re.compile(r"(hiệu\s+quả|kết\s+quả)[^.]{0,40}?ngay\s+lần\s+đầu", re.I),
+     "hỗ trợ cải thiện dần dần", "hiệu quả ngay lần đầu dùng"),
+    # Tuyên bố trị liệu / ngừa bệnh / phục hồi sau bệnh / tăng cân nhanh
+    # (fix PR #26 — đúng kiểu câu nhà bán lẻ hay viết cho sữa Ensure).
+    (re.compile(r"chống\s+đau\s+mỏi", re.I), "hỗ trợ thư giãn",
+     "tuyên bố trị liệu 'chống đau mỏi'"),
+    (re.compile(r"giảm\s+đau(\s+nhức)?", re.I), "hỗ trợ thư giãn",
+     "tuyên bố trị liệu 'giảm đau'"),
+    (re.compile(
+        r"(ngừa|phòng\s+ngừa|phòng\s+chống)\s+(loãng\s+xương|tiểu\s+đường|ung\s+thư"
+        r"|tim\s+mạch|đột\s+quỵ|cao\s+huyết\s+áp|mỡ\s+máu|gút|viêm\s+khớp"
+        r"|thoái\s+hóa|béo\s+phì|cận\s+thị|sâu\s+răng|bệnh)", re.I),
+     "hỗ trợ sức khỏe", "tuyên bố ngừa bệnh"),
+    (re.compile(r"phục\s+hồi\s+(nhanh\s+)?sau\s+(bệnh|ốm)", re.I),
+     "hỗ trợ phục hồi sức khỏe", "tuyên bố phục hồi sau bệnh"),
+    (re.compile(r"tăng\s+cân\s+nhanh", re.I), "hỗ trợ tăng cân từ từ",
+     "kết quả phi thực tế (tăng cân nhanh)"),
+    (re.compile(r"tăng\s+\d+\s*kg\s+trong\s+\d+\s*ngày", re.I),
+     "hỗ trợ tăng cân dần dần", "kết quả phi thực tế (tăng cân cấp tốc)"),
     # Kết quả phi thực tế: số đo + thời gian ngắn không tưởng.
     (re.compile(r"giảm\s+\d+\s*kg\s+trong\s+\d+\s*ngày", re.I),
      "hỗ trợ giảm cân dần dần", "kết quả phi thực tế (giảm cân cấp tốc)"),
@@ -724,7 +766,145 @@ def rewrite_affiliate_compliance(text: str) -> tuple[str, List[Dict[str, Any]]]:
             })
             return replacement
         out = rx.sub(_sub, out)
+    # Lưới an toàn (fix PR #26): nếu sau khi thay vẫn còn "100%" lơ lửng đi
+    # kèm cụm hiệu quả/hỗ trợ ("hỗ trợ sức khỏe 100%") thì bỏ "100%" — tránh
+    # tạo tuyên bố tuyệt đối mới từ chính phần đã viết lại.
+    _leftover_100 = re.compile(
+        r"(\b(?:hỗ\s+trợ|hiệu\s+quả|cải\s+thiện|khỏe\s+mạnh)[^.,!]{0,30}?)\s*100%",
+        re.I)
+    m = _leftover_100.search(out)
+    if m:
+        changes.append({
+            "matched": m.group(0).strip(),
+            "replacement": m.group(1).strip(),
+            "category": "tuyên bố hiệu quả 100% còn sót sau viết lại",
+        })
+        out = _leftover_100.sub(lambda mm: mm.group(1), out)
     return out, changes
+
+
+# Câu khuyến cáo bắt buộc cho thực phẩm bảo vệ sức khỏe / thực phẩm bổ sung
+# trên TikTok Shop (fix PR #26): phải có trong mô tả video, KHÔNG đọc trong
+# thoại từng cảnh. Trang bán Ensure Gold cũng in câu này trong mục Cảnh báo.
+HEALTH_DISCLAIMER = (
+    "Sản phẩm này không phải là thuốc và không có tác dụng thay thế "
+    "thuốc chữa bệnh."
+)
+
+_SUPPLEMENT_KEYWORDS = (
+    "sữa", "ensure", "vitamin", "thực phẩm bổ sung", "dinh dưỡng",
+    "whey", "protein", "thực phẩm chức năng", "men vi sinh",
+)
+
+
+def _needs_health_disclaimer(req: "ProductAffiliateRequest") -> bool:
+    """Danh mục Sức khỏe hoặc tên/tính năng gợi ý thực phẩm dinh dưỡng/bổ sung."""
+    if (req.category or "").strip().lower() == "health":
+        return True
+    hay = f"{req.product_name or ''} {req.key_features or ''}".lower()
+    return any(k in hay for k in _SUPPLEMENT_KEYWORDS)
+
+
+# Mẫu giá/khuyến mãi bịa — chỉ dùng khi ô giá của request ĐANG TRỐNG
+# (fix PR #26: live test 08:38 — ô giá trống nhưng kịch bản viết
+# "đang giảm chỉ còn Chỉ 99k", "trợ giá tụt quần", "Freeship đơn 0đ +
+# Quà tặng kèm"). Gốc rò rỉ: JS gửi fallback "Chỉ 99k"/"Freeship..." khi ô
+# trống + model default promotion_deal cũ + template local tự điền deal.
+_FABRICATED_PRICE_PATTERNS = (
+    (re.compile(r"chỉ\s+còn\s+[^.,]{0,40}?\d[\d.,]*\s*k\b", re.I),
+     "nhắc giá 'chỉ còn ...k'"),
+    (re.compile(r"giảm\s+\d+\s*%", re.I), "nhắc mức giảm %"),
+    (re.compile(r"trợ\s+giá", re.I), "nhắc 'trợ giá'"),
+    (re.compile(r"\b\d[\d.,]*\s*k\b", re.I), "nhắc giá '...k'"),
+)
+_FABRICATED_DEAL_PATTERNS = (
+    (re.compile(r"freeship", re.I), "nhắc 'freeship'"),
+    (re.compile(r"quà\s+tặng", re.I), "nhắc 'quà tặng'"),
+)
+
+
+def _check_fabricated_price(text: str, include_bare: bool = True) -> List[Dict[str, Any]]:
+    """Quét giá bịa trong text (chỉ dùng khi request KHÔNG có giá thật).
+
+    include_bare=False cho prompt tiếng Anh: bỏ pattern giá trần "...k" vì
+    prompt thương mại luôn chứa "8k" (độ phân giải video), không phải giá.
+    """
+    patterns = _FABRICATED_PRICE_PATTERNS
+    if not include_bare:
+        patterns = tuple(p for p in patterns if "nhắc giá '...k'" not in p[1])
+    return _check_fabricated_patterns(text, patterns)
+
+
+def _check_fabricated_deal(text: str) -> List[Dict[str, Any]]:
+    """Quét ưu đãi bịa trong text (chỉ dùng khi request KHÔNG có ưu đãi thật)."""
+    return _check_fabricated_patterns(text, _FABRICATED_DEAL_PATTERNS)
+
+
+def _check_fabricated_patterns(text: str, patterns) -> List[Dict[str, Any]]:
+    """Quét text theo tuple pattern. Mọi match đều là bịa (chưa có căn cứ)."""
+    out: List[Dict[str, Any]] = []
+    taken: List[tuple] = []
+    for rx, category in patterns:
+        for m in rx.finditer(text or ""):
+            span = (m.start(), m.end())
+            if any(s <= span[0] and span[1] <= e for s, e in taken):
+                continue
+            taken.append(span)
+            out.append({
+                "level": "severe",
+                "category": f"giá/khuyến mãi bịa ({category})",
+                "matched": m.group(0),
+                "message": f"giá/khuyến mãi bịa ({category})",
+            })
+    return out
+
+
+# ── Làm sạch từ khóa tìm ảnh (fix PR #26) ────────────────────────────────────
+# Tên sản phẩm dạng "COMBO 4 LON SỮA ENSURE GOLD DẠNG BỘT HƯƠNG VANI 800G"
+# làm Bing hiểu "COMBO" = combo đồ ăn -> trả burger/xe ô tô. Bỏ cụm đóng gói/
+# số lượng, giữ thương hiệu + loại sản phẩm: "SỮA ENSURE GOLD".
+_PACKAGING_TOKENS = (
+    r"\bCOMBO\b",
+    r"\b\d+\s*(LON|HỘP|GÓI|CHAI|TÚI|LỌ|VIÊN|GÓI)\b",
+    r"\bDẠNG\s+\w+",
+    r"\bHƯƠNG\s+\w+",
+    r"\b\d+\s*(G|KG|ML|L|MG)\b",
+    r"\b\d+\s*\+\s*\d+\b",
+)
+
+
+def _clean_product_search_query(name: str) -> str:
+    """Bỏ từ đóng gói/số lượng khỏi tên sản phẩm để tìm ảnh đúng hơn."""
+    q = (name or "").strip()
+    for pat in _PACKAGING_TOKENS:
+        q = re.sub(pat, " ", q, flags=re.I)
+    q = re.sub(r"\s+", " ", q).strip(" -")
+    return q or (name or "").strip()
+
+
+def _product_search_keywords(cleaned_query: str) -> List[str]:
+    """Từ khóa lọc ảnh: token >= 3 ký tự của query đã làm sạch (bỏ dấu)."""
+    words = []
+    for w in _strip_vi_diacritics(cleaned_query or "").lower().split():
+        w = re.sub(r"[^a-z0-9]+", "", w)
+        if len(w) >= 3 and w not in words:
+            words.append(w)
+    # "sữa" -> thêm "milk" (ảnh nước ngoài hay đặt tên milk).
+    if "sua" in words and "milk" not in words:
+        words.append("milk")
+    return words
+
+
+def _image_url_matches_product(url: str, keywords: List[str]) -> bool:
+    """Ảnh web chỉ giữ khi URL chứa ít nhất 1 từ khóa sản phẩm.
+
+    Ảnh nền tảng gốc (Shopee/TikTok) KHÔNG qua lọc này — chúng lấy từ chính
+    trang sản phẩm nên đáng tin. Lọc chỉ áp dụng cho kết quả tìm kiếm web.
+    """
+    if not keywords:
+        return True
+    hay = _strip_vi_diacritics(url or "").lower()
+    return any(k in hay for k in keywords)
 
 
 def _normalize_affiliate_script(
@@ -750,6 +930,15 @@ def _normalize_affiliate_script(
     """
     lock = build_product_dna_lock_for_request(req)
     warnings: List[str] = []
+    has_price = bool((req.price_sale or "").strip())
+    has_deal = bool((req.promotion_deal or "").strip())
+    # Danh mục Sức khỏe / thực phẩm bổ sung: nhắc thêm câu khuyến cáo bắt buộc
+    # vào MÔ TẢ video (không đọc trong thoại từng cảnh) — fix PR #26 (c).
+    if _needs_health_disclaimer(req):
+        warnings.append(
+            "Danh mục Sức khỏe: nhớ thêm câu khuyến cáo vào mô tả video trước "
+            f"khi đăng: '{HEALTH_DISCLAIMER}'"
+        )
     for s in scenes:
         # 1. Tuân thủ chính sách: viết lại thoại vi phạm nặng, warning nhẹ.
         new_vo, _changes = rewrite_affiliate_compliance(s.voiceover or "")
@@ -765,6 +954,36 @@ def _normalize_affiliate_script(
                 warnings.append(
                     f"Cảnh {s.index}: kiểm tra lại trước khi đăng — {f['message']}: "
                     f"'{f['matched']}'."
+                )
+        # Giá bịa (fix PR #26 d): ô giá/ưu đãi trống mà thoại/prompt nhắc giá/
+        # giảm giá/freeship/quà tặng -> NẶNG, bắt sửa tay (không tự bịa số khác).
+        # Giá và ưu đãi kiểm riêng: nhập deal thật nhưng chưa nhập giá thì
+        # nhắc freeship/quà tặng KHÔNG bị gắn cờ oan.
+        if not has_price:
+            for f in _check_fabricated_price(s.voiceover or ""):
+                warnings.append(
+                    f"Cảnh {s.index}: [GIÁ BỊA — CẦN SỬA] thoại nhắc "
+                    f"{f['message']}: '{f['matched']}' nhưng ô giá đang trống — "
+                    "xóa câu này hoặc nhập giá thật trước khi đăng."
+                )
+            for f in _check_fabricated_price(s.prompt or "", include_bare=False):
+                warnings.append(
+                    f"Cảnh {s.index}: [GIÁ BỊA — CẦN SỬA] prompt nhắc "
+                    f"{f['message']}: '{f['matched']}' nhưng ô giá đang trống — "
+                    "xóa câu này hoặc nhập giá thật trước khi render."
+                )
+        if not has_deal:
+            for f in _check_fabricated_deal(s.voiceover or ""):
+                warnings.append(
+                    f"Cảnh {s.index}: [GIÁ BỊA — CẦN SỬA] thoại nhắc "
+                    f"{f['message']}: '{f['matched']}' nhưng ô ưu đãi đang trống — "
+                    "xóa câu này hoặc nhập ưu đãi thật trước khi đăng."
+                )
+            for f in _check_fabricated_deal(s.prompt or ""):
+                warnings.append(
+                    f"Cảnh {s.index}: [GIÁ BỊA — CẦN SỬA] prompt nhắc "
+                    f"{f['message']}: '{f['matched']}' nhưng ô ưu đãi đang trống — "
+                    "xóa câu này hoặc nhập ưu đãi thật trước khi render."
                 )
         # Prompt: chỉ gắn warning (không viết lại prompt tự động).
         for f in check_affiliate_compliance(s.prompt or ""):
@@ -1054,8 +1273,14 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
     cat_cfg = AFFILIATE_CATEGORIES.get(req.category, AFFILIATE_CATEGORIES["gadgets"])
     p_pain = req.pain_points.strip() if req.pain_points else cat_cfg["default_pain"]
     p_features = req.key_features.strip() if req.key_features else cat_cfg["default_features"]
-    p_sale = req.price_sale.strip() if req.price_sale else "giá siêu hời"
-    p_deal = req.promotion_deal.strip() if req.promotion_deal else "Freeship đơn từ 0đ và quà tặng giới hạn"
+    p_sale = (req.price_sale or "").strip()
+    p_deal = (req.promotion_deal or "").strip()
+    # Giá/ưu đãi: KHÔNG tự bịa khi user chưa nhập (fix PR #26 d — live test
+    # 08:38: ô giá trống nhưng kịch bản viết "Chỉ 99k"/"Freeship..."). Chỉ
+    # dùng giá trị thật; khi trống, các câu phụ thuộc giá dùng biến thể trung
+    # tính (không giá, không giảm giá, không freeship, không quà tặng).
+    has_price = bool(p_sale)
+    has_deal = bool(p_deal)
     framework = req.framework.lower()
     voice = req.voice or cat_cfg["default_voice"]
     ref_img = req.koc_image or req.reference_image
@@ -1133,7 +1358,10 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="proof",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
-                voiceover=f"Đã thế hôm nay TikTok Shop trợ giá tụt quần, đang giảm chỉ còn {p_sale}, lại còn {p_deal} nữa chứ!",
+                voiceover=(f"Đã thế hôm nay đang có giá ưu đãi {p_sale}"
+                           f"{f', lại còn {p_deal}' if has_deal else ''} nữa chứ!"
+                           if has_price else
+                           "Đã thế em này đang được nhiều người săn đón, bấm vào giỏ hàng góc trái xem giá thật của shop là rõ ngay!"),
                 voice=voice,
                 badge="SALE SỐC HÔM NAY ⚡",
                 reference_image=ref_img
@@ -1144,7 +1372,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="cta",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
-                voiceover=f"Nhanh cái tay lẹ cái mắt bấm ngay vào giỏ hàng màu vàng bên góc trái để múc luôn, chậm là người ta hốt sạch đấy nha!",
+                voiceover=f"Nhanh cái tay lẹ cái mắt bấm ngay vào giỏ hàng màu vàng bên góc trái để múc luôn nha!",
                 voice=voice,
                 badge="GIỎ HÀNG GÓC TRÁI 👇",
                 reference_image=ref_img
@@ -1181,7 +1409,7 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 prompt=_prompt("pain"),
                 voiceover=f"Trước đây mình rất ngại mua trên mạng vì sợ hàng đểu mau hỏng, nhưng cầm em này trên tay cảm giác chắc chắn cực kỳ.",
                 voice=voice,
-                badge="100% CHÍNH HÃNG ✨",
+                badge="CHÍNH HÃNG ✨",
                 reference_image=ref_img
             ),
             AffiliateScene(
@@ -1201,9 +1429,12 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="proof",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
-                voiceover=f"Chấm điểm 9.5 trên 10 luôn nha! Hiện tại đang có giá ưu đãi chỉ {p_sale} và kèm {p_deal}.",
+                voiceover=(f"Mình đánh giá rất cao em này luôn nha! Hiện tại đang có giá ưu đãi {p_sale}"
+                           f"{f' và kèm {p_deal}' if has_deal else ''}."
+                           if has_price else
+                           "Mình đánh giá rất cao em này luôn nha! Bấm vào giỏ hàng góc trái xem giá thật của shop nhé!"),
                 voice=voice,
-                badge="CHẤM ĐIỂM 9.5/10 🌟",
+                badge="ĐÁNH GIÁ CAO 🌟",
                 reference_image=ref_img
             ),
             AffiliateScene(
@@ -1262,9 +1493,11 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="proof",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
-                voiceover=f"Đúng là đầu tư thông minh nhất tháng này, vừa tiết kiệm công sức mà giá sale hôm nay chỉ còn {p_sale}.",
+                voiceover=(f"Đúng là đầu tư thông minh nhất tháng này, vừa tiết kiệm công sức mà giá sale hôm nay {p_sale}."
+                           if has_price else
+                           "Đúng là đầu tư thông minh nhất tháng này, vừa tiết kiệm công sức lại tiện lợi mỗi ngày."),
                 voice=voice,
-                badge="TIẾT KIỆM 80% THỜI GIAN ⏱️",
+                badge="TIẾT KIỆM THỜI GIAN ⏱️",
                 reference_image=ref_img
             ),
             AffiliateScene(
@@ -1273,7 +1506,9 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="cta",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
-                voiceover=f"Voucher giảm giá và {p_deal} mình để sẵn ở giỏ hàng góc trái, cả nhà nhanh tay chốt ngay kẻo hết hạn nha!",
+                voiceover=(f"Voucher giảm giá và {p_deal} mình để sẵn ở giỏ hàng góc trái, cả nhà nhanh tay chốt ngay kẻo hết hạn nha!"
+                           if has_deal else
+                           "Mình để sẵn link mua ở giỏ hàng góc trái, cả nhà bấm vào xem giá thật của shop rồi chốt nhé!"),
                 voice=voice,
                 badge="MUA NGAY HÔM NAY 👇",
                 reference_image=ref_img
@@ -1323,7 +1558,10 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="proof",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
-                voiceover=f"Hàng ngàn lượt đánh giá 5 sao uy tín, đang có deal hời tụt đỉnh {p_sale} kèm {p_deal}.",
+                voiceover=(f"Đang có deal hời với giá {p_sale}"
+                           f"{f' kèm {p_deal}' if has_deal else ''}, bấm vào giỏ hàng góc trái xem ngay nhé!"
+                           if has_price else
+                           "Bấm vào giỏ hàng góc trái xem giá thật và ưu đãi của shop nhé!"),
                 voice=voice,
                 badge="UY TÍN HÀNG ĐẦU 🏆",
                 reference_image=ref_img
@@ -1334,7 +1572,9 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="cta",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
-                voiceover=f"Số lượng flash sale có hạn, chạm ngay vào giỏ hàng màu vàng góc dưới bên trái để nhận ưu đãi ngay hôm nay!",
+                voiceover=(f"Số lượng flash sale có hạn, chạm ngay vào giỏ hàng màu vàng góc dưới bên trái để nhận ưu đãi ngay hôm nay!"
+                           if has_deal else
+                           "Chạm ngay vào giỏ hàng màu vàng góc dưới bên trái để xem giá thật và đặt mua ngay hôm nay!"),
                 voice=voice,
                 badge="BẤM VÀO GIỎ HÀNG 👇",
                 reference_image=ref_img
@@ -1384,9 +1624,12 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="proof",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("proof"),
-                voiceover=f"Hiệu quả rõ rệt ngay lần đầu dùng! Giá hôm nay siêu sốc chỉ {p_sale}, lại còn được {p_deal}.",
+                voiceover=(f"Giá hôm nay {p_sale}"
+                           f"{f', lại còn được {p_deal}' if has_deal else ''}."
+                           if has_price else
+                           "Bấm vào giỏ hàng góc trái xem giá thật của shop nhé!"),
                 voice=voice,
-                badge="GIÁ SỐC HÔM NAY 🏷️",
+                badge="GIÁ SỐC HÔM NAY 🏷️" if has_price else "GIÁ TRONG GIỎ HÀNG 🏷️",
                 reference_image=ref_img
             ),
             AffiliateScene(
@@ -1395,7 +1638,9 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
                 role="cta",
                 duration=AFFILIATE_SCENE_DURATION,
                 prompt=_prompt("cta"),
-                voiceover=f"Bấm ngay vào giỏ hàng màu vàng ở góc trái màn hình để săn deal hời trước khi hết mã freeship nhé!",
+                voiceover=(f"Bấm ngay vào giỏ hàng màu vàng ở góc trái màn hình để săn deal hời trước khi hết mã freeship nhé!"
+                           if has_deal else
+                           "Bấm ngay vào giỏ hàng màu vàng ở góc trái màn hình để xem giá thật và đặt mua nhé!"),
                 voice=voice,
                 badge="GIỎ HÀNG GÓC TRÁI 👇",
                 reference_image=ref_img
@@ -1419,7 +1664,10 @@ def generate_affiliate_script_local(req: ProductAffiliateRequest) -> AffiliateSc
         recommended_voice=voice,
         hook_strength="99/100",
         marketing_notes=notes,
-        scenes=scenes
+        scenes=scenes,
+        warnings=_vo_warnings,
+        compliance_disclaimer=(
+            HEALTH_DISCLAIMER if _needs_health_disclaimer(req) else None),
     )
 
 
@@ -1489,6 +1737,20 @@ async def generate_affiliate_script_ai(
         "cam kết tuyệt đối ('100% khỏi', 'hiệu quả tuyệt đối', 'chắc chắn khỏi'), kết quả phi thực tế ('giảm 5kg trong 3 ngày', 'trắng sau 1 lần'), "
         "giảm giá/khan hiếm giả khi không có căn cứ ('giảm 90%', 'chỉ còn 1 suất', 'duy nhất hôm nay'), từ tuyệt đối không chứng cứ ('tốt nhất', 'số 1', 'duy nhất'). "
         "Với thực phẩm bổ sung/dinh dưỡng (vd sữa) chỉ dùng cách nói 'hỗ trợ dinh dưỡng/sức khỏe', không dùng 'chữa/khỏi bệnh'.\n"
+        "9. GIÁ/ƯU ĐÃI: chỉ nhắc giá, mức giảm, freeship, quà tặng, trợ giá khi user_prompt dưới đây ghi GIÁ/ƯU ĐÃI THẬT. "
+        "Nếu user_prompt ghi 'CHƯA CÓ' thì tuyệt đối KHÔNG được tự bịa bất kỳ con số giá/mức giảm nào — chỉ nói 'xem giá trong giỏ hàng'.\n"
+    )
+
+    # Giá/ưu đãi: chỉ đưa số thật vào prompt; khi trống thì ghi rõ CHƯA CÓ
+    # kèm lệnh cấm bịa (fix PR #26 d — live test 08:38: ô giá trống nhưng LLM
+    # viết "đang giảm chỉ còn Chỉ 99k" vì prompt cũ để trống không cấm).
+    _price_line = (
+        f"Giá khuyến mãi: {req.price_sale}\n" if (req.price_sale or "").strip()
+        else "Giá khuyến mãi: CHƯA CÓ — tuyệt đối KHÔNG được tự bịa bất kỳ con số giá/mức giảm nào; chỉ nói 'xem giá trong giỏ hàng'.\n"
+    )
+    _deal_line = (
+        f"Ưu đãi đi kèm: {req.promotion_deal}\n" if (req.promotion_deal or "").strip()
+        else "Ưu đãi đi kèm: KHÔNG CÓ — tuyệt đối KHÔNG được nhắc freeship/quà tặng/trợ giá/giảm giá.\n"
     )
 
     user_prompt = (
@@ -1497,8 +1759,8 @@ async def generate_affiliate_script_ai(
         f"Đối tượng nhắm tới: {req.target_audience}\n"
         f"Vấn đề/Nỗi đau: {req.pain_points}\n"
         f"Tính năng nổi bật: {req.key_features}\n"
-        f"Giá khuyến mãi: {req.price_sale}\n"
-        f"Ưu đãi đi kèm: {req.promotion_deal}\n"
+        f"{_price_line}"
+        f"{_deal_line}"
         f"Công thức kịch bản: {req.framework}\n"
         f"Kiểu quay (shooting_style): {getattr(req, 'shooting_style', 'faceless') or 'faceless'}\n"
         f"Giọng điệu/Tone: {req.tone}\n"
@@ -1559,7 +1821,11 @@ async def generate_affiliate_script_ai(
                                 "Mỗi cảnh dài theo thoại (clip 5/6/8/10s — thoại ngắn clip ngắn, thoại dài clip dài, tối đa 10s); thoại dài hơn 10s thì video loop để đọc kịp.",
                                 "Render nối tiếp (sequential chain): cảnh sau dùng last frame cảnh trước để giữ tay/sản phẩm/bối cảnh đồng nhất.",
                             ] + _vo_warnings,
-                            scenes=scenes_list
+                            scenes=scenes_list,
+                            warnings=_vo_warnings,
+                            compliance_disclaimer=(
+                                HEALTH_DISCLAIMER
+                                if _needs_health_disclaimer(req) else None),
                         )
     except Exception as e:
         print(f"[Affiliate AI] Muse chat unavailable or returned parse error ({e}), activating local generator fallback...")
@@ -2150,47 +2416,68 @@ def find_product_images(
     if not name:
         raise ValueError("Vui lòng nhập tên sản phẩm để tìm ảnh.")
     get = http_get or _default_link_http_get
+    # Query tìm kiếm đã làm sạch: bỏ cụm đóng gói/số lượng ("COMBO 4 LON",
+    # "DẠNG BỘT", "800G") — fix PR #26 (e): tên thô làm Bing hiểu "COMBO"
+    # = combo đồ ăn -> trả burger/xe ô tô.
+    query = _clean_product_search_query(name)
+    keywords = _product_search_keywords(query)
     found: List[Dict[str, str]] = []
     seen: set = set()
+    filtered_out = 0
 
-    def _add(url: str, source: str) -> None:
+    def _add(url: str, source: str, trusted: bool = False) -> None:
+        nonlocal filtered_out
         if len(found) >= _AFFILIATE_IMAGE_MAX:
             return
-        if _is_image_url(url) and url not in seen:
-            seen.add(url)
-            found.append({"url": url, "source": source, "title": name})
+        if not _is_image_url(url) or url in seen:
+            return
+        # Ảnh web phải chứa từ khóa sản phẩm trong URL (loại burger/xe ô tô);
+        # ảnh nền tảng gốc (Shopee/TikTok) lấy từ chính trang sản phẩm nên
+        # giữ nguyên không lọc.
+        if not trusted and not _image_url_matches_product(url, keywords):
+            filtered_out += 1
+            return
+        seen.add(url)
+        found.append({"url": url, "source": source, "title": name})
 
-    # (1) Ảnh nền tảng gốc (khi có link sản phẩm).
+    # (1) Ảnh nền tảng gốc (khi có link sản phẩm) — đáng tin, không lọc.
     if source_url:
         try:
             imported = import_affiliate_product_link(source_url, http_get=get)
             for u in imported.get("image_urls", []) or []:
-                _add(u, "shopee" if imported.get("platform") == "shopee" else "tiktok")
+                _add(u, "shopee" if imported.get("platform") == "shopee" else "tiktok",
+                     trusted=True)
             if imported.get("image_url"):
                 _add(imported["image_url"],
-                     "shopee" if imported.get("platform") == "shopee" else "tiktok")
+                     "shopee" if imported.get("platform") == "shopee" else "tiktok",
+                     trusted=True)
         except Exception:
             pass
 
-    # (2) DuckDuckGo, rớt thì (3) Bing.
+    # (2) DuckDuckGo, rớt thì (3) Bing — tìm bằng query đã làm sạch.
     if len(found) < _AFFILIATE_IMAGE_MAX:
-        for u in _duckduckgo_image_search(name, get):
+        for u in _duckduckgo_image_search(query, get):
             _add(u, "duckduckgo")
     if len(found) < _AFFILIATE_IMAGE_MAX:
-        for u in _bing_image_search(name, get):
+        for u in _bing_image_search(query, get):
             _add(u, "bing")
 
     if not found:
         return {
             "images": [],
-            "query": name,
+            "query": query,
             "message": (
-                "Không tìm được ảnh cho sản phẩm này (DuckDuckGo/Bing chặn hoặc "
-                "mất mạng) — vui lòng tải ảnh sản phẩm lên tay."
+                "Không tìm được ảnh phù hợp cho sản phẩm này"
+                + (f" (đã loại {filtered_out} ảnh không liên quan)" if filtered_out else "")
+                + " — vui lòng tải ảnh sản phẩm lên tay."
             ),
         }
     return {
         "images": found,
-        "query": name,
-        "message": f"Đã tìm được {len(found)} ảnh ứng viên — bấm 1 ảnh để đặt làm ảnh Product Lock.",
+        "query": query,
+        "message": (
+            f"Đã tìm được {len(found)} ảnh ứng viên"
+            + (f" (đã loại {filtered_out} ảnh không liên quan)" if filtered_out else "")
+            + " — bấm 1 ảnh để đặt làm ảnh Product Lock."
+        ),
     }
