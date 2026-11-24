@@ -2232,13 +2232,13 @@
                   <label class="field-label">
                     Giá khuyến mãi / Deal
                   </label>
-                  <input type="text" id="affiliatePriceSale" class="form-control u-w-full" placeholder="Ví dụ: Chỉ 99k (Giảm 50%)">
+                  <input type="text" id="affiliatePriceSale" class="form-control u-w-full" placeholder="Nhập giá bán thực tế, để trống nếu chưa có giá">
                 </div>
                 <div>
                   <label class="field-label">
                     Quà tặng / Ưu đãi độc quyền
                   </label>
-                  <input type="text" id="affiliatePromotion" class="form-control u-w-full" placeholder="Ví dụ: Freeship 0đ toàn quốc, Mua 1 tặng 1">
+                  <input type="text" id="affiliatePromotion" class="form-control u-w-full" placeholder="Chỉ ghi ưu đãi thật của shop, để trống nếu không có">
                 </div>
               </div>
 
@@ -2411,6 +2411,11 @@
                 </div>
               </div>
             </div>
+
+            <!-- Hộp cảnh báo tuân thủ chính sách bán hàng (fix PR #26 d):
+                 hiện warnings + câu khuyến cáo từ response generate-script.
+                 Không chặn tạo kịch bản, chỉ cảnh báo rõ trước khi đăng. -->
+            <div id="affiliateComplianceWarnings" style="display:none;margin-bottom:14px;"></div>
 
             <!-- Storyboard Scenes Container -->
             <div id="affiliateScenesList" class="u-col-12">

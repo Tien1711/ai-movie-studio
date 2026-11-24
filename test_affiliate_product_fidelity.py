@@ -142,7 +142,27 @@ def test_compliance_absolute_cure_promises_severe():
         assert any(f["level"] == "severe" for f in findings), text
         new_text, changes = affiliate_engine.rewrite_affiliate_compliance(text)
         assert changes, text
-        assert "khỏi bệnh" not in new_text or "100% khỏi" not in new_text
+        # Fix PR #26 (a): assert OR cũ che lỗi "100%" lơ lửng — siết cả 2 vế.
+        assert "100%" not in new_text, f"sót 100% sau rewrite: {new_text!r}"
+        assert "khỏi bệnh" not in new_text, new_text
+
+
+def test_rewrite_no_leftover_100_percent_qa_case():
+    """Bug QA 2026-11-24 mục 2: 'cam kết khỏi bệnh 100%' -> không còn '100%'."""
+    text = ("Uống sữa Ensure mỗi ngày giúp chữa khỏi suy dinh dưỡng, "
+            "cam kết khỏi bệnh 100%.")
+    new_text, changes = affiliate_engine.rewrite_affiliate_compliance(text)
+    assert "100%" not in new_text, new_text
+    assert "chữa khỏi" not in new_text
+    assert "khỏi bệnh" not in new_text
+    assert "hỗ trợ" in new_text
+    assert not any(f["level"] == "severe" for f in
+                   affiliate_engine.check_affiliate_compliance(new_text))
+    # Các dạng "100%" khác cũng không sót.
+    for t in ("Hiệu quả tuyệt đối, bao khỏi 100%.",
+              "Cam kết 100% khỏi bệnh sau 1 tuần!"):
+        nt, _ = affiliate_engine.rewrite_affiliate_compliance(t)
+        assert "100%" not in nt, (t, nt)
 
 
 def test_compliance_unrealistic_results_severe():
@@ -325,7 +345,9 @@ def test_find_images_caps_at_8_and_dedups():
     def _get_many(url, **kwargs):
         if "i.js" in url:
             results = [
-                {"image": f"https://cdn.example.com/p{i % 5}.jpg"}
+                # URL phải chứa từ khóa sản phẩm (fix PR #26 e: ảnh web bị lọc
+                # theo từ khóa, URL chung chung "p0.jpg" sẽ bị loại).
+                {"image": f"https://cdn.example.com/ensure-p{i % 5}.jpg"}
                 for i in range(10)
             ]
             return _FakeResp(200, url, json.dumps({"results": results}))
@@ -368,3 +390,309 @@ def test_endpoint_find_product_images(monkeypatch):
         r = client.post("/api/affiliate/find-product-images",
                         json={"product_name": ""})
         assert r.status_code == 422
+
+# ── PR #26: Sửa 5 nhóm lỗi sau merge PR #25 (kiểm chứng thật 2026-11-24) ─────
+# (a) rewrite sót "100%" + siết assert; (b) pattern mới + preset sức khỏe;
+# (c) câu khuyến cáo bắt buộc; (d) cấm bịa giá/khuyến mãi khi ô giá trống +
+# hiện warning lên UI; (e) làm sạch từ khóa tìm ảnh.
+
+# ── (b) Pattern mới ─────────────────────────────────────────────────────────
+
+def test_compliance_instant_result_severe():
+    """Hiệu quả tức thì + mốc thời gian ngắn -> nặng (cả câu mặc định cũ của app)."""
+    for text in (
+        "Thư giãn giảm căng thẳng tức thì chỉ sau 10 phút sử dụng.",
+        "Trắng ngay sau 3 lần dùng, da sáng tức thì.",
+        "Hiệu quả rõ rệt ngay lần đầu dùng!",
+    ):
+        findings = affiliate_engine.check_affiliate_compliance(text)
+        assert any(f["level"] == "severe" for f in findings), text
+        new_text, _ = affiliate_engine.rewrite_affiliate_compliance(text)
+        assert "tức thì" not in new_text
+        assert "ngay lần đầu" not in new_text
+        assert "chỉ sau" not in new_text
+        assert not any(f["level"] == "severe" for f in
+                       affiliate_engine.check_affiliate_compliance(new_text))
+    # Cách nói tuân thủ: không mốc tức thì, không cam kết thời gian.
+    assert affiliate_engine.check_affiliate_compliance(
+        "Dùng đều mỗi ngày, bạn sẽ thấy da sáng hơn dần.") == []
+
+
+def test_compliance_therapeutic_and_disease_prevention_severe():
+    """Tuyên bố trị liệu / ngừa bệnh / phục hồi sau bệnh / tăng cân nhanh -> nặng."""
+    for text in (
+        "Gối công thái học chống đau mỏi cổ vai gáy.",
+        "Máy massage giảm đau nhức vai gáy hiệu quả.",
+        "Sữa Ensure Gold giúp phục hồi nhanh sau bệnh, tăng cân nhanh, ngừa loãng xương.",
+        "Viên uống phòng ngừa tiểu đường, tăng 2kg trong 7 ngày.",
+    ):
+        findings = affiliate_engine.check_affiliate_compliance(text)
+        assert any(f["level"] == "severe" for f in findings), text
+        new_text, _ = affiliate_engine.rewrite_affiliate_compliance(text)
+        assert "chống đau mỏi" not in new_text
+        assert "ngừa loãng xương" not in new_text
+        assert "phục hồi nhanh sau bệnh" not in new_text
+        assert "tăng cân nhanh" not in new_text
+        assert "tăng 2kg trong 7 ngày" not in new_text
+        assert not any(f["level"] == "severe" for f in
+                       affiliate_engine.check_affiliate_compliance(new_text))
+    # "Melatonin / ngủ ngon" chỉ là tuyên bố công dụng — KHÔNG xếp nặng.
+    assert not any(
+        f["level"] == "severe" for f in affiliate_engine.check_affiliate_compliance(
+            "Kẹo dẻo thảo mộc tự nhiên Melatonin hỗ trợ giấc ngủ"))
+
+
+def test_health_presets_are_compliant():
+    """Mọi preset danh mục (features/pain/samples) phải qua checker sạch.
+
+    Gốc rễ bug live test 08:38: chính default_features danh mục Sức khỏe chứa
+    'tức thì chỉ sau 10 phút' — app tự đưa câu vi phạm vào kịch bản.
+    """
+    for cat_id, cat in affiliate_engine.AFFILIATE_CATEGORIES.items():
+        assert affiliate_engine.check_affiliate_compliance(
+            cat["default_features"]) == [], cat_id
+        assert affiliate_engine.check_affiliate_compliance(
+            cat["default_pain"]) == [], cat_id
+        for sp in cat["sample_products"]:
+            assert not any(
+                f["level"] == "severe" for f in
+                affiliate_engine.check_affiliate_compliance(sp)), (cat_id, sp)
+    assert "tức thì" not in affiliate_engine.AFFILIATE_CATEGORIES["health"]["default_features"]
+    assert "chống đau mỏi" not in " ".join(
+        affiliate_engine.AFFILIATE_CATEGORIES["health"]["sample_products"])
+
+
+# ── (c) Câu khuyến cáo bắt buộc ──────────────────────────────────────────────
+
+def test_health_disclaimer_in_response():
+    """Danh mục Sức khỏe -> có disclaimer + warning; danh mục khác -> không."""
+    req = _req("COMBO 4 LON SỮA ENSURE GOLD 800G", "health")
+    res = affiliate_engine.generate_affiliate_script_local(req)
+    assert res.compliance_disclaimer == affiliate_engine.HEALTH_DISCLAIMER
+    assert "không phải là thuốc" in res.compliance_disclaimer
+    assert any("khuyến cáo" in w for w in res.warnings)
+    # Disclaimer KHÔNG bị nhét vào thoại từng cảnh.
+    assert all(affiliate_engine.HEALTH_DISCLAIMER not in (s.voiceover or "")
+               for s in res.scenes)
+
+    req2 = _req()
+    res2 = affiliate_engine.generate_affiliate_script_local(req2)
+    assert res2.compliance_disclaimer is None
+    assert not any("khuyến cáo" in w for w in res2.warnings)
+
+    # Tên sản phẩm gợi ý thực phẩm bổ sung (dù category khác) -> vẫn có disclaimer.
+    req3 = _req("Vitamin C 1000mg bổ sung dinh dưỡng", "gadgets")
+    res3 = affiliate_engine.generate_affiliate_script_local(req3)
+    assert res3.compliance_disclaimer == affiliate_engine.HEALTH_DISCLAIMER
+
+
+# ── (d) Cấm bịa giá/khuyến mãi khi ô giá trống ───────────────────────────────
+
+def _ensure_req_no_price(framework="pas"):
+    return affiliate_engine.ProductAffiliateRequest(
+        product_name="COMBO 4 LON SỮA ENSURE GOLD DẠNG BỘT HƯƠNG VANI 800G",
+        category="health",
+        key_features="Sữa bột dinh dưỡng hương vani",
+        pain_points="Người lớn tuổi ăn uống kém",
+        price_sale="", promotion_deal="", framework=framework)
+
+
+def test_no_price_no_fabricated_deal_all_frameworks():
+    """Ô giá trống -> mọi framework local không bịa giá/deal/freeship/quà tặng."""
+    for fw in ("pas", "hai_bua", "review_koc", "before_after", "aida"):
+        res = affiliate_engine.generate_affiliate_script_local(
+            _ensure_req_no_price(fw))
+        all_text = " | ".join(
+            (s.voiceover or "") + " " + (s.badge or "") for s in res.scenes)
+        for banned in ("99k", "89k", "Freeship", "freeship", "quà tặng",
+                       "trợ giá", "hốt sạch", "100%", "flash sale",
+                       "TIẾT KIỆM 80%", "9.5 trên 10", "5 sao"):
+            assert banned not in all_text, (fw, banned, all_text)
+        assert not any("GIÁ BỊA" in w for w in res.warnings), (fw, res.warnings)
+
+
+def test_with_real_price_keeps_price():
+    """Có giá thật -> kịch bản được nhắc giá thật (không mất ý bán hàng)."""
+    req = affiliate_engine.ProductAffiliateRequest(
+        product_name="Giá đỡ điện thoại", category="gadgets",
+        price_sale="89k", promotion_deal="Freeship đơn 0đ", framework="hai_bua")
+    res = affiliate_engine.generate_affiliate_script_local(req)
+    assert "89k" in res.scenes[3].voiceover
+    assert "Freeship" in res.scenes[3].voiceover
+    assert not any("GIÁ BỊA" in w for w in res.warnings)
+    assert res.compliance_disclaimer is None
+
+
+def test_normalize_flags_fabricated_price_when_no_price():
+    """_normalize: ô giá trống mà thoại nhắc giá/freeship -> warning GIÁ BỊA nặng."""
+    scenes = [affiliate_engine.AffiliateScene(
+        index=1, title="C1", role="proof", duration=10, prompt="Demo shot.",
+        voiceover="Đang giảm chỉ còn Chỉ 99k, lại còn Freeship đơn 0đ + Quà tặng kèm!")]
+    _, warnings = affiliate_engine._normalize_affiliate_script(
+        scenes, _ensure_req_no_price())
+    assert any("GIÁ BỊA" in w and "99k" in w for w in warnings)
+    assert any("GIÁ BỊA" in w and "freeship" in w.lower() for w in warnings)
+
+    # Có giá thật -> không gắn cờ giá; có deal thật nhưng chưa có giá ->
+    # nhắc freeship KHÔNG bị gắn cờ oan, nhắc giá vẫn bị gắn cờ.
+    req_price = _ensure_req_no_price()
+    req_price.price_sale = "850k"
+    req_price.promotion_deal = "Freeship đơn 0đ"
+    _, w2 = affiliate_engine._normalize_affiliate_script(
+        [affiliate_engine.AffiliateScene(
+            index=1, title="C1", role="proof", duration=10, prompt="Shot.",
+            voiceover="Giá hôm nay 850k, freeship đơn 0đ!")], req_price)
+    assert not any("GIÁ BỊA" in w for w in w2)
+
+    req_deal = _ensure_req_no_price()
+    req_deal.promotion_deal = "Freeship đơn 0đ"
+    _, w3 = affiliate_engine._normalize_affiliate_script(
+        [affiliate_engine.AffiliateScene(
+            index=1, title="C1", role="proof", duration=10, prompt="Shot.",
+            voiceover="Freeship đơn 0đ, giá chỉ còn 99k!")], req_deal)
+    assert not any("GIÁ BỊA" in w and "freeship" in w.lower() for w in w3)
+    assert any("GIÁ BỊA" in w and "99k" in w for w in w3)
+
+
+def test_ai_prompt_bans_price_when_empty(monkeypatch):
+    """Prompt AI: giá trống -> ghi CHƯA CÓ + lệnh cấm bịa; có giá -> đưa số thật."""
+    import json as _json
+
+    captured = {}
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            scenes = [{
+                "index": i + 1, "title": f"C{i + 1}", "role": r,
+                "duration": 10, "prompt": "Product shot.",
+                "voiceover": "Xem sản phẩm này nhé.", "badge": "XEM NGAY",
+            } for i, r in enumerate(
+                ["hook", "pain", "demo", "proof", "cta"])]
+            return {"choices": [{"message": {"content": _json.dumps(
+                {"title": "T", "scenes": scenes})}}]}
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured["payload"] = json
+            return _FakeResp()
+
+    monkeypatch.setattr(affiliate_engine.httpx, "AsyncClient", _FakeClient)
+
+    import asyncio
+    res = asyncio.run(affiliate_engine.generate_affiliate_script_ai(
+        _ensure_req_no_price(), muse_api_key="fake-key"))
+    user_content = captured["payload"]["messages"][1]["content"]
+    assert "CHƯA CÓ" in user_content
+    assert "KHÔNG được tự bịa" in user_content
+    assert "99k" not in user_content
+    assert res.compliance_disclaimer == affiliate_engine.HEALTH_DISCLAIMER
+    assert isinstance(res.warnings, list)
+
+    req_price = _ensure_req_no_price()
+    req_price.price_sale = "850k"
+    req_price.promotion_deal = "Freeship đơn 0đ"
+    asyncio.run(affiliate_engine.generate_affiliate_script_ai(
+        req_price, muse_api_key="fake-key"))
+    user_content2 = captured["payload"]["messages"][1]["content"]
+    assert "Giá khuyến mãi: 850k" in user_content2
+    assert "Ưu đãi đi kèm: Freeship đơn 0đ" in user_content2
+
+
+def test_endpoint_generate_script_returns_warnings_and_disclaimer(monkeypatch):
+    """Endpoint generate-script trả warnings + compliance_disclaimer (UI dùng)."""
+    try:
+        import app as app_module
+    except ImportError as e:
+        pytest.skip(f"không import được app (thiếu deps): {e}")
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(app_module, "MUSE_API_KEY", "")
+    with TestClient(app_module.app) as client:
+        r = client.post("/api/affiliate/generate-script", json={
+            "product_name": "COMBO 4 LON SỮA ENSURE GOLD 800G",
+            "category": "health",
+            "price_sale": "", "promotion_deal": "",
+            "key_features": "Sữa bột dinh dưỡng hương vani",
+            "pain_points": "Người lớn tuổi ăn uống kém",
+            "framework": "pas",
+        })
+        assert r.status_code == 200, r.text[:300]
+        body = r.json()
+        assert isinstance(body.get("warnings"), list)
+        assert any("khuyến cáo" in w for w in body["warnings"])
+        assert body.get("compliance_disclaimer") == affiliate_engine.HEALTH_DISCLAIMER
+        all_vo = " ".join(s.get("voiceover", "") for s in body["scenes"])
+        assert "99k" not in all_vo and "Freeship" not in all_vo
+
+
+# ── (e) Làm sạch từ khóa tìm ảnh ─────────────────────────────────────────────
+
+def test_clean_product_search_query():
+    """Bỏ COMBO/số lượng/dạng/hương/khối lượng, giữ thương hiệu + loại SP."""
+    q = affiliate_engine._clean_product_search_query(
+        "COMBO 4 LON SỮA ENSURE GOLD DẠNG BỘT HƯƠNG VANI 800G")
+    assert q == "SỮA ENSURE GOLD", q
+    assert affiliate_engine._clean_product_search_query(
+        "COMBO 2 HỘP KEM DƯỠNG DA 50G") == "KEM DƯỠNG DA"
+    # Tên ngắn không có từ đóng gói -> giữ nguyên.
+    assert affiliate_engine._clean_product_search_query(
+        "Giá đỡ điện thoại") == "Giá đỡ điện thoại"
+
+
+def test_find_images_filters_irrelevant_bing_results():
+    """Bing trả burger/xe + Ensure -> chỉ giữ Ensure, message nêu số ảnh đã loại."""
+    seen_queries = []
+
+    def _get_bing_mixed(url, **kwargs):
+        seen_queries.append(url)
+        if "bing.com" in url:
+            html = (
+                '<html><body>'
+                '&quot;murl&quot;:&quot;https://cdn.example.com/burger-combo-meal.jpg&quot;'
+                '&quot;murl&quot;:&quot;https://cdn.example.com/car-silver-van.jpg&quot;'
+                '&quot;murl&quot;:&quot;https://cdn.example.com/fries-soda.jpg&quot;'
+                '&quot;murl&quot;:&quot;https://cdn.example.com/ensure-gold-milk-800g.jpg&quot;'
+                '</body></html>'
+            )
+            return _FakeResp(200, url, html)
+        return _FakeResp(200, url, '<html><body></body></html>')
+
+    r = affiliate_engine.find_product_images(
+        "COMBO 4 LON SỮA ENSURE GOLD DẠNG BỘT HƯƠNG VANI 800G",
+        http_get=_get_bing_mixed)
+    # Query gửi đi đã làm sạch: URL Bing không còn "COMBO", còn "ENSURE".
+    bing_urls = [u for u in seen_queries if "bing.com" in u]
+    assert bing_urls and all("COMBO" not in u for u in bing_urls)
+    assert any("ENSURE" in u for u in bing_urls)
+    assert len(r["images"]) == 1
+    assert "ensure-gold-milk" in r["images"][0]["url"]
+    assert r["images"][0]["source"] == "bing"
+    assert "đã loại 3 ảnh" in r["message"]
+
+
+def test_find_images_all_web_results_filtered_returns_empty():
+    """Ảnh web toàn burger/xe -> [] + message rõ (không trả ảnh sai)."""
+    def _get_junk(url, **kwargs):
+        if "bing.com" in url:
+            html = ('<html><body>'
+                    '&quot;murl&quot;:&quot;https://cdn.example.com/burger.jpg&quot;'
+                    '&quot;murl&quot;:&quot;https://cdn.example.com/car.jpg&quot;'
+                    '</body></html>')
+            return _FakeResp(200, url, html)
+        return _FakeResp(200, url, '<html><body></body></html>')
+
+    r = affiliate_engine.find_product_images(
+        "COMBO 4 LON SỮA ENSURE GOLD 800G", http_get=_get_junk)
+    assert r["images"] == []
+    assert "không liên quan" in r["message"] or "Không tìm được" in r["message"]
