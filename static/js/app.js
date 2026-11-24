@@ -8518,7 +8518,24 @@ async function importAffiliateLink() {
     if (!r.ok) throw new Error(data.error || 'Không lấy được thông tin sản phẩm');
     if (data.product_name) {
       const nameEl = document.getElementById('affiliateProdName');
+      const prevName = nameEl?.value.trim() || '';
       if (nameEl) nameEl.value = data.product_name;
+      // Sản phẩm đổi -> nội dung của sản phẩm cũ (nỗi đau, tính năng, giá,
+      // khuyến mãi) không còn đúng; xóa để onAffiliateCategoryChange bên
+      // dưới điền lại mặc định của danh mục mới. Chỉ xóa khi tên thật sự
+      // đổi (nhập lại cùng 1 link thì giữ nguyên nội dung người dùng đã sửa).
+      if (data.fetched && prevName && prevName !== data.product_name) {
+        const painEl = document.getElementById('affiliatePain');
+        const featEl = document.getElementById('affiliateFeatures');
+        const promoEl = document.getElementById('affiliatePromotion');
+        if (painEl) painEl.value = '';
+        if (featEl) featEl.value = '';
+        if (promoEl) promoEl.value = '';
+        if (!data.price_sale) {
+          const priceEl = document.getElementById('affiliatePriceSale');
+          if (priceEl) priceEl.value = '';
+        }
+      }
     }
     if (data.category) {
       const catEl = document.getElementById('affiliateCategory');
