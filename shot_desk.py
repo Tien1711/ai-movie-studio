@@ -66,7 +66,7 @@ from composer import (
     merge_audio_with_transitions,
     QUALITY_PROFILES,
 )
-from batch_engine import generate_tts, poll_video_task, sanitize_prompt_heuristics, extract_last_frame
+from batch_engine import generate_tts_with_status, poll_video_task, sanitize_prompt_heuristics, extract_last_frame
 
 
 SHOT_DESK_DIR = (Path(__file__).parent / "workspace" / "_shot_desk_projects").resolve()
@@ -726,18 +726,43 @@ async def render_single_shot_desk(
     lip_sync = bool(shot.get("lip_sync", False) or (voice_mode == "dialogue"))
     is_ai_voice = (voice_mode in ("ai_voice", "native", "none", "no_dub"))
 
+    # Audit #8: tts_ok=True chi khi TTS lan nay thanh cong that — buoc
+    # compose chi duoc dung file audio khi co nay (file ton tai tren dia
+    # chua du, co the la tieng cu cua lan render truoc).
+    tts_ok = False
     if not is_ai_voice and voiceover:
         mode_label = "🗣️ lời thoại nhân vật (khớp môi)" if (voice_mode == "dialogue" or lip_sync) else "🎙️ giọng đọc thuyết minh"
         if progress_cb:
             progress_cb(shot_index, f"🎙️ Đang sinh {mode_label} ({voice})...")
-        try:
-            actual_audio_dur = await generate_tts(voiceover, voice, audio_out_path)
-        except Exception as e:
-            print(f"[ShotDesk] Warning TTS: {e}")
-            actual_audio_dur = total_shot_dur
+        # Dung ban _with_status de biet TTS co loi khong. TTS loi thi raise
+        # luon (theo chinh sach 4d8a563: khong tao video cam/sai tieng) —
+        # xoa file audio cu/partial/silent con sot de buoc compose khong
+        # bao gio long nham tieng cu.
+        actual_audio_dur, tts_failed, tts_error = await generate_tts_with_status(
+            voiceover, voice, audio_out_path
+        )
+        if tts_failed:
+            try:
+                os.remove(audio_out_path)
+            except OSError:
+                pass
+            await update_shot_state(project_id, shot_index, {
+                "status": "ready",
+                "error": f"TTS lỗi, không lồng được tiếng: {tts_error}",
+                "tts_failed": True,
+            })
+            raise RuntimeError(f"TTS lỗi, không lồng được tiếng: {tts_error}")
+        tts_ok = True
     else:
         if is_ai_voice and progress_cb:
             progress_cb(shot_index, "🤖 Chế độ không lồng tiếng: Sử dụng âm thanh & giọng nói gốc của AI...")
+        # Khong sinh TTS (khong co voiceover): xoa file audio cu con sot de
+        # buoc compose khong long nham tieng cua lan render truoc.
+        if not is_ai_voice:
+            try:
+                os.remove(audio_out_path)
+            except OSError:
+                pass
         actual_audio_dur = total_shot_dur
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -937,57 +962,72 @@ async def render_single_shot_desk(
             raise
 
     # Bước 3: Ghép video + audio thoại thành Clip hoàn chỉnh cho Review Desk
-    if progress_cb:
-        progress_cb(shot_index, "🎞️ Ghép hoàn thiện âm thanh & kiểm tra chất lượng...")
+    try:
+        if progress_cb:
+            progress_cb(shot_index, "🎞️ Ghép hoàn thiện âm thanh & kiểm tra chất lượng...")
 
-    if is_ai_voice:
-        # Chế độ không lồng tiếng: không đưa file lồng tiếng ngoài, compose_scene_video sẽ giữ 100% audio gốc của AI
-        scene_audio_param = None
-    else:
-        has_ext_audio = os.path.exists(audio_out_path) and os.path.getsize(audio_out_path) > 500
-        scene_audio_param = audio_out_path if has_ext_audio else None
+        if is_ai_voice:
+            # Chế độ không lồng tiếng: không đưa file lồng tiếng ngoài, compose_scene_video sẽ giữ 100% audio gốc của AI
+            scene_audio_param = None
+        else:
+            # Audit #8: chi dung file audio khi TTS lan nay thanh cong that.
+            # File ton tai tren dia chua du — co the la tieng cu cua lan render
+            # truoc neu TTS lan nay loi hoac khong chay.
+            has_ext_audio = tts_ok and os.path.exists(audio_out_path) and os.path.getsize(audio_out_path) > 500
+            scene_audio_param = audio_out_path if has_ext_audio else None
 
-    compose_scene_video(
-        scene_video=video_source_path,
-        scene_audio=scene_audio_param,
-        output=final_clip_out,
-        audio_duration=float(actual_audio_dur),
-        target_duration=float(total_shot_dur),
-        quality="720p",
-        aspect_ratio=aspect_ratio,
-    )
+        compose_scene_video(
+            scene_video=video_source_path,
+            scene_audio=scene_audio_param,
+            output=final_clip_out,
+            audio_duration=float(actual_audio_dur),
+            target_duration=float(total_shot_dur),
+            quality="720p",
+            aspect_ratio=aspect_ratio,
+        )
 
-    # Nếu ở chế độ AI Voice: trích xuất audio stream từ clip video để hiển thị player trên Review Desk
-    if is_ai_voice and check_video_has_audio(video_source_path):
-        try:
-            subprocess.run([
-                FFMPEG, "-y", "-i", video_source_path,
-                "-vn", "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2",
-                audio_out_path
-            ], capture_output=True, check=True)
-        except Exception as e:
-            print(f"[ShotDesk] Warning extracting native AI audio: {e}")
+        # Nếu ở chế độ AI Voice: trích xuất audio stream từ clip video để hiển thị player trên Review Desk
+        if is_ai_voice and check_video_has_audio(video_source_path):
+            try:
+                subprocess.run([
+                    FFMPEG, "-y", "-i", video_source_path,
+                    "-vn", "-c:a", "libmp3lame", "-ar", "44100", "-ac", "2",
+                    audio_out_path
+                ], capture_output=True, check=True)
+            except Exception as e:
+                print(f"[ShotDesk] Warning extracting native AI audio: {e}")
 
-    has_audio = os.path.exists(audio_out_path) and os.path.getsize(audio_out_path) > 500
-    shot_updates = {
-        "status": "review",
-        "error": None,
-        "video_url": f"/api/shot-desk/projects/{project_id}/shots/{shot_index}/video",
-        "audio_url": f"/api/shot-desk/projects/{project_id}/shots/{shot_index}/audio" if has_audio else None,
-        "audit": {
-            "character_check": "Khớp Character Block",
-            "aspect_ratio_check": aspect_ratio,
-            "watermark_clean": True,
-            "continuity_note": shot.get("transition_note", "Sẵn sàng cho timeline")
+        has_audio = os.path.exists(audio_out_path) and os.path.getsize(audio_out_path) > 500
+        shot_updates = {
+            "status": "review",
+            "error": None,
+            "video_url": f"/api/shot-desk/projects/{project_id}/shots/{shot_index}/video",
+            "audio_url": f"/api/shot-desk/projects/{project_id}/shots/{shot_index}/audio" if has_audio else None,
+            "audit": {
+                "character_check": "Khớp Character Block",
+                "aspect_ratio_check": aspect_ratio,
+                "watermark_clean": True,
+                "continuity_note": shot.get("transition_note", "Sẵn sàng cho timeline")
+            }
         }
-    }
-    await update_shot_state(project_id, shot_index, shot_updates)
-    shot.update(shot_updates)
+        await update_shot_state(project_id, shot_index, shot_updates)
+        shot.update(shot_updates)
 
-    if progress_cb:
-        progress_cb(shot_index, "✅ Hoàn tất! Sẵn sàng cho Review Desk duyệt.")
+        if progress_cb:
+            progress_cb(shot_index, "✅ Hoàn tất! Sẵn sàng cho Review Desk duyệt.")
 
-    return shot
+        return shot
+    except Exception as exc:
+        # Audit #9: bat ky loi nao o buoc 3 tro di cung phai dua shot ve
+        # ready kem error, khong de ket vinh vien o "rendering".
+        try:
+            await update_shot_state(project_id, shot_index, {
+                "status": "ready",
+                "error": str(exc),
+            })
+        except Exception:
+            pass
+        raise
 
 
 # ── 3. Review Desk: Duyệt & Chỉnh Sửa Shot ───────────────────────────────────
@@ -1424,216 +1464,215 @@ def compose_shot_desk_timeline(
     ts = int(time.time())
     final_dir = proj_dir / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir = proj_dir / "_timeline_tmp"
+    tmp_dir = proj_dir / f"_timeline_tmp_{ts}_{uuid.uuid4().hex[:8]}"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Thu thập danh sách clip của các shot đã duyệt
-    valid_shots = []
-    valid_clips = []
-    clip_durations = []
-    srt_entries = []
-    missing_clips = []
-
-    for s in approved_shots:
-        idx = s["index"]
-        clip_file = proj_dir / "clips" / f"shot_{idx:03d}_clip.mp4"
-        if not clip_file.exists():
-            missing_clips.append(idx)
-            continue
-        valid_shots.append(s)
-        valid_clips.append(str(clip_file))
-        dur = get_media_duration(str(clip_file))
-        clip_durations.append(dur)
-
-        srt_entries.append({
-            "index": idx,
-            "voiceover": s.get("voiceover", ""),
-            "duration": dur,
-            "clip_path": str(clip_file),
-        })
-
-    # Nếu xuất phim hoàn chỉnh (allow_partial=False), bắt buộc tất cả shot đã duyệt phải có file clip MP4 hợp lệ
-    if missing_clips and not allow_partial:
-        raise ValueError(
-            f"Không thể xuất phim hoàn chỉnh: Còn {len(missing_clips)} shot đã duyệt nhưng chưa có file video MP4 trên đĩa (Shot {missing_clips}). "
-            "Vui lòng render lại các shot này hoặc bật tùy chọn 'Bản nháp (Allow partial)' để xuất phim nháp."
-        )
-
-    if not valid_clips:
-        raise ValueError("Không tìm thấy file clip MP4 nào cho các shot đã duyệt!")
-
-    # Xác định chuyển cảnh chính xác giữa từng cặp cảnh kế tiếp (ưu tiên transition_out của cảnh trước)
-    def resolve_shot_transition(from_shot: Dict, to_shot: Dict) -> str:
-        t_out = from_shot.get("transition_out")
-        if t_out and str(t_out).strip().lower() not in ("", "none", "null"):
-            return str(t_out).strip()
-        t_note_prev = from_shot.get("transition_note")
-        if t_note_prev and str(t_note_prev).strip().lower() not in ("", "none", "null"):
-            return str(t_note_prev).strip()
-        t_in = to_shot.get("transition_in")
-        if t_in and str(t_in).strip().lower() not in ("", "none", "null"):
-            return str(t_in).strip()
-        t_note_next = to_shot.get("transition_note")
-        if t_note_next and str(t_note_next).strip().lower() not in ("", "none", "null"):
-            return str(t_note_next).strip()
-        return "dissolve"
-
-    transitions = [
-        resolve_shot_transition(valid_shots[i], valid_shots[i + 1])
-        for i in range(len(valid_shots) - 1)
-    ]
-    timeline_offsets = compute_timeline_offsets(valid_clips, transitions, sound_bridge_duration)
-
-    if progress_cb:
-        progress_cb(5, "Đang khởi tạo phụ đề SRT đồng bộ chính xác với audio...")
-
-    # 2. Tạo phụ đề SRT đồng bộ: Tự động phát hiện chính xác thời điểm có tiếng mới hiện phụ đề
-    # ── 2 PHỤ ĐỀ (fix 2026-11-09, cùng lỗi như compose_full_movie) ─────────
-    # burn_in: SRT chỉ là file trung gian để khắc → ghi vào tmp_dir, KHÔNG để
-    # cạnh mp4 trong final/ (trình phát tự nạp phụ đề cùng tên sẽ hiện 2 lớp).
-    # srt_only: SRT là sản phẩm chính → giữ trong final/. none: không tạo SRT.
-    slug = to_slug(proj.get("title", "movie"))
-    srt_filename = f"{slug}_{ts}_phude.srt" if subtitle_mode == "burn_in" else f"{slug}_{ts}.srt"
-    srt_path = (tmp_dir / srt_filename) if subtitle_mode == "burn_in" else (final_dir / srt_filename)
-    if subtitle_mode != "none":
-        create_srt(
-            srt_entries,
-            str(srt_path),
-            clip_durations=clip_durations,
-            media_paths=valid_clips,
-            timeline_offsets=timeline_offsets,
-        )
-
-    # 3. Quản lý & Trộn âm thanh SFX / Ambience thật
-    sfx_clips = []
-    has_any_sfx = False
-    custom_sfx_dir = str(proj_dir / "sfx") if (proj_dir / "sfx").exists() else None
-
-    for idx, s in enumerate(valid_shots):
-        dur = clip_durations[idx]
-        sfx_tag = s.get("sfx") or s.get("sound_effects") or s.get("ambience") or detect_sfx_from_text(s.get("prompt", "") + " " + s.get("voiceover", ""))
-        shot_sfx_path = tmp_dir / f"shot_{s['index']:03d}_sfx.mp3"
-        tag_to_use = sfx_tag or "ambience"
-        has_any_sfx = True
-        generate_sfx_audio(tag_to_use, dur, str(shot_sfx_path), custom_sfx_dir=custom_sfx_dir)
-        sfx_clips.append(str(shot_sfx_path))
-
-    master_sfx_path = None
-    if has_any_sfx:
-        master_sfx_path = str(tmp_dir / f"master_sfx_{ts}.mp3")
-        try:
-            merge_audio_with_transitions(
-                audio_clips=sfx_clips,
-                transitions=transitions,
-                sound_bridge_duration=sound_bridge_duration,
-                output_path=master_sfx_path,
-            )
-        except Exception as e:
-            print(f"[ShotDesk SFX Warning] Lỗi ghép SFX timeline: {e}")
-            master_sfx_path = None
-
-    # 4. Ghép clips với Sound Bridge (acrossfade) và Chuyển cảnh (Transitions) thực tế
-    merged_video = tmp_dir / f"merged_{ts}.mp4"
-
-    merge_clips_advanced(
-        clips=valid_clips,
-        transitions=transitions,
-        sound_bridge_duration=sound_bridge_duration,
-        output_path=str(merged_video),
-        quality=quality,
-        aspect_ratio=proj.get("aspect_ratio", "9:16"),
-        progress_cb=progress_cb
-    )
-
-    # 5. Phụ đề Burn-in (nếu bật)
-    video_to_bgm = str(merged_video)
-    if subtitle_mode == "burn_in":
-        if progress_cb:
-            progress_cb(65, "Bắt đầu khắc phụ đề điện ảnh chuẩn đáy...")
-        with_sub = tmp_dir / f"with_sub_{ts}.mp4"
-        q_str = (quality or "720p").lower()
-        sub_font_size = 20 if q_str == "720p" else 24 if q_str == "1080p" else 32 if q_str == "4k" else 16
-        burn_subtitles(
-            str(merged_video),
-            str(srt_path),
-            str(with_sub),
-            font_size=sub_font_size,
-            progress_cb=progress_cb,
-            total_duration=sum(clip_durations) if clip_durations else None
-        )
-        video_to_bgm = str(with_sub)
-
-    # 6. Hòa âm đa tầng (Thoại + SFX + BGM) & Áp dụng Profile Quality (draft, 720p, 1080p, 4k)
-    if progress_cb:
-        progress_cb(90, f"Đang hòa âm đa tầng (SFX + BGM) & Render chất lượng {quality}...")
-
-    final_mp4_name = f"{slug}_{ts}.mp4"
-    final_mp4_path = final_dir / final_mp4_name
-
-    active_bgm = validated_bgm
-    active_bgm_str = str(active_bgm) if active_bgm is not None else None
-
-    mix_multitrack_timeline(
-        video_path=video_to_bgm,
-        music_path=active_bgm_str,
-        sfx_path=master_sfx_path,
-        output_path=str(final_mp4_path),
-        voice_volume=voice_volume,
-        music_volume=music_volume,
-        sfx_volume=0.4 if has_any_sfx else 0.0,
-        fade_duration=1.5,
-        quality=quality,
-        aspect_ratio=proj.get("aspect_ratio", "9:16"),
-    )
-
-    total_movie_duration = get_media_duration(str(final_mp4_path))
-
-    # Dọn dẹp toàn bộ file tạm của lần dựng này trong tmp_dir để tránh phình dung lượng đĩa
     try:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-    except Exception:
-        pass
 
-    # Cập nhật trạng thái project — compose chạy lâu nên project trên đĩa có
-    # thể đã đổi (render/approve song song). Đọc lại dưới per-project lock
-    # rồi mới merge kết quả, tránh ghi đè mất update của luồng khác.
-    # TODO: nếu project bị xóa giữa chừng thì latest=None -> giữ proj cũ.
-    with get_sync_project_lock(project_id):
-        latest = get_shot_desk_project(project_id) or proj
-        latest["final_video"] = f"/api/shot-desk/projects/{project_id}/final-video/{final_mp4_name}"
-        # Chỉ "srt_only" mới có file SRT trong final/ để tải (burn_in đã khắc
-        # vào video, SRT chỉ nằm trong tmp; "none" thì không có SRT) — tránh
-        # trình phát tự nạp phụ đề chồng lên chữ đã khắc.
-        latest["srt_file"] = (
-            f"/api/shot-desk/projects/{project_id}/subtitles/{srt_filename}"
-            if subtitle_mode == "srt_only" else None
+        # 1. Thu thập danh sách clip của các shot đã duyệt
+        valid_shots = []
+        valid_clips = []
+        clip_durations = []
+        srt_entries = []
+        missing_clips = []
+
+        for s in approved_shots:
+            idx = s["index"]
+            clip_file = proj_dir / "clips" / f"shot_{idx:03d}_clip.mp4"
+            if not clip_file.exists():
+                missing_clips.append(idx)
+                continue
+            valid_shots.append(s)
+            valid_clips.append(str(clip_file))
+            dur = get_media_duration(str(clip_file))
+            clip_durations.append(dur)
+
+            srt_entries.append({
+                "index": idx,
+                "voiceover": s.get("voiceover", ""),
+                "duration": dur,
+                "clip_path": str(clip_file),
+            })
+
+        # Nếu xuất phim hoàn chỉnh (allow_partial=False), bắt buộc tất cả shot đã duyệt phải có file clip MP4 hợp lệ
+        if missing_clips and not allow_partial:
+            raise ValueError(
+                f"Không thể xuất phim hoàn chỉnh: Còn {len(missing_clips)} shot đã duyệt nhưng chưa có file video MP4 trên đĩa (Shot {missing_clips}). "
+                "Vui lòng render lại các shot này hoặc bật tùy chọn 'Bản nháp (Allow partial)' để xuất phim nháp."
+            )
+
+        if not valid_clips:
+            raise ValueError("Không tìm thấy file clip MP4 nào cho các shot đã duyệt!")
+
+        # Xác định chuyển cảnh chính xác giữa từng cặp cảnh kế tiếp (ưu tiên transition_out của cảnh trước)
+        def resolve_shot_transition(from_shot: Dict, to_shot: Dict) -> str:
+            t_out = from_shot.get("transition_out")
+            if t_out and str(t_out).strip().lower() not in ("", "none", "null"):
+                return str(t_out).strip()
+            t_note_prev = from_shot.get("transition_note")
+            if t_note_prev and str(t_note_prev).strip().lower() not in ("", "none", "null"):
+                return str(t_note_prev).strip()
+            t_in = to_shot.get("transition_in")
+            if t_in and str(t_in).strip().lower() not in ("", "none", "null"):
+                return str(t_in).strip()
+            t_note_next = to_shot.get("transition_note")
+            if t_note_next and str(t_note_next).strip().lower() not in ("", "none", "null"):
+                return str(t_note_next).strip()
+            return "dissolve"
+
+        transitions = [
+            resolve_shot_transition(valid_shots[i], valid_shots[i + 1])
+            for i in range(len(valid_shots) - 1)
+        ]
+        timeline_offsets = compute_timeline_offsets(valid_clips, transitions, sound_bridge_duration)
+
+        if progress_cb:
+            progress_cb(5, "Đang khởi tạo phụ đề SRT đồng bộ chính xác với audio...")
+
+        # 2. Tạo phụ đề SRT đồng bộ: Tự động phát hiện chính xác thời điểm có tiếng mới hiện phụ đề
+        # ── 2 PHỤ ĐỀ (fix 2026-11-09, cùng lỗi như compose_full_movie) ─────────
+        # burn_in: SRT chỉ là file trung gian để khắc → ghi vào tmp_dir, KHÔNG để
+        # cạnh mp4 trong final/ (trình phát tự nạp phụ đề cùng tên sẽ hiện 2 lớp).
+        # srt_only: SRT là sản phẩm chính → giữ trong final/. none: không tạo SRT.
+        slug = to_slug(proj.get("title", "movie"))
+        srt_filename = f"{slug}_{ts}_phude.srt" if subtitle_mode == "burn_in" else f"{slug}_{ts}.srt"
+        srt_path = (tmp_dir / srt_filename) if subtitle_mode == "burn_in" else (final_dir / srt_filename)
+        if subtitle_mode != "none":
+            create_srt(
+                srt_entries,
+                str(srt_path),
+                clip_durations=clip_durations,
+                media_paths=valid_clips,
+                timeline_offsets=timeline_offsets,
+            )
+
+        # 3. Quản lý & Trộn âm thanh SFX / Ambience thật
+        sfx_clips = []
+        has_any_sfx = False
+        custom_sfx_dir = str(proj_dir / "sfx") if (proj_dir / "sfx").exists() else None
+
+        for idx, s in enumerate(valid_shots):
+            dur = clip_durations[idx]
+            sfx_tag = s.get("sfx") or s.get("sound_effects") or s.get("ambience") or detect_sfx_from_text(s.get("prompt", "") + " " + s.get("voiceover", ""))
+            shot_sfx_path = tmp_dir / f"shot_{s['index']:03d}_sfx.mp3"
+            tag_to_use = sfx_tag or "ambience"
+            has_any_sfx = True
+            generate_sfx_audio(tag_to_use, dur, str(shot_sfx_path), custom_sfx_dir=custom_sfx_dir)
+            sfx_clips.append(str(shot_sfx_path))
+
+        master_sfx_path = None
+        if has_any_sfx:
+            master_sfx_path = str(tmp_dir / f"master_sfx_{ts}.mp3")
+            try:
+                merge_audio_with_transitions(
+                    audio_clips=sfx_clips,
+                    transitions=transitions,
+                    sound_bridge_duration=sound_bridge_duration,
+                    output_path=master_sfx_path,
+                )
+            except Exception as e:
+                print(f"[ShotDesk SFX Warning] Lỗi ghép SFX timeline: {e}")
+                master_sfx_path = None
+
+        # 4. Ghép clips với Sound Bridge (acrossfade) và Chuyển cảnh (Transitions) thực tế
+        merged_video = tmp_dir / f"merged_{ts}.mp4"
+
+        merge_clips_advanced(
+            clips=valid_clips,
+            transitions=transitions,
+            sound_bridge_duration=sound_bridge_duration,
+            output_path=str(merged_video),
+            quality=quality,
+            aspect_ratio=proj.get("aspect_ratio", "9:16"),
+            progress_cb=progress_cb
         )
-        latest.setdefault("timeline_settings", {}).update({
-            "music_volume": music_volume,
-            "voice_volume": voice_volume,
-            "bg_music_path": str(active_bgm) if active_bgm is not None else None,
-            "subtitle_mode": subtitle_mode,
-            "export_quality": quality
-        })
-        done_indices = {s["index"] for s in valid_shots}
-        for s in latest.get("shots", []):
-            if s.get("index") in done_indices:
-                s["status"] = "done"
-        save_shot_desk_project(latest)
-        proj = latest
 
-    if progress_cb:
-        progress_cb(100, "🎉 Dựng phim hoàn tất 100%!")
+        # 5. Phụ đề Burn-in (nếu bật)
+        video_to_bgm = str(merged_video)
+        if subtitle_mode == "burn_in":
+            if progress_cb:
+                progress_cb(65, "Bắt đầu khắc phụ đề điện ảnh chuẩn đáy...")
+            with_sub = tmp_dir / f"with_sub_{ts}.mp4"
+            q_str = (quality or "720p").lower()
+            sub_font_size = 20 if q_str == "720p" else 24 if q_str == "1080p" else 32 if q_str == "4k" else 16
+            burn_subtitles(
+                str(merged_video),
+                str(srt_path),
+                str(with_sub),
+                font_size=sub_font_size,
+                progress_cb=progress_cb,
+                total_duration=sum(clip_durations) if clip_durations else None
+            )
+            video_to_bgm = str(with_sub)
 
-    return {
-        "success": True,
-        "project_id": project_id,
-        "final_video": proj["final_video"],
-        "srt_file": proj["srt_file"],
-        "duration": round(total_movie_duration, 2),
-        "shots_count": len(valid_shots),
-        "final_dir": str(final_dir.resolve()),
-    }
+        # 6. Hòa âm đa tầng (Thoại + SFX + BGM) & Áp dụng Profile Quality (draft, 720p, 1080p, 4k)
+        if progress_cb:
+            progress_cb(90, f"Đang hòa âm đa tầng (SFX + BGM) & Render chất lượng {quality}...")
+
+        final_mp4_name = f"{slug}_{ts}.mp4"
+        final_mp4_path = final_dir / final_mp4_name
+
+        active_bgm = validated_bgm
+        active_bgm_str = str(active_bgm) if active_bgm is not None else None
+
+        mix_multitrack_timeline(
+            video_path=video_to_bgm,
+            music_path=active_bgm_str,
+            sfx_path=master_sfx_path,
+            output_path=str(final_mp4_path),
+            voice_volume=voice_volume,
+            music_volume=music_volume,
+            sfx_volume=0.4 if has_any_sfx else 0.0,
+            fade_duration=1.5,
+            quality=quality,
+            aspect_ratio=proj.get("aspect_ratio", "9:16"),
+        )
+
+        total_movie_duration = get_media_duration(str(final_mp4_path))
+
+        # Cập nhật trạng thái project — compose chạy lâu nên project trên đĩa có
+        # thể đã đổi (render/approve song song). Đọc lại dưới per-project lock
+        # rồi mới merge kết quả, tránh ghi đè mất update của luồng khác.
+        # TODO: nếu project bị xóa giữa chừng thì latest=None -> giữ proj cũ.
+        with get_sync_project_lock(project_id):
+            latest = get_shot_desk_project(project_id) or proj
+            latest["final_video"] = f"/api/shot-desk/projects/{project_id}/final-video/{final_mp4_name}"
+            # Chỉ "srt_only" mới có file SRT trong final/ để tải (burn_in đã khắc
+            # vào video, SRT chỉ nằm trong tmp; "none" thì không có SRT) — tránh
+            # trình phát tự nạp phụ đề chồng lên chữ đã khắc.
+            latest["srt_file"] = (
+                f"/api/shot-desk/projects/{project_id}/subtitles/{srt_filename}"
+                if subtitle_mode == "srt_only" else None
+            )
+            latest.setdefault("timeline_settings", {}).update({
+                "music_volume": music_volume,
+                "voice_volume": voice_volume,
+                "bg_music_path": str(active_bgm) if active_bgm is not None else None,
+                "subtitle_mode": subtitle_mode,
+                "export_quality": quality
+            })
+            done_indices = {s["index"] for s in valid_shots}
+            for s in latest.get("shots", []):
+                if s.get("index") in done_indices:
+                    s["status"] = "done"
+            save_shot_desk_project(latest)
+            proj = latest
+
+        if progress_cb:
+            progress_cb(100, "🎉 Dựng phim hoàn tất 100%!")
+
+        return {
+            "success": True,
+            "project_id": project_id,
+            "final_video": proj["final_video"],
+            "srt_file": proj["srt_file"],
+            "duration": round(total_movie_duration, 2),
+            "shots_count": len(valid_shots),
+            "final_dir": str(final_dir.resolve()),
+        }
+    finally:
+        # Audit #10: don tmp du thanh cong hay loi (ban cu chi don
+        # duong thanh cong nen moi lan loi la hang tram MB ton dong).
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ── 5. Xuất Gói ZIP Cập Nhật Dự Án ───────────────────────────────────────────
