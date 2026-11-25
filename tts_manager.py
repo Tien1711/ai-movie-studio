@@ -448,13 +448,37 @@ EDGE_VOICES_CONFIG = [
 ]
 
 
-async def synthesize_edge_tts(text: str, voice: str, output_path: str) -> float:
-    """Sinh audio bằng edge_tts không đồng bộ."""
+def _tts_timeout_for(text: str) -> float:
+    """Timeout cho 1 lan goi engine TTS, tinh theo do dai text (audit #7).
+
+    Toi thieu 60s; text dai thi them 1s cho moi 5 ky tu (toc do noi ~15 ky
+    tu/s, tru hao gap 3 lan). Day la tran tren cho moi lan goi engine —
+    khong bao gio de mot lan goi treo vinh vien.
+    """
+    return max(60.0, len((text or "").strip()) / 5.0)
+
+
+def _err_str(exc: BaseException) -> str:
+    """Chuoi loi doc duoc ke ca khi str(exc) rong (vd TimeoutError)."""
+    return str(exc) or type(exc).__name__
+
+
+async def synthesize_edge_tts(text: str, voice: str, output_path: str,
+                              timeout: Optional[float] = None) -> float:
+    """Sinh audio bằng edge_tts không đồng bộ.
+
+    timeout: tran cho lan goi save() (mac dinh _tts_timeout_for(text));
+    het timeout thi raise TimeoutError de caller fallback / ghi tts_failed
+    thay vi ket vinh vien (audit #7).
+    """
     import edge_tts
     clean_text = text.strip()
     estimated_dur = max(2.0, len(clean_text) / 15.0)
     communicate = edge_tts.Communicate(clean_text, voice)
-    await communicate.save(output_path)
+    await asyncio.wait_for(
+        communicate.save(output_path),
+        timeout=timeout if timeout is not None else _tts_timeout_for(clean_text),
+    )
     actual_dur = await asyncio.to_thread(get_media_duration, output_path)
     return actual_dur if actual_dur and actual_dur > 0.3 else estimated_dur
 
@@ -554,12 +578,16 @@ async def synthesize_voice(
     instruct: Optional[str] = None,
     speed: float = 1.0,
     allow_silent_fallback: bool = True,
+    timeout: Optional[float] = None,
 ) -> float:
     """
     Hàm phân phối TTS duy nhất cho toàn bộ hệ thống AI Movie Studio.
     Hỗ trợ VieNeu-TTS, OmniVoice, Edge-TTS, AI Native Voice, tự động fallback an toàn.
     Khi allow_silent_fallback=False (dùng bởi generate_tts_with_status), hàm sẽ raise
     RuntimeError khi mọi engine thật đều lỗi để caller ghi nhận tts_failed và không lưu cache câm.
+    timeout: tran cho MOI lan goi engine (mac dinh _tts_timeout_for(text));
+    het timeout thi lan goi do raise TimeoutError va chuyen sang engine
+    fallback ke tiep thay vi ket vinh vien (audit #7).
     """
     clean_text = text.strip()
     if not clean_text or voice in ("ai_voice", "native", "none", "no_dub"):
@@ -567,17 +595,24 @@ async def synthesize_voice(
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     estimated_dur = max(2.0, len(clean_text) / 15.0)
+    # Audit #7: moi lan goi engine deu co tran rieng (VieNeu/Omni chay qua
+    # to_thread cung vay — wait_for huy phan await, thread cu keo dai
+    # them chut nhung job khong ket).
+    attempt_timeout = timeout if timeout is not None else _tts_timeout_for(clean_text)
 
     # 1. Dispatch VieNeu-TTS
     if voice.startswith("vieneu:"):
         try:
-            dur = await asyncio.to_thread(
-                VieNeuEngine.synthesize,
-                text=clean_text,
-                voice_key=voice,
-                output_path=output_path,
-                ref_audio=ref_audio,
-                speed=speed,
+            dur = await asyncio.wait_for(
+                asyncio.to_thread(
+                    VieNeuEngine.synthesize,
+                    text=clean_text,
+                    voice_key=voice,
+                    output_path=output_path,
+                    ref_audio=ref_audio,
+                    speed=speed,
+                ),
+                timeout=attempt_timeout,
             )
             if dur and dur > 0.2:
                 return dur
@@ -588,27 +623,30 @@ async def synthesize_voice(
             # Suy luận giới tính bằng token (không substring "nam" thô — §1.17).
             fb_voice = "vi-VN-NamMinhNeural" if _is_male_voice(voice) else "vi-VN-HoaiMyNeural"
             try:
-                dur2 = await synthesize_edge_tts(clean_text, fb_voice, output_path)
+                dur2 = await synthesize_edge_tts(clean_text, fb_voice, output_path, timeout=attempt_timeout)
                 if dur2 and dur2 > 0.2:
                     return dur2
                 raise RuntimeError("Edge-TTS fallback trả về thời lượng audio rỗng")
             except Exception as e2:
                 if not allow_silent_fallback:
-                    raise RuntimeError(f"VieNeu ({e}) và Edge-TTS fallback ({e2}) đều thất bại") from e2
+                    raise RuntimeError(f"VieNeu ({_err_str(e)}) và Edge-TTS fallback ({_err_str(e2)}) đều thất bại") from e2
                 logger.error(f"[TTS Fallback Error] {e2}. Creating silent audio.")
                 return await _silent_fallback_or_raise(output_path, estimated_dur)
 
     # 2. Dispatch OmniVoice
     elif voice.startswith("omnivoice:"):
         try:
-            dur = await asyncio.to_thread(
-                OmniVoiceEngine.synthesize,
-                text=clean_text,
-                voice_key=voice,
-                output_path=output_path,
-                ref_audio=ref_audio,
-                instruct=instruct,
-                speed=speed,
+            dur = await asyncio.wait_for(
+                asyncio.to_thread(
+                    OmniVoiceEngine.synthesize,
+                    text=clean_text,
+                    voice_key=voice,
+                    output_path=output_path,
+                    ref_audio=ref_audio,
+                    instruct=instruct,
+                    speed=speed,
+                ),
+                timeout=attempt_timeout,
             )
             if dur and dur > 0.2:
                 return dur
@@ -618,12 +656,15 @@ async def synthesize_voice(
             # Thử fallback sang VieNeu trước
             try:
                 fb_vieneu = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
-                dur_vn = await asyncio.to_thread(
-                    VieNeuEngine.synthesize,
-                    text=clean_text,
-                    voice_key=fb_vieneu,
-                    output_path=output_path,
-                    speed=speed,
+                dur_vn = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        VieNeuEngine.synthesize,
+                        text=clean_text,
+                        voice_key=fb_vieneu,
+                        output_path=output_path,
+                        speed=speed,
+                    ),
+                    timeout=attempt_timeout,
                 )
                 if dur_vn and dur_vn > 0.2:
                     return dur_vn
@@ -631,20 +672,20 @@ async def synthesize_voice(
             except Exception:
                 try:
                     fb_voice = "vi-VN-NamMinhNeural" if _is_male_voice(voice) else "vi-VN-HoaiMyNeural"
-                    dur_ed = await synthesize_edge_tts(clean_text, fb_voice, output_path)
+                    dur_ed = await synthesize_edge_tts(clean_text, fb_voice, output_path, timeout=attempt_timeout)
                     if dur_ed and dur_ed > 0.2:
                         return dur_ed
                     raise RuntimeError("Edge-TTS fallback trả về thời lượng audio rỗng")
                 except Exception as e3:
                     if not allow_silent_fallback:
-                        raise RuntimeError(f"OmniVoice ({e}) và fallback ({e3}) đều thất bại") from e3
+                        raise RuntimeError(f"OmniVoice ({_err_str(e)}) và fallback ({_err_str(e3)}) đều thất bại") from e3
                     logger.error(f"[TTS Fallback Error] {e3}. Creating silent audio.")
                     return await _silent_fallback_or_raise(output_path, estimated_dur)
 
     # 3. Dispatch Edge-TTS
     else:
         try:
-            dur = await synthesize_edge_tts(clean_text, voice, output_path)
+            dur = await synthesize_edge_tts(clean_text, voice, output_path, timeout=attempt_timeout)
             if dur and dur > 0.2:
                 return dur
             raise RuntimeError("Edge-TTS trả về thời lượng audio rỗng")
@@ -654,17 +695,20 @@ async def synthesize_voice(
                 # Nếu là tiếng Việt thì fallback sang VieNeu
                 if voice.startswith("vi"):
                     fb_vn = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
-                    dur_vn = await asyncio.to_thread(
-                        VieNeuEngine.synthesize,
-                        text=clean_text,
-                        voice_key=fb_vn,
-                        output_path=output_path,
-                        speed=speed,
+                    dur_vn = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            VieNeuEngine.synthesize,
+                            text=clean_text,
+                            voice_key=fb_vn,
+                            output_path=output_path,
+                            speed=speed,
+                        ),
+                        timeout=attempt_timeout,
                     )
                     if dur_vn and dur_vn > 0.2:
                         return dur_vn
             except Exception:
                 pass
             if not allow_silent_fallback:
-                raise RuntimeError(f"Edge-TTS thất bại cho giọng '{voice}': {e}") from e
+                raise RuntimeError(f"Edge-TTS thất bại cho giọng '{voice}': {_err_str(e)}") from e
             return await _silent_fallback_or_raise(output_path, estimated_dur)

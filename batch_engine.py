@@ -327,7 +327,8 @@ def _tts_cache_store(cache_path: Path, src_path: str) -> None:
         print(f"[TTS Cache] Lưu cache thất bại (bỏ qua): {exc}")
 
 
-async def generate_tts_with_status(text: str, voice: str, output_path: str):
+async def generate_tts_with_status(text: str, voice: str, output_path: str,
+                                   timeout: Optional[float] = None):
     """
     Như generate_tts nhưng trả thêm trạng thái lỗi:
     (duration, tts_failed, tts_error).
@@ -338,10 +339,16 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str):
     - Vẫn GIỮ fallback im lặng để không gián đoạn việc sinh video.
     Cache: text+voice trùng hash thì trả file cache, không gọi lại provider
     (không cache text rỗng, voice đặc biệt, hay audio fallback im lặng).
+    - timeout: tran tong cho toan bo buoc TTS (mac dinh
+      max(180, len(text)/5*2) giay); het timeout thi tra tts_failed=True
+      thay vi ket vinh vien (audit #7).
     """
     try:
         from tts_manager import synthesize_voice
         clean = (text or "").strip()
+        # Audit #7: tran tong cho ca chuoi fallback engine — lon hon timeout
+        # tung lan goi engine de chuoi VieNeu -> Edge van co co hoi chay het.
+        step_timeout = timeout if timeout is not None else max(180.0, len(clean) / 5.0 * 2)
         use_cache = bool(clean) and voice not in ("ai_voice", "native", "none", "no_dub")
         cache_path = None
         if use_cache:
@@ -362,15 +369,21 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str):
                     return dur, False, ""
                 return max(2.0, len(clean) / 15.0), False, ""
         try:
-            dur = await synthesize_voice(
-                text=text,
-                voice=voice,
-                output_path=output_path,
-                allow_silent_fallback=False,
+            dur = await asyncio.wait_for(
+                synthesize_voice(
+                    text=text,
+                    voice=voice,
+                    output_path=output_path,
+                    allow_silent_fallback=False,
+                ),
+                timeout=step_timeout,
             )
         except TypeError:
             # Tương thích các hàm mock trong unit test chỉ khai báo (text, voice, output_path)
-            dur = await synthesize_voice(text=text, voice=voice, output_path=output_path)
+            dur = await asyncio.wait_for(
+                synthesize_voice(text=text, voice=voice, output_path=output_path),
+                timeout=step_timeout,
+            )
         if use_cache and cache_path is not None and dur and dur > 0:
             try:
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
@@ -385,7 +398,9 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str):
                 pass
         return dur, False, ""
     except Exception as e:
-        err = str(e)
+        # TimeoutError (va mot so exception khac) co the co str() rong —
+        # ghi lai ten loai loi de Monitor/log khong hien "Loi ()" trong.
+        err = str(e) or type(e).__name__
         print(f"[TTS Fallback] Lỗi tts_manager ({err}), đang tạo audio dự phòng...")
         estimated_dur = max(2.0, len((text or "").strip()) / 15.0)
         try:
@@ -1528,7 +1543,30 @@ async def process_scene(
                                 )
                             tts_s = time.monotonic() - _retry_t0
                     else:
-                        audio_duration, tts_failed, tts_error = await tts_task
+                        # Audit #7: tran cho viec doi tts_task — bang tong
+                        # tran cua tung segment (moi segment da co tran rieng
+                        # trong generate_tts_with_status) + 120s du phong.
+                        _n_seg = len(voice_segments) if voice_segments else 1
+                        _tts_text_len = (
+                            sum(len(s.get("text", "")) for s in voice_segments)
+                            if voice_segments else len(voiceover or "")
+                        )
+                        _tts_await_timeout = max(
+                            300.0, _n_seg * 180.0 + _tts_text_len / 5.0 * 2 + 120.0
+                        )
+                        try:
+                            audio_duration, tts_failed, tts_error = await asyncio.wait_for(
+                                tts_task, timeout=_tts_await_timeout
+                            )
+                        except (asyncio.TimeoutError, TimeoutError):
+                            # TTS qua lau (vuot ca tran trong
+                            # generate_tts_with_status): huy task, dung
+                            # duration uoc luong + danh dau tts_failed de
+                            # scene van done voi canh bao mat tieng.
+                            tts_task.cancel()
+                            audio_duration = max(2.0, len(voiceover or "") / 3.0)
+                            tts_failed = True
+                            tts_error = "TTS quá thời gian chờ (timeout)"
                         if tts_started is not None:
                             tts_s = time.monotonic() - tts_started
                     if tts_failed:
