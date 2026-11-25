@@ -65,11 +65,21 @@ from composer import (
     mix_multitrack_timeline,
     merge_audio_with_transitions,
     QUALITY_PROFILES,
+    _resolve_ffmpeg,
 )
 from batch_engine import generate_tts_with_status, poll_video_task, sanitize_prompt_heuristics, extract_last_frame
 
 
 SHOT_DESK_DIR = (Path(__file__).parent / "workspace" / "_shot_desk_projects").resolve()
+
+# Audit #6 (2026-11-25): _characters.json dung duong dan TUYET DOI
+# theo repo (truoc day import_shot_desk_zip dung Path("workspace")
+# phu thuoc CWD) + lock cho doc-ghi de 2 lan import song song khong
+# mat update cua nhau. Luu y: app.py save_characters ghi cung file
+# bang _atomic_write_json (khong chung lock nay) — 2 cho ghi khac
+# nhau van co the race, nhung ghi nguyen tu tranh rach file.
+_CHARACTERS_FILE = (Path(__file__).parent / "workspace" / "_characters.json").resolve()
+_CHARACTERS_FILE_LOCK = threading.Lock()
 SHOT_DESK_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -229,213 +239,225 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
         project_id = f"{clean_slug}_{uuid.uuid4().hex[:6]}"
         proj_dir = SHOT_DESK_DIR / project_id
 
-        # Tạo cấu trúc thư mục
-        (proj_dir / "shots").mkdir(parents=True, exist_ok=True)
-        (proj_dir / "clips").mkdir(parents=True, exist_ok=True)
-        (proj_dir / "audio").mkdir(parents=True, exist_ok=True)
-        (proj_dir / "characters").mkdir(parents=True, exist_ok=True)
-        (proj_dir / "final").mkdir(parents=True, exist_ok=True)
-
-        # Giải nén an toàn: kiểm tra từng ZipInfo chống path traversal, symlink, zip bomb
-        MAX_FILES = 1000
-        MAX_TOTAL_SIZE = 500 * 1024 * 1024  # 500 MB
-        extracted_files = 0
-        total_extracted_size = 0
-        resolved_proj_dir = proj_dir.resolve()
-
-        for zinfo in z.infolist():
-            # Bỏ qua thư mục
-            if zinfo.is_dir() or zinfo.filename.endswith("/"):
-                continue
-
-            extracted_files += 1
-            if extracted_files > MAX_FILES:
-                raise ValueError(f"File ZIP vượt quá giới hạn an toàn {MAX_FILES} files.")
-
-            total_extracted_size += zinfo.file_size
-            if total_extracted_size > MAX_TOTAL_SIZE:
-                raise ValueError(f"Tổng dung lượng giải nén vượt quá giới hạn an toàn ({MAX_TOTAL_SIZE // (1024*1024)} MB).")
-
-            # Kiểm tra symlink (UNIX file mode 0o120000)
-            if (zinfo.external_attr >> 16) & 0o170000 == 0o120000:
-                raise ValueError(f"File ZIP chứa symlink không an toàn: {zinfo.filename}")
-
-            fname = zinfo.filename.replace("\\", "/")
-            # Reject path tuyệt đối, chứa '..', hoặc drive letter
-            if fname.startswith("/") or ":" in fname or ".." in Path(fname).parts:
-                raise ValueError(f"File ZIP chứa đường dẫn không an toàn (path traversal): {zinfo.filename}")
-
-            target_path = (proj_dir / fname).resolve()
-            if not target_path.is_relative_to(resolved_proj_dir):
-                raise ValueError(f"Đường dẫn giải nén vượt ra ngoài thư mục dự án: {zinfo.filename}")
-
-            if fname == "project.json":
-                continue
-
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(target_path, "wb") as f:
-                f.write(z.read(zinfo))
-
-
-        # 1. Đồng bộ Character Blocks vào Character Library của Studio
-        characters = manifest.get("characters", [])
-        char_file = Path("workspace") / "_characters.json"
-        existing_chars = []
-        if char_file.exists():
-            try:
-                with open(char_file, "r", encoding="utf-8") as cf:
-                    existing_chars = json.load(cf)
-            except Exception:
-                existing_chars = []
-
-        for ch in characters:
-            c_id = ch.get("id") or f"char_{uuid.uuid4().hex[:6]}"
-            name = ch.get("name", "Nhân vật")
-            block = ch.get("character_block", "")
-            voice = ch.get("voice") or manifest.get("default_voice", "vi-VN-HoaiMyNeural")
-
-            # Tìm frame tham chiếu đại diện
-            avatar_url = ""
-            first_frames = [f for f in (proj_dir / "shots" / "shot_001").glob("first_frame.*") if f.is_file() and f.suffix.lower() in ALLOWED_FRAME_EXTENSIONS] if (proj_dir / "shots" / "shot_001").exists() else []
-            if ch.get("reference_image") and resolve_safe_frame_path(proj_dir, ch.get("reference_image")):
-                avatar_url = f"/api/shot-desk/projects/{project_id}/assets/{ch['reference_image']}"
-            elif first_frames:
-                avatar_url = f"/api/shot-desk/projects/{project_id}/shots/1/frames/{first_frames[0].name}"
-
-            char_entry = {
-                "id": c_id,
-                "name": name,
-                "aliases": [name, name.lower()],
-                "avatar": avatar_url,
-                "description": block,
-                "voice": voice,
-                "character_sheet": {
-                    "front": avatar_url,
-                    "side": "",
-                    "closeup": "",
-                    "fullbody": ""
-                }
-            }
-
-            # Cập nhật hoặc thêm mới vào thư viện
-            found = False
-            for i, ex in enumerate(existing_chars):
-                if ex.get("name", "").lower() == name.lower() or ex.get("id") == c_id:
-                    existing_chars[i].update(char_entry)
-                    found = True
-                    break
-            if not found:
-                existing_chars.insert(0, char_entry)
-
         try:
-            with open(char_file, "w", encoding="utf-8") as cf:
-                json.dump(existing_chars, cf, ensure_ascii=False, indent=2)
-        except Exception as ce:
-            print(f"[ShotDesk] Warning saving characters: {ce}")
+            # Tạo cấu trúc thư mục
+            (proj_dir / "shots").mkdir(parents=True, exist_ok=True)
+            (proj_dir / "clips").mkdir(parents=True, exist_ok=True)
+            (proj_dir / "audio").mkdir(parents=True, exist_ok=True)
+            (proj_dir / "characters").mkdir(parents=True, exist_ok=True)
+            (proj_dir / "final").mkdir(parents=True, exist_ok=True)
 
-        # 2. Xây dựng danh sách Shots với các trạng thái chuyên nghiệp
-        shots_data = []
-        aspect_ratio = manifest.get("aspect_ratio", "9:16")
+            # Giải nén an toàn: kiểm tra từng ZipInfo chống path traversal, symlink, zip bomb
+            MAX_FILES = 1000
+            MAX_TOTAL_SIZE = 500 * 1024 * 1024  # 500 MB
+            extracted_files = 0
+            total_extracted_size = 0
+            resolved_proj_dir = proj_dir.resolve()
 
-        for i, s in enumerate(manifest.get("shots", [])):
-            try:
-                idx = int(s.get("index", i + 1))
-            except (TypeError, ValueError):
-                print(f"[ShotDesk] Warning: shot index không hợp lệ ({s.get('index')!r}), dùng vị trí {i + 1}.")
-                idx = i + 1
-            shot_dir = proj_dir / "shots" / f"shot_{idx:03d}"
-            shot_dir.mkdir(parents=True, exist_ok=True)
+            for zinfo in z.infolist():
+                # Bỏ qua thư mục
+                if zinfo.is_dir() or zinfo.filename.endswith("/"):
+                    continue
 
-            first_p = s.get("first_frame")
-            mid_p = s.get("middle_frame")
-            last_p = s.get("last_frame")
+                extracted_files += 1
+                if extracted_files > MAX_FILES:
+                    raise ValueError(f"File ZIP vượt quá giới hạn an toàn {MAX_FILES} files.")
 
-            # Chuẩn hóa URLs xem trước cho giao diện Web (giữ đúng tên file thực tế: .jpg, .png, .webp...)
-            def _build_frame_url(rel_path: Optional[str]) -> Optional[str]:
-                fp = resolve_safe_frame_path(proj_dir, rel_path)
-                if fp:
-                    return f"/api/shot-desk/projects/{project_id}/shots/{idx}/frames/{fp.name}"
-                return None
+                total_extracted_size += zinfo.file_size
+                if total_extracted_size > MAX_TOTAL_SIZE:
+                    raise ValueError(f"Tổng dung lượng giải nén vượt quá giới hạn an toàn ({MAX_TOTAL_SIZE // (1024*1024)} MB).")
 
-            first_url = _build_frame_url(first_p)
-            mid_url = _build_frame_url(mid_p)
-            last_url = _build_frame_url(last_p)
+                # Kiểm tra symlink (UNIX file mode 0o120000)
+                if (zinfo.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise ValueError(f"File ZIP chứa symlink không an toàn: {zinfo.filename}")
 
-            shot_characters = s.get("characters", [])
-            initial_speaker = s.get("speaker") or (shot_characters[0] if shot_characters else "")
-            initial_voice = s.get("voice") or manifest.get("default_voice", "vi-VN-HoaiMyNeural")
-            initial_mode = s.get("voice_mode", manifest.get("default_voice_mode", "narration"))
-            initial_lipsync = bool(s.get("lip_sync", initial_mode == "dialogue"))
+                fname = zinfo.filename.replace("\\", "/")
+                # Reject path tuyệt đối, chứa '..', hoặc drive letter
+                if fname.startswith("/") or ":" in fname or ".." in Path(fname).parts:
+                    raise ValueError(f"File ZIP chứa đường dẫn không an toàn (path traversal): {zinfo.filename}")
 
-            shot_item = {
-                "index": idx,
-                "title": s.get("title") or f"Shot {idx}",
-                "duration": _parse_shot_duration(s.get("duration", manifest.get("shot_duration", 10)), default=10),
-                "prompt": s.get("prompt", ""),
-                "compliance_prompt": s.get("compliance_prompt"),
-                "risk_level": s.get("risk_level", "low"),
-                "voiceover": s.get("voiceover", ""),
-                "voice_mode": initial_mode,
-                "speaker": initial_speaker,
-                "voice": initial_voice,
-                "lip_sync": initial_lipsync,
-                "first_frame": first_p,
-                "middle_frame": mid_p,
-                "last_frame": last_p,
-                "first_frame_url": first_url,
-                "middle_frame_url": mid_url,
-                "last_frame_url": last_url,
-                "transition_in": s.get("transition_in"),
-                "transition_out": s.get("transition_out"),
-                "transition_note": s.get("transition_note", ""),
-                "characters": s.get("characters", []),
-                # Vòng đời trạng thái
-                "status": "ready",  # imported | ready | rendering | review | approved | composing | done
-                "error": None,
-                "video_url": None,
-                "audio_url": None,
-                "used_prompt": None,
-                "used_compliance": False,
-                "has_middle_frame": bool(resolve_safe_frame_path(proj_dir, mid_p)),
-                "audit": {
-                    "character_check": "Chờ render",
-                    "aspect_ratio_check": aspect_ratio,
-                    "watermark_clean": True,
-                    "continuity_note": s.get("transition_note", "")
+                target_path = (proj_dir / fname).resolve()
+                if not target_path.is_relative_to(resolved_proj_dir):
+                    raise ValueError(f"Đường dẫn giải nén vượt ra ngoài thư mục dự án: {zinfo.filename}")
+
+                if fname == "project.json":
+                    continue
+
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(target_path, "wb") as f:
+                    f.write(z.read(zinfo))
+
+
+            # 1. Đồng bộ Character Blocks vào Character Library của Studio
+            characters = manifest.get("characters", [])
+            # Audit #6 (2026-11-25): doc-ghi _characters.json duoi lock
+            # (2 lan import song song khong duoc mat update cua nhau)
+            # va ghi nguyen tu (tmp + os.replace) de khong rach file.
+            with _CHARACTERS_FILE_LOCK:
+                existing_chars = []
+                if _CHARACTERS_FILE.exists():
+                    try:
+                        with open(_CHARACTERS_FILE, "r", encoding="utf-8") as cf:
+                            existing_chars = json.load(cf)
+                    except Exception:
+                        existing_chars = []
+
+                for ch in characters:
+                    c_id = ch.get("id") or f"char_{uuid.uuid4().hex[:6]}"
+                    name = ch.get("name", "Nhân vật")
+                    block = ch.get("character_block", "")
+                    voice = ch.get("voice") or manifest.get("default_voice", "vi-VN-HoaiMyNeural")
+
+                    # Tìm frame tham chiếu đại diện
+                    avatar_url = ""
+                    first_frames = [f for f in (proj_dir / "shots" / "shot_001").glob("first_frame.*") if f.is_file() and f.suffix.lower() in ALLOWED_FRAME_EXTENSIONS] if (proj_dir / "shots" / "shot_001").exists() else []
+                    if ch.get("reference_image") and resolve_safe_frame_path(proj_dir, ch.get("reference_image")):
+                        avatar_url = f"/api/shot-desk/projects/{project_id}/assets/{ch['reference_image']}"
+                    elif first_frames:
+                        avatar_url = f"/api/shot-desk/projects/{project_id}/shots/1/frames/{first_frames[0].name}"
+
+                    char_entry = {
+                        "id": c_id,
+                        "name": name,
+                        "aliases": [name, name.lower()],
+                        "avatar": avatar_url,
+                        "description": block,
+                        "voice": voice,
+                        "character_sheet": {
+                            "front": avatar_url,
+                            "side": "",
+                            "closeup": "",
+                            "fullbody": ""
+                        }
+                    }
+
+                    # Cập nhật hoặc thêm mới vào thư viện
+                    found = False
+                    for i, ex in enumerate(existing_chars):
+                        if ex.get("name", "").lower() == name.lower() or ex.get("id") == c_id:
+                            existing_chars[i].update(char_entry)
+                            found = True
+                            break
+                    if not found:
+                        existing_chars.insert(0, char_entry)
+
+                try:
+                    _tmp_chars = _CHARACTERS_FILE.with_name(
+                        f"_characters.json.tmp.{os.getpid()}.{time.time_ns()}")
+                    with open(_tmp_chars, "w", encoding="utf-8") as cf:
+                        json.dump(existing_chars, cf, ensure_ascii=False, indent=2)
+                    os.replace(_tmp_chars, _CHARACTERS_FILE)
+                except Exception as ce:
+                    print(f"[ShotDesk] Warning saving characters: {ce}")
+
+            # 2. Xây dựng danh sách Shots với các trạng thái chuyên nghiệp
+            shots_data = []
+            aspect_ratio = manifest.get("aspect_ratio", "9:16")
+
+            for i, s in enumerate(manifest.get("shots", [])):
+                try:
+                    idx = int(s.get("index", i + 1))
+                except (TypeError, ValueError):
+                    print(f"[ShotDesk] Warning: shot index không hợp lệ ({s.get('index')!r}), dùng vị trí {i + 1}.")
+                    idx = i + 1
+                shot_dir = proj_dir / "shots" / f"shot_{idx:03d}"
+                shot_dir.mkdir(parents=True, exist_ok=True)
+
+                first_p = s.get("first_frame")
+                mid_p = s.get("middle_frame")
+                last_p = s.get("last_frame")
+
+                # Chuẩn hóa URLs xem trước cho giao diện Web (giữ đúng tên file thực tế: .jpg, .png, .webp...)
+                def _build_frame_url(rel_path: Optional[str]) -> Optional[str]:
+                    fp = resolve_safe_frame_path(proj_dir, rel_path)
+                    if fp:
+                        return f"/api/shot-desk/projects/{project_id}/shots/{idx}/frames/{fp.name}"
+                    return None
+
+                first_url = _build_frame_url(first_p)
+                mid_url = _build_frame_url(mid_p)
+                last_url = _build_frame_url(last_p)
+
+                shot_characters = s.get("characters", [])
+                initial_speaker = s.get("speaker") or (shot_characters[0] if shot_characters else "")
+                initial_voice = s.get("voice") or manifest.get("default_voice", "vi-VN-HoaiMyNeural")
+                initial_mode = s.get("voice_mode", manifest.get("default_voice_mode", "narration"))
+                initial_lipsync = bool(s.get("lip_sync", initial_mode == "dialogue"))
+
+                shot_item = {
+                    "index": idx,
+                    "title": s.get("title") or f"Shot {idx}",
+                    "duration": _parse_shot_duration(s.get("duration", manifest.get("shot_duration", 10)), default=10),
+                    "prompt": s.get("prompt", ""),
+                    "compliance_prompt": s.get("compliance_prompt"),
+                    "risk_level": s.get("risk_level", "low"),
+                    "voiceover": s.get("voiceover", ""),
+                    "voice_mode": initial_mode,
+                    "speaker": initial_speaker,
+                    "voice": initial_voice,
+                    "lip_sync": initial_lipsync,
+                    "first_frame": first_p,
+                    "middle_frame": mid_p,
+                    "last_frame": last_p,
+                    "first_frame_url": first_url,
+                    "middle_frame_url": mid_url,
+                    "last_frame_url": last_url,
+                    "transition_in": s.get("transition_in"),
+                    "transition_out": s.get("transition_out"),
+                    "transition_note": s.get("transition_note", ""),
+                    "characters": s.get("characters", []),
+                    # Vòng đời trạng thái
+                    "status": "ready",  # imported | ready | rendering | review | approved | composing | done
+                    "error": None,
+                    "video_url": None,
+                    "audio_url": None,
+                    "used_prompt": None,
+                    "used_compliance": False,
+                    "has_middle_frame": bool(resolve_safe_frame_path(proj_dir, mid_p)),
+                    "audit": {
+                        "character_check": "Chờ render",
+                        "aspect_ratio_check": aspect_ratio,
+                        "watermark_clean": True,
+                        "continuity_note": s.get("transition_note", "")
+                    }
+                }
+                shots_data.append(shot_item)
+
+            project_state = {
+                "id": project_id,
+                "format_version": manifest.get("format_version", "1.0"),
+                "title": manifest.get("title", "Shot Desk Project"),
+                "genre": manifest.get("genre", "Phim ngắn"),
+                "logline": manifest.get("logline", ""),
+                "aspect_ratio": aspect_ratio,
+                "default_voice": manifest.get("default_voice", "vi-VN-HoaiMyNeural"),
+                "default_voice_mode": manifest.get("default_voice_mode", "narration"),
+                "total_duration": _parse_shot_duration(manifest.get("total_duration", len(shots_data) * 10), default=len(shots_data) * 10),
+                "shot_duration": _parse_shot_duration(manifest.get("shot_duration", 10), default=10),
+                "characters": characters,
+                "shots": shots_data,
+                "created_at": int(time.time()),
+                "updated_at": int(time.time()),
+                "final_video": None,
+                "srt_file": None,
+                "timeline_settings": {
+                    "music_volume": 0.25,
+                    "voice_volume": 1.0,
+                    "bg_music_path": None,
+                    "sound_bridge_duration": 0.75,
+                    "subtitle_mode": "burn_in",
+                    "export_quality": "720p"
                 }
             }
-            shots_data.append(shot_item)
 
-        project_state = {
-            "id": project_id,
-            "format_version": manifest.get("format_version", "1.0"),
-            "title": manifest.get("title", "Shot Desk Project"),
-            "genre": manifest.get("genre", "Phim ngắn"),
-            "logline": manifest.get("logline", ""),
-            "aspect_ratio": aspect_ratio,
-            "default_voice": manifest.get("default_voice", "vi-VN-HoaiMyNeural"),
-            "default_voice_mode": manifest.get("default_voice_mode", "narration"),
-            "total_duration": _parse_shot_duration(manifest.get("total_duration", len(shots_data) * 10), default=len(shots_data) * 10),
-            "shot_duration": _parse_shot_duration(manifest.get("shot_duration", 10), default=10),
-            "characters": characters,
-            "shots": shots_data,
-            "created_at": int(time.time()),
-            "updated_at": int(time.time()),
-            "final_video": None,
-            "srt_file": None,
-            "timeline_settings": {
-                "music_volume": 0.25,
-                "voice_volume": 1.0,
-                "bg_music_path": None,
-                "sound_bridge_duration": 0.75,
-                "subtitle_mode": "burn_in",
-                "export_quality": "720p"
-            }
-        }
-
-        # Lưu project.json đã chuẩn hóa
-        save_shot_desk_project(project_state)
-        return project_state
+            # Lưu project.json đã chuẩn hóa
+            save_shot_desk_project(project_state)
+            return project_state
+        except Exception:
+            # Audit #6 (2026-11-25): giai nen / dong bo loi giua chung
+            # khong duoc de lai proj_dir do dang — xoa roi moi raise.
+            shutil.rmtree(proj_dir, ignore_errors=True)
+            raise
 
 
 def _backup_json_file(p_file: Path) -> Optional[Path]:
@@ -1550,13 +1572,42 @@ def compose_shot_desk_timeline(
         has_any_sfx = False
         custom_sfx_dir = str(proj_dir / "sfx") if (proj_dir / "sfx").exists() else None
 
+        # Cache SFX theo (tag, duration) trong proj_dir/sfx_cache de cac
+        # ban export khac nhau khong sinh lai noise ngau nhien khac nhau,
+        # va export lan 2 khong ton thoi gian sinh lai (audit #6, 2026-11-25).
+        sfx_cache_dir = proj_dir / "sfx_cache"
         for idx, s in enumerate(valid_shots):
             dur = clip_durations[idx]
             sfx_tag = s.get("sfx") or s.get("sound_effects") or s.get("ambience") or detect_sfx_from_text(s.get("prompt", "") + " " + s.get("voiceover", ""))
             shot_sfx_path = tmp_dir / f"shot_{s['index']:03d}_sfx.mp3"
             tag_to_use = sfx_tag or "ambience"
             has_any_sfx = True
-            generate_sfx_audio(tag_to_use, dur, str(shot_sfx_path), custom_sfx_dir=custom_sfx_dir)
+            _cache_name = re.sub(r"[^A-Za-z0-9_-]", "_", str(tag_to_use)) + f"_{float(dur):.1f}.mp3"
+            _cache_path = sfx_cache_dir / _cache_name
+            try:
+                if _cache_path.exists() and _cache_path.stat().st_size > 500:
+                    shutil.copy2(_cache_path, shot_sfx_path)
+                else:
+                    generate_sfx_audio(tag_to_use, dur, str(shot_sfx_path), custom_sfx_dir=custom_sfx_dir)
+                    if shot_sfx_path.exists() and shot_sfx_path.stat().st_size > 500:
+                        sfx_cache_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(shot_sfx_path, _cache_path)
+            except Exception as _sfx_err:
+                # Audit #6: 1 SFX loi khong duoc hong ca export — thay
+                # bang audio im lang cung thoi luong de timeline van
+                # dong bo (cac shot sau khong bi lech moc).
+                print(f"[ShotDesk SFX Warning] Lỗi sinh SFX shot {s['index']} ({tag_to_use}): {_sfx_err} — dùng audio im lặng.")
+                try:
+                    subprocess.run(
+                        [_resolve_ffmpeg(), "-y", "-f", "lavfi", "-i",
+                         "anullsrc=r=44100:cl=stereo",
+                         "-t", f"{max(0.5, float(dur)):.2f}",
+                         "-c:a", "libmp3lame", "-b:a", "192k",
+                         str(shot_sfx_path)],
+                        capture_output=True, timeout=60, check=True)
+                except Exception as _sil_err:
+                    print(f"[ShotDesk SFX Warning] Không tạo được audio im lặng cho shot {s['index']}: {_sil_err} — bỏ SFX shot này.")
+                    continue
             sfx_clips.append(str(shot_sfx_path))
 
         master_sfx_path = None

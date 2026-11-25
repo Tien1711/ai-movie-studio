@@ -139,8 +139,14 @@ def _fallback_topics(limit: int = FACTORY_TOPICS_LIMIT) -> List[str]:
 
 
 def _cache_path(source: str) -> Path:
+    # Audit #5f (2026-11-25): loc ten file (defense-in-depth) — fetch_topics
+    # da allowlist chi nhan "trending"/"news", nhung ham nay van khong duoc
+    # de "../" thoat ra khoi FACTORY_CACHE_DIR.
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(source or ""))
+    if not safe:
+        safe = "default"
     FACTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return FACTORY_CACHE_DIR / f"{source}.json"
+    return FACTORY_CACHE_DIR / f"{safe}.json"
 
 
 def _read_cache(source: str) -> Optional[List[str]]:
@@ -266,7 +272,9 @@ def _topic_hashtags(title: str) -> List[str]:
             "the", "and", "for", "with"}
     tags: List[str] = []
     for word in re.findall(r"[A-Za-zÀ-ỹ0-9]+", title.lower()):
-        if len(word) >= 3 and word not in stop and word not in tags:
+        # Audit #5e (2026-11-25): tags chua "#word" nen phai kiem
+        # f"#{word}" — truoc day `word not in tags` luon True, tag lap lai.
+        if len(word) >= 3 and word not in stop and f"#{word}" not in tags:
             tags.append(f"#{word}")
         if len(tags) >= 5:
             break

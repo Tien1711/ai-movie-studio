@@ -171,13 +171,24 @@ def test_bird_block_locked_in_every_bird_scene():
 
 @pytest.mark.parametrize("text", [
     "Chim thần bay vút lên trời cao, lông vàng rực rỡ.",
-    "Chim lạ đậu trên cành khế vàng trĩu quả.",
     "Phượng hoàng sải cánh bay qua biển rộng mênh mông.",
 ])
 def test_scene_prompt_bird_mentions_use_block(text):
     prompt = _scene_prompt(text, "cinematic", "9:16")
     assert MAGIC_BIRD_BLOCK in prompt
-    assert "bird" not in prompt.replace(MAGIC_BIRD_BLOCK, "")
+
+
+def test_scene_prompt_plain_bird_keeps_bird_not_phoenix():
+    # Audit #6 (2026-11-25): "chim la" khong co ngu canh chim than thi
+    # GIU keyword "bird" chung — truoc day moi chim deu thanh phuong
+    # hoang vang (vd chim se cung thanh phuong). Truong hop "Chim la..."
+    # tung nam trong parametrize tren (PR #21) nhung do la luat qua rong
+    # ma audit da chi ra; chuong An Khe that van dung "chim than" nen
+    # test_bird_block_locked_in_every_bird_scene van xanh.
+    prompt = _scene_prompt("Chim lạ đậu trên cành khế vàng trĩu quả.",
+                           "cinematic", "9:16")
+    assert MAGIC_BIRD_BLOCK not in prompt
+    assert "bird" in prompt
 
 
 def test_scene_prompt_without_bird_has_no_block():
