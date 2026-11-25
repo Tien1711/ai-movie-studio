@@ -33,6 +33,7 @@ jobs:
       - run: python -m pip install -r requirements.txt pytest==8.3.4
       - run: node --check static/js/app.js
       - run: node --check static/js/ui.js
+      - run: node --test scripts/test_muse_browser_gateway.mjs
       - run: >-
           python -m pytest -q
           --ignore=test_audit_fixes.py

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+from muse_connection import muse_connection
 load_dotenv()
 
 logger = logging.getLogger("ai_movie_studio.batch_video")
@@ -1319,12 +1320,11 @@ def _generate_scene_image(
     out_img_path: Path,
     reference_image: Optional[str] = None,
 ) -> bool:
-    """Tạo ảnh tĩnh độ phân giải cao cho phân cảnh thông qua Muse2API."""
+    """Tạo ảnh tĩnh cho phân cảnh qua provider Muse đang chọn."""
     from batch_engine import generate_keyframe_image
-    base_url = os.getenv("MUSE2API_URL", "http://localhost:18610")
-    api_key = os.getenv("MUSE2API_KEY") or os.getenv("MUSE_API_KEY")
+    provider, base_url, api_key = muse_connection()
     if not api_key:
-        logger.warning("MUSE2API_KEY / MUSE_API_KEY chưa được cấu hình trong môi trường, bỏ qua gọi Muse AI.")
+        logger.warning("Chưa cấu hình khóa cho provider %s, bỏ qua gọi Muse AI.", provider)
         return False
 
     ref_payload = _resolve_character_ref_data_uri(reference_image)

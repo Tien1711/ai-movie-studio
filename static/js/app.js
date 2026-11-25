@@ -289,21 +289,27 @@ async function checkApiHealth() {
   const badge = document.getElementById('museAccountsBadge');
   const resEl = document.getElementById('cfgTestResult');
 
-  txt.textContent = 'Muse2API: Dang kiem tra...';
+  txt.textContent = 'Muse: Đang kiểm tra…';
   bar.className = 'muse-status-bar warn';
   badge.style.display = 'none';
 
   try {
     const r = await apiFetch('/api/health');
     const data = await r.json();
+    const isBrowser = data.muse_provider === 'browser';
+    const label = isBrowser ? 'Muse Browser' : 'Muse2API';
+    const providerText = document.getElementById('museProviderText');
+    if (providerText) providerText.textContent = label;
+    const apiConfig = document.getElementById('muse2apiConfig');
+    if (apiConfig) apiConfig.style.display = isBrowser ? 'none' : '';
 
     if (data.muse2api) {
       window.currentAccountsCount = data.accounts || 1;
       bar.className = 'muse-status-bar ok';
-      txt.textContent = 'Muse2API: Đã kết nối';
-      badge.textContent = data.accounts + ' tài khoản';
+      txt.textContent = label + ': Đã kết nối';
+      badge.textContent = isBrowser ? 'Chrome' : data.accounts + ' tài khoản';
       badge.style.display = 'inline';
-      if (resEl) resEl.textContent = 'Đã kết nối - ' + data.accounts + ' tài khoản hoạt động';
+      if (resEl) resEl.textContent = isBrowser ? 'Phiên Chrome đã sẵn sàng' : 'Đã kết nối - ' + data.accounts + ' tài khoản hoạt động';
       const hint = document.getElementById('concurrentHint');
       if (hint) {
         hint.textContent = `Tối đa ${data.accounts} luồng song song (đặt ở ô Concurrent)`;
@@ -315,8 +321,8 @@ async function checkApiHealth() {
       const maxConcInput = document.getElementById('maxConcurrent');
       const safeConc = Math.max(1, Math.min(12, data.accounts || 6));
       if (maxConcInput) {
-        maxConcInput.max = 12;
-        if (!maxConcInput.value || parseInt(maxConcInput.value) < safeConc) {
+        maxConcInput.max = isBrowser ? 1 : 12;
+        if (isBrowser || !maxConcInput.value || parseInt(maxConcInput.value) < safeConc) {
           maxConcInput.value = safeConc;
           updateConcurrent(safeConc);
         }
@@ -340,7 +346,7 @@ async function checkApiHealth() {
       }
     } else {
       bar.className = 'muse-status-bar fail';
-      txt.textContent = 'Muse2API: Chua chay';
+      txt.textContent = label + ': Chưa sẵn sàng';
       badge.style.display = 'none';
       if (resEl) resEl.textContent = 'LOI: ' + (data.muse_error || 'Khong ket noi duoc');
       // Hiển thị hướng dẫn khởi động

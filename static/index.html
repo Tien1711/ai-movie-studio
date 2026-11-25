@@ -3177,20 +3177,20 @@
       <div class="panel-head">
         <div>
           <h2>⚙️ Cài đặt</h2>
-          <div class="panel-sub">Kết nối Muse2API và khóa API Studio — phím tắt <span class="kbd">Alt</span>+<span class="kbd">O</span></div>
+          <div class="panel-sub">Kết nối Muse và khóa API Studio — phím tắt <span class="kbd">Alt</span>+<span class="kbd">O</span></div>
         </div>
       </div>
       <div class="config-banner">
         <span class="u-fs24">💡</span>
         <div>
           <strong>Hướng dẫn kết nối</strong><br>
-          <span class="u-c-muted u-fs12">Cấu hình URL và API Key của server <code>muse2api</code> đang chạy. Nhập danh sách tài khoản qua Chrome Extension của repo.</span>
+          <span class="u-c-muted u-fs12">Chọn <code>MUSE_PROVIDER</code> trong <code>.env</code>, rồi khởi động lại Studio.</span>
         </div>
       </div>
       <div class="settings-grid">
       <div class="card">
-        <div class="card-title u-mb16">⚙️ Kết nối Muse2API</div>
-        <div class="form-row cols-2">
+        <div class="card-title u-mb16">Kết nối Muse · <span id="museProviderText">Đang kiểm tra…</span></div>
+        <div id="muse2apiConfig" class="form-row cols-2">
           <div>
             <label>URL Muse2API Server</label>
             <input type="text" id="cfgApiUrl" placeholder="http://localhost:18610">
@@ -3250,7 +3250,7 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js?v=20261125_01" defer></script>
+<script src="static/js/app.js?v=20261125_browser" defer></script>
 <script src="static/js/ui.js?v=20261125_01" defer></script>
 
 <!-- Floating Multi-Shot Batch Action Bar -->

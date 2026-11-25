@@ -1845,21 +1845,24 @@ def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
 
 async def generate_affiliate_script_ai(
     req: ProductAffiliateRequest,
-    muse_api_url: str = "http://localhost:18610",
+    muse_api_url: Optional[str] = None,
     muse_api_key: Optional[str] = None
 ) -> AffiliateScriptResponse:
     """
     Tạo kịch bản video tiếp thị liên kết bằng AI LLM thông minh qua muse2api /v1/chat/completions.
     Nếu Muse bận render hoặc không phản hồi, tự động fallback sang bộ tạo cục bộ siêu tốc.
 
-    muse_api_key: None -> resolve từ env MUSE2API_KEY tại thời điểm gọi.
+    Lấy kết nối từ cấu hình provider khi caller không truyền đầy đủ.
     Thiếu key thì fallback local ngay và log rõ ràng (không gọi AI với key
     sai rồi mới fallback).
     """
+    if not muse_api_url or not muse_api_key:
+        from muse_connection import muse_connection
+        _, configured_url, configured_key = muse_connection()
+        muse_api_url = muse_api_url or configured_url
+        muse_api_key = muse_api_key or configured_key
     if not muse_api_key:
-        muse_api_key = (os.getenv("MUSE2API_KEY") or "").strip() or None
-    if not muse_api_key:
-        print("[Affiliate AI] Thiếu cấu hình MUSE2API_KEY: bỏ qua gọi AI, dùng bộ tạo cục bộ.")
+        print("[Affiliate AI] Thiếu khóa cho provider Muse: bỏ qua gọi AI, dùng bộ tạo cục bộ.")
         return generate_affiliate_script_local(req)
     # Product DNA lock: yêu cầu LLM dán nguyên văn vào cuối prompt MỌI cảnh;
     # hậu xử lý vẫn append lại nếu LLM quên (không viết lại prompt của LLM).

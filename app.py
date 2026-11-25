@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from batch_engine import run_batch, generate_keyframe_image, heal_prompt_with_ai, apply_style_locks, sanitize_prompt_heuristics
 from composer import compose_full_movie, audit_movie_scenes, compose_scene_video, run_cancellable_compose
 from consistency import run_consistency_checks
+from muse_connection import muse_connection
 from tts_manager import list_all_voices, synthesize_voice, VIENEU_VOICES_CONFIG, OMNIVOICE_VOICES_CONFIG
 from affiliate_engine import (
     AFFILIATE_CATEGORIES,
@@ -58,25 +59,19 @@ from affiliate_engine import (
 logger = logging.getLogger("ai_movie_studio")
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────
-MUSE_API_URL = os.getenv("MUSE2API_URL", "http://localhost:18610")
-# SECURITY (audit §2.2): KHÔNG còn default key hardcode. Key chỉ lấy từ env
-# MUSE2API_KEY (fallback MUSE_API_KEY). Nếu thiếu, MUSE_API_KEY=None và:
-#  - endpoint gọi Muse trực tiếp trả 503 rõ ràng (xem require_muse_key()),
-#  - pipeline render (film/retry/single) đánh dấu job error với message rõ ràng
-#    thay vì gọi gateway bằng key giả. KHÔNG dùng key mặc định dưới mọi hình thức.
-MUSE_API_KEY: Optional[str] = os.getenv("MUSE2API_KEY") or os.getenv("MUSE_API_KEY") or None
+MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY = muse_connection()
+_MUSE_KEY_NAME = "MUSE_BROWSER_KEY" if MUSE_PROVIDER == "browser" else "MUSE2API_KEY"
+_MUSE_MAX_CONCURRENT = 1 if MUSE_PROVIDER == "browser" else 12
+
 if not MUSE_API_KEY:
-    logger.warning(
-        "MUSE2API_KEY/MUSE_API_KEY chưa được đặt — các endpoint gọi Muse sẽ trả "
-        "503 (config error) cho tới khi cấu hình key. KHÔNG dùng key mặc định.")
+    logger.warning("%s chưa được đặt. Các endpoint gọi Muse sẽ trả 503.", _MUSE_KEY_NAME)
 
 
 def require_muse_key() -> str:
-    """Trả về Muse API key, hoặc raise 503 nếu chưa cấu hình (không key giả)."""
     if not MUSE_API_KEY:
         raise HTTPException(
             status_code=503,
-            detail="Muse API key chưa được cấu hình: đặt MUSE2API_KEY trong môi trường rồi khởi động lại server.",
+            detail=f"Muse API key chưa được cấu hình: đặt {_MUSE_KEY_NAME} rồi khởi động lại server.",
         )
     return MUSE_API_KEY
 
@@ -1015,7 +1010,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         if not MUSE_API_KEY:
             # Không key -> config error rõ ràng trên job, không gọi gateway bằng key giả.
             job["status"] = "error"
-            job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render.")
+            job_log(job, f"❌ Muse API key chưa được cấu hình ({_MUSE_KEY_NAME}). Không thể render.")
             job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
             _save_job_best_effort(job)
             return
@@ -1038,7 +1033,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         (output_dir / "final").mkdir(exist_ok=True)
 
         raw_concurrent = req.max_concurrent if (req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
-        concurrent = min(raw_concurrent, 12)
+        concurrent = min(raw_concurrent, _MUSE_MAX_CONCURRENT)
         total = len(req.scenes)
         if req.chain_mode == "sequential":
             job_log(job, f"🔗 Bắt đầu sản xuất {total} cảnh theo chế độ Nối tiếp tuần tự (Sequential Chaining: Kế thừa Last Frame liên tục qua từng cảnh)...")
@@ -1469,7 +1464,7 @@ def estimate_render_time(req: "MovieRequest") -> Dict[str, Any]:
     """
     n = max(len(req.scenes or []), 0)
     raw_concurrent = req.max_concurrent if (req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
-    concurrent = 1 if (req.chain_mode or "none") == "sequential" else min(raw_concurrent, 12)
+    concurrent = 1 if (req.chain_mode or "none") == "sequential" else min(raw_concurrent, _MUSE_MAX_CONCURRENT)
 
     poll_total = 0.0
     poll_scenes = 0
@@ -1551,7 +1546,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             return
         if not MUSE_API_KEY:
             job["status"] = "error"
-            job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render lại.")
+            job_log(job, f"❌ Muse API key chưa được cấu hình ({_MUSE_KEY_NAME}). Không thể render lại.")
             _save_job_best_effort(job)
             return
 
@@ -1586,7 +1581,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             _set_scene(job, idx, {"status": "running", "msg": msg})
 
         raw_concurrent = req.max_concurrent if (req and req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
-        concurrent = min(raw_concurrent, 12)
+        concurrent = min(raw_concurrent, _MUSE_MAX_CONCURRENT)
         new_results = await run_batch(
             scenes=scenes_dicts,
             base_url=MUSE_API_URL,
@@ -1943,11 +1938,11 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
     if not MUSE_API_KEY:
         _scene(job, idx).update({
             "status": "error",
-            "msg": "❌ Muse API key chưa được cấu hình (MUSE2API_KEY).",
-            "error": "Muse API key chưa được cấu hình (MUSE2API_KEY).",
+            "msg": f"❌ Muse API key chưa được cấu hình ({_MUSE_KEY_NAME}).",
+            "error": f"Muse API key chưa được cấu hình ({_MUSE_KEY_NAME}).",
         })
         _clear_rerendering(job, idx)
-        job_log(job, "❌ Muse API key chưa được cấu hình (MUSE2API_KEY). Không thể render lại cảnh.")
+        job_log(job, f"❌ Muse API key chưa được cấu hình ({_MUSE_KEY_NAME}). Không thể render lại cảnh.")
         _save_job_best_effort(job)
         return
 
@@ -3333,7 +3328,7 @@ async def api_shot_desk_render_all(project_id: str, payload: Optional[RenderAllR
         return JSONResponse({"error": "Không tìm thấy dự án"}, status_code=404)
 
     # Tự động phát hiện số tài khoản Muse đang hoạt động để phân bổ tối đa toàn bộ tài khoản
-    num_accounts = 6
+    num_accounts = 1 if MUSE_PROVIDER == "browser" else 6
     try:
         _cl = get_http_client()
         hr = await _cl.get(f"{MUSE_API_URL}/admin/accounts", headers={"Authorization": f"Bearer {MUSE_API_KEY}"}, timeout=3.0)
@@ -3351,7 +3346,7 @@ async def api_shot_desk_render_all(project_id: str, payload: Optional[RenderAllR
     else:
         concurrent = num_accounts
 
-    concurrent = max(1, min(24, concurrent))
+    concurrent = max(1, min(1 if MUSE_PROVIDER == "browser" else 24, concurrent))
 
     active_set = ACTIVE_SHOT_TASKS.setdefault(project_id, set())
     proj_dir = get_safe_project_dir(project_id)
@@ -4679,7 +4674,7 @@ async def delete_studio_session(request: Request):
 
 @app.get("/api/health")
 async def health_check():
-    """Kiểm tra kết nối tới muse2api gateway."""
+    """Check whether the active Muse provider is ready."""
     muse_url = MUSE_API_URL
     studio_ok = True
     muse_ok = False
@@ -4687,7 +4682,7 @@ async def health_check():
     accounts = 0
     try:
         if not MUSE_API_KEY:
-            raise RuntimeError("Muse API key chưa được cấu hình (MUSE2API_KEY)")
+            raise RuntimeError(f"Muse API key chưa được cấu hình ({_MUSE_KEY_NAME})")
         async with _shared_client_ctx() as client:
             r = await client.get(
                 f"{muse_url}/admin/accounts",
@@ -4700,7 +4695,12 @@ async def health_check():
                     accounts = len(data)
                 elif isinstance(data, dict):
                     accounts = data.get("stats", {}).get("total", len(data.get("accounts", [])))
-                muse_ok = True
+                if MUSE_PROVIDER == "browser":
+                    muse_ok = isinstance(data, dict) and data.get("ready") is True
+                    if not muse_ok:
+                        muse_error = "Mở Chrome của gateway và đăng nhập Muse."
+                else:
+                    muse_ok = True
             else:
                 muse_error = f"HTTP {r.status_code}"
     except Exception as e:
@@ -4709,6 +4709,7 @@ async def health_check():
     return {
         "studio": studio_ok,
         "muse2api": muse_ok,
+        "muse_provider": MUSE_PROVIDER,
         "muse_url": muse_url,
         "accounts": accounts,
         "muse_error": muse_error,

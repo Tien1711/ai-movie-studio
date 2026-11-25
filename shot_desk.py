@@ -105,19 +105,19 @@ _ALLOWED_MUSIC_ROOT_NAMES = ("_music", "_uploads")
 
 
 def _resolve_muse2api_key(api_key: Optional[str]) -> str:
-    """Resolve API key cho Muse2API: tham số truyền vào > env MUSE2API_KEY.
+    """Resolve API key cho provider Muse: tham số truyền vào > cấu hình server.
 
     Không còn giá trị mặc định hardcode: thiếu key thì raise lỗi cấu hình rõ
     ràng thay vì gọi API với key giả rồi mới nhận 401.
     """
     key = (api_key or "").strip() if isinstance(api_key, str) else ""
     if not key:
-        key = (os.getenv("MUSE2API_KEY") or "").strip()
-    if not key:
-        raise RuntimeError(
-            "Thiếu cấu hình MUSE2API_KEY: đặt biến môi trường MUSE2API_KEY "
-            "(hoặc truyền api_key tường minh) trước khi render qua Muse2API."
-        )
+        from muse_connection import muse_connection
+        provider, _, configured_key = muse_connection()
+        key = (configured_key or "").strip()
+        if not key:
+            setting = "MUSE_BROWSER_KEY" if provider == "browser" else "MUSE2API_KEY"
+            raise RuntimeError(f"Thiếu cấu hình {setting} để render Shot Desk.")
     return key
 
 
@@ -682,7 +682,7 @@ def list_shot_desk_projects() -> List[Dict[str, Any]]:
 async def render_single_shot_desk(
     project_id: str,
     shot_index: int,
-    base_url: str = "http://localhost:18610",
+    base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     use_compliance: bool = False,
     custom_prompt: Optional[str] = None,
@@ -699,11 +699,14 @@ async def render_single_shot_desk(
     5. Sinh TTS lời thoại tiếng Việt và ghép clip hoàn chỉnh
     6. Chuyển trạng thái sang 'review' (Màn hình Review Desk của Đạo diễn)
 
-    api_key: None -> resolve từ env MUSE2API_KEY tại thời điểm gọi; thiếu key
+    api_key: None -> lấy khóa của provider đã cấu hình; thiếu key
     thì raise RuntimeError cấu hình rõ ràng, không gọi API với key giả.
     """
     # Resolve key NGAY ĐẦU, trước mọi công việc render/TTS/API.
     api_key = _resolve_muse2api_key(api_key)
+    if not base_url:
+        from muse_connection import muse_connection
+        _, base_url, _ = muse_connection()
     proj = get_shot_desk_project(project_id)
     if not proj:
         raise ValueError(f"Không tìm thấy dự án Shot Desk '{project_id}'")

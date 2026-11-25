@@ -61,7 +61,7 @@
 ### 1. Yêu cầu hệ thống
 - Python 3.12 (phiên bản dùng để chạy CI)
 - FFmpeg (Tự động tải qua `imageio-ffmpeg` hoặc cài đặt hệ thống)
-- Gateway Muse2API đang chạy tại `http://localhost:18610`
+- Gateway Muse2API tại `http://localhost:18610` hoặc gateway Browser theo mục bên dưới.
 
 ### 2. Cài đặt thư viện
 ```bash
@@ -95,6 +95,22 @@ python app.py
 Mở [Studio trên máy này](http://127.0.0.1:8000). Điền `MUSE2API_KEY` do gateway cấp để dùng các tính năng render.
 
 Để truy cập Studio từ máy khác, đặt `STUDIO_HOST=0.0.0.0` và cấp một `STUDIO_API_KEY` riêng. Dùng HTTPS khi triển khai qua mạng. Trình duyệt dùng phiên đăng nhập có thời hạn 12 giờ sau khi nhập khóa. Các công cụ gọi API có thể tiếp tục gửi header `X-API-Key`.
+
+### 5. Kết nối qua Chrome hoặc Edge
+
+Studio mặc định dùng `MUSE_PROVIDER=muse2api`. Chế độ `browser` dùng [Muse-Chat-MCP](https://github.com/duclm1x1/Muse-Chat-MCP) để gửi yêu cầu trong một hồ sơ Chrome hoặc Edge đã đăng nhập Muse. Gateway local chuyển phản hồi chat và liên kết ảnh/video thành kết quả cho các luồng hiện có của Studio.
+
+1. Cài Node.js 22 và Chrome hoặc Edge. Clone [Muse-Chat-MCP](https://github.com/duclm1x1/Muse-Chat-MCP) vào thư mục riêng và chạy `npm install` tại đó. Studio đã kiểm tra giao diện driver tại commit `6c00e8c`.
+2. Trong `.env` của Studio, chọn `MUSE_PROVIDER=browser`, điền đường dẫn tuyệt đối vào `MUSE_CHAT_MCP_DIR` và tạo một khóa ngẫu nhiên riêng cho `MUSE_BROWSER_KEY`. Gateway dùng cổng `MUSE_BROWSER_PORT` (mặc định `18787`). Với Edge, thêm `MUSE_CHANNEL=msedge`.
+3. Từ thư mục Studio, chạy lệnh sau. Hoàn tất đăng nhập trong cửa sổ trình duyệt do gateway mở và giữ gateway chạy.
+
+   ```bash
+   node --env-file=.env scripts/muse_browser_gateway.mjs
+   ```
+
+4. Khởi động lại Studio bằng `python app.py`. Trong **Cài đặt**, kiểm tra trạng thái **Muse Browser**. Để quay lại API, đặt `MUSE_PROVIDER=muse2api` rồi khởi động lại Studio.
+
+Browser xử lý một yêu cầu tại một thời điểm. Tỷ lệ và thời lượng được gửi dưới dạng hướng dẫn trong prompt, còn kết quả do Muse quyết định. Khi dùng ảnh tham chiếu, tải ảnh lên Studio. Các clip Quick Video qua Browser dùng liên kết chia sẻ của Muse có thời hạn, nên tải về nếu cần lưu. Các luồng dựng phim tải media vào workspace như bình thường.
 
 ---
 
@@ -144,6 +160,7 @@ Workflow `.github/workflows/ci.yml` chạy kiểm thử tự động trên Ubunt
 python -m pip install -r requirements.txt pytest==8.3.4
 node --check static/js/app.js
 node --check static/js/ui.js
+node --test scripts/test_muse_browser_gateway.mjs
 python -m pytest -q --ignore=test_audit_fixes.py --ignore=test_new_audit_fixes.py --ignore=test_e2e_video_subtitles.py --ignore=test_tts_multi_engine.py
 ```
 
