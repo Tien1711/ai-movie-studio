@@ -22,7 +22,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import aiofiles
 import httpx
@@ -700,7 +700,23 @@ def _spawn_job_task(job_id: str, coro) -> "asyncio.Task":
     """Spawn pipeline task và lưu reference để cancel thật (audit §1.6).
     Thay BackgroundTasks ở các endpoint tạo phim: task vẫn chạy sau khi trả
     response, nhưng server giữ được handle để cancel + log exception khi task
-    kết thúc bất thường."""
+    kết thúc bất thường.
+
+    Nhóm C (audit #5): nếu đã có task sống cho job này thì KHÔNG spawn chồng
+    (2 pipeline cùng ghi results/clip của 1 job) — trả về task cũ và đóng
+    coroutine chưa chạy, để caller không mất handle task đang chạy.
+    """
+    with JOBS_LOCK:
+        existing = JOB_TASKS.get(job_id)
+        if existing is not None and not existing.done():
+            logger.warning(
+                "Bỏ qua spawn pipeline chồng cho job %s (đã có task đang chạy).",
+                job_id)
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return existing
     task = asyncio.create_task(coro)
     with JOBS_LOCK:
         JOB_TASKS[job_id] = task
@@ -728,6 +744,11 @@ def _spawn_job_task(job_id: str, coro) -> "asyncio.Task":
 RENDER_QUEUE: List[str] = []  # job_id chờ render, theo thứ tự vào hàng
 RENDER_QUEUE_WORKER: Optional["asyncio.Task"] = None
 RENDER_CURRENT_JOB_ID: Optional[str] = None
+# Nhóm C (audit #5): job_id đang compose thủ công qua /api/jobs/{id}/compose.
+# Chỉ sống trong bộ nhớ (không lưu job_state.json) — giữ dưới JOBS_LOCK, để
+# gate chống chạy chồng thấy được lần compose thủ công đang chạy (nó không nằm
+# trong JOB_TASKS như pipeline).
+_MANUAL_COMPOSE_JOBS: Set[str] = set()
 
 
 def _job_title(job: Optional[Dict]) -> str:
@@ -881,6 +902,37 @@ def _mark_job_cancelled(job: Dict) -> None:
         if isinstance(sc, dict) and sc.get("status") not in ("done", "error"):
             sc["status"] = "cancelled"
             sc["msg"] = "🛑 Đã hủy"
+
+
+def _job_cancel_requested(job: Dict, cancel_event: Optional["asyncio.Event"] = None) -> bool:
+    """Job đã bị người dùng hủy hay chưa — cờ dict, status, hoặc asyncio.Event
+    (audit #4). Dùng chung cho cả 3 pipeline sau mỗi bước compose."""
+    if job.get("cancelled") or job.get("status") == "cancelled":
+        return True
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _mark_cancelled_after_compose(job: Dict, cancel_event: Optional["asyncio.Event"] = None) -> bool:
+    """Kiểm tra hủy SAU một bước compose (asyncio.to_thread): nếu job đã bị
+    hủy trong lúc compose thì đánh dấu cancelled và KHÔNG ghi final_video/done
+    (audit #4 — trước đây code gán done vô điều kiện, ghi đè trạng thái
+    cancelled). Trả True khi đã hủy (caller return ngay), False khi tiếp tục."""
+    if not _job_cancel_requested(job, cancel_event):
+        return False
+    _mark_job_cancelled(job)
+    job_log(job, "🛑 Job đã bị hủy bởi người dùng (trong lúc hậu kỳ).")
+    _save_job_best_effort(job)
+    return True
+
+
+def _job_has_active_rerender(job: Dict) -> bool:
+    """Có cảnh nào đang được render lại (cờ rerendering) không (audit #5)."""
+    scenes = job.get("scenes") or {}
+    if isinstance(scenes, dict):
+        for sc in scenes.values():
+            if isinstance(sc, dict) and sc.get("rerendering"):
+                return True
+    return False
 
 
 # ── Background Pipeline ────────────────────────────────────────────────────
@@ -1117,6 +1169,9 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                         audio_duration=float(r["audio_duration"]),
                         aspect_ratio=req.aspect_ratio or "16:9",
                     )
+                    # Nhóm C (audit #4): hủy giữa lúc ghép clip -> dừng, không gán done.
+                    if _mark_cancelled_after_compose(job, cancel_event):
+                        return
                     clips.append(f"/api/jobs/{job_id}/clips/clip_{idx:03d}.mp4")
                 job["clips"] = clips
                 job["progress"] = 100
@@ -1140,6 +1195,9 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     aspect_ratio=req.aspect_ratio or "16:9",
                     allow_partial=bool(req.allow_partial),
                 )
+                # Nhóm C (audit #4): hủy trong lúc compose -> không ghi final_video/done.
+                if _mark_cancelled_after_compose(job, cancel_event):
+                    return
                 final_path = _unwrap_final_path(compose_res)
                 rel = Path(final_path).name
                 job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
@@ -1156,8 +1214,14 @@ async def film_pipeline(job: Dict, req: MovieRequest):
 
 
         except Exception as e:
-            job["status"] = "error"
-            job_log(job, f"❌ Lỗi hậu kỳ: {e}")
+            # Nhóm C (audit #4): compose lỗi đúng lúc vừa bị hủy -> giữ cancelled,
+            # không ghi đè thành error.
+            if _job_cancel_requested(job, cancel_event):
+                _mark_job_cancelled(job)
+                job_log(job, "🛑 Job đã bị hủy bởi người dùng (trong lúc hậu kỳ).")
+            else:
+                job["status"] = "error"
+                job_log(job, f"❌ Lỗi hậu kỳ: {e}")
             try:
                 job["timing"]["compose_s"] = round(time.monotonic() - compose_t0, 3)
                 job["timing"]["total_s"] = round(time.monotonic() - pipe_t0, 3)
@@ -1535,6 +1599,9 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
                 aspect_ratio=req.aspect_ratio or "16:9",
                 allow_partial=False,
             )
+            # Nhóm C (audit #4): hủy trong lúc compose -> không ghi final_video/done.
+            if _mark_cancelled_after_compose(job, retry_cancel_event):
+                return
             final_path = _unwrap_final_path(compose_res)
             rel = Path(final_path).name
             job["final_video"] = f"/api/jobs/{job['id']}/video/{rel}"
@@ -1544,8 +1611,13 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             job_log(job, f"🎉 Đã tái xuất phim hoàn chỉnh 100%! → {rel}")
             _save_job_best_effort(job)
         except Exception as e:
-            job["status"] = "error"
-            job_log(job, f"❌ Lỗi hậu kỳ sau khi render lại: {e}")
+            # Nhóm C (audit #4): compose lỗi đúng lúc vừa bị hủy -> giữ cancelled.
+            if _job_cancel_requested(job, retry_cancel_event):
+                _mark_job_cancelled(job)
+                job_log(job, "🛑 Đợt render lại đã bị hủy bởi người dùng (trong lúc hậu kỳ).")
+            else:
+                job["status"] = "error"
+                job_log(job, f"❌ Lỗi hậu kỳ sau khi render lại: {e}")
             _save_job_best_effort(job)
     finally:
         job["is_retrying"] = False
@@ -1566,9 +1638,23 @@ async def retry_failed_scenes(job_id: str, auto_fix: bool = True):
     with JOBS_LOCK:
         if job.get("is_retrying"):
             return JSONResponse({"error": "Tiến trình render lại đang chạy trong nền, vui lòng đợi hoàn tất trước khi bấm tiếp!"}, status_code=400)
+        # Nhóm C (audit #5): không retry chồng lên pipeline đang chạy, job đang
+        # chờ hàng đợi, cảnh đang rerender, hay lần compose thủ công đang chạy
+        # (các gate nhìn thấy cờ của nhau nên _spawn_job_task không bao giờ phải
+        # từ chối spawn sau khi đã set is_retrying).
+        if (_is_job_running(job) or job.get("status") == "queued"
+                or job_id in RENDER_QUEUE or job_id in _MANUAL_COMPOSE_JOBS
+                or _job_has_active_rerender(job)):
+            return JSONResponse(
+                {"error": "Job đang render — hãy đợi xong rồi thử lại."},
+                status_code=409)
         # Đặt cờ NGAY trong request, dưới lock, TRƯỚC khi trả response (audit §1.6):
         # 2 request liên tiếp không thể cùng qua gate này nữa.
         job["is_retrying"] = True
+        # Nhóm C (audit #4): thao tác mới của người dùng — xóa cờ hủy cũ để đợt
+        # retry này chỉ dừng khi có lệnh hủy MỚI (kẻo check hủy sau run_batch
+        # đọc cờ cũ rồi abort ngay).
+        job["cancelled"] = False
     failed = list(job["failed_scenes"])
     _spawn_job_task(job_id, retry_failed_pipeline(job, auto_fix))
     _save_job_best_effort(job)
@@ -1915,15 +2001,27 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
                             aspect_ratio=req.aspect_ratio or "16:9",
                             allow_partial=False,
                         )
-                        final_path = _unwrap_final_path(compose_res)
-                        rel = Path(final_path).name
-                        job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
-                        _sync_job_srt_file(job, compose_res)
-                        job["progress"] = 100
-                        job["status"] = "done"
-                        job_log(job, f"🎉 Đã tái xuất phim hoàn chỉnh 100%! → {rel}")
+                        # Nhóm C (audit #4): hủy trong lúc ghép lại -> không ghi
+                        # final_video/done. Không return ở đây để cuối hàm vẫn
+                        # clear cờ rerendering + save như mọi đường khác.
+                        if _job_cancel_requested(job):
+                            _mark_job_cancelled(job)
+                            job_log(job, f"🛑 [Cảnh {idx}] Job đã bị hủy trong lúc ghép lại phim — không ghi final_video.")
+                        else:
+                            final_path = _unwrap_final_path(compose_res)
+                            rel = Path(final_path).name
+                            job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
+                            _sync_job_srt_file(job, compose_res)
+                            job["progress"] = 100
+                            job["status"] = "done"
+                            job_log(job, f"🎉 Đã tái xuất phim hoàn chỉnh 100%! → {rel}")
                     except Exception as e:
-                        job_log(job, f"⚠️ Lỗi ghép phim: {e}")
+                        # Nhóm C (audit #4): lỗi ghép đúng lúc vừa bị hủy -> giữ cancelled.
+                        if _job_cancel_requested(job):
+                            _mark_job_cancelled(job)
+                            job_log(job, f"🛑 [Cảnh {idx}] Job đã bị hủy trong lúc ghép lại phim.")
+                        else:
+                            job_log(job, f"⚠️ Lỗi ghép phim: {e}")
                 else:
                     job["status"] = "audit_pending"
                     job_log(job, f"ℹ️ [Cảnh {idx}] Đã tạo lại xong. Hiện có {audit['done_count']}/{audit['total']} cảnh hoàn tất.")
@@ -1972,19 +2070,37 @@ async def retry_single_scene_endpoint(
     if not target_scene:
         return JSONResponse({"error": f"Không tìm thấy cảnh {scene_idx}"}, status_code=404)
 
-    sc_entry = _scene(job, scene_idx)
-    if payload and payload.prompt:
-        target_scene.prompt = payload.prompt
-        sc_entry["prompt"] = payload.prompt
-    if payload and payload.voiceover is not None:
-        target_scene.voiceover = payload.voiceover
-        sc_entry["voiceover"] = payload.voiceover
-
-    sc_entry["status"] = "running"
-    sc_entry["msg"] = "🔄 Đang chuẩn bị render lại..."
-    sc_entry["error"] = None
-    _set_scene(job, scene_idx, sc_entry)
-    _save_job_or_http500(job)
+    with JOBS_LOCK:
+        # Nhóm C (audit #5): gate chống chạy chồng, giống rerender endpoint —
+        # job đang render, đang retry-failed, đang chờ hàng đợi, đang compose
+        # thủ công, hoặc cảnh này đang được render lại thì từ chối 409.
+        # Check + set cờ trong cùng 1 lock để 2 request liên tiếp không cùng lọt.
+        if (_is_job_running(job) or job.get("is_retrying")
+                or job.get("status") == "queued" or job_id in RENDER_QUEUE
+                or job_id in _MANUAL_COMPOSE_JOBS
+                or _scene(job, scene_idx).get("rerendering")):
+            return JSONResponse(
+                {"error": "Job đang render (hoặc cảnh này đang được render lại) — hãy đợi xong rồi thử lại."},
+                status_code=409)
+        # Thao tác mới của người dùng: xóa cờ hủy cũ để lần retry này chỉ dừng
+        # khi có lệnh hủy MỚI (audit #4); job từng bị hủy quay về trạng thái
+        # chờ kiểm định thay vì kẹt ở "cancelled".
+        job["cancelled"] = False
+        if job.get("status") == "cancelled":
+            job["status"] = "audit_pending"
+        sc_entry = _scene(job, scene_idx)
+        sc_entry["rerendering"] = True
+        if payload and payload.prompt:
+            target_scene.prompt = payload.prompt
+            sc_entry["prompt"] = payload.prompt
+        if payload and payload.voiceover is not None:
+            target_scene.voiceover = payload.voiceover
+            sc_entry["voiceover"] = payload.voiceover
+        sc_entry["status"] = "running"
+        sc_entry["msg"] = "🔄 Đang chuẩn bị render lại..."
+        sc_entry["error"] = None
+        _set_scene(job, scene_idx, sc_entry)
+        _save_job_or_http500(job)
 
     _spawn_job_task(job_id, single_scene_pipeline(job, target_scene))
     return {
@@ -2104,7 +2220,13 @@ async def rerender_single_scene_endpoint(
     target_scene = next((s for s in req.scenes if s.index == scene_idx), None)
     if not target_scene:
         return JSONResponse({"error": f"Không tìm thấy cảnh {scene_idx}"}, status_code=404)
-    if _is_job_running(job) or _scene(job, scene_idx).get("rerendering"):
+    # Nhóm C (audit #5): gate nhìn thấy cả cờ is_retrying / compose thủ công /
+    # job chờ hàng đợi để không spawn chồng lên retry-failed hay compose
+    # (tránh _spawn_job_task phải từ chối sau khi đã set cờ rerendering).
+    if (_is_job_running(job) or job.get("is_retrying")
+            or job.get("status") == "queued" or job_id in RENDER_QUEUE
+            or job_id in _MANUAL_COMPOSE_JOBS
+            or _scene(job, scene_idx).get("rerendering")):
         return JSONResponse(
             {"error": "Job đang render (hoặc cảnh này đang được render lại) — hãy đợi xong rồi thử lại."},
             status_code=409)
@@ -2357,15 +2479,30 @@ def list_jobs():
 def delete_job(job_id: str):
     """Xoá job và toàn bộ workspace của job đó an toàn."""
     job = get_or_restore_job(job_id)
-    if job is not None and _is_job_running(job):
-        return JSONResponse(
-            {"error": "Job đang chạy, không thể xoá. Hãy hủy job trước."},
-            status_code=409)
-    # Nhóm 1: job còn chờ trong hàng đợi thì gỡ khỏi hàng trước khi xóa.
-    dequeue_render_job(job_id)
     job_dir = get_safe_job_dir(job_id)
+    removed_from_queue = False
     with JOBS_LOCK:
+        live = JOBS.get(job_id)
+        # Nhóm C (audit #6): chặn cả job đang chờ trong hàng đợi / job worker
+        # vừa pop khỏi hàng nhưng chưa kịp set running (status vẫn "queued"
+        # trong cửa sổ đó) / job worker đang chạy. Check + dequeue + pop JOBS
+        # nguyên tử dưới cùng 1 lock — endpoint delete chạy ở threadpool nên
+        # có thể xen vào giữa pop và set-running của worker nếu không khóa.
+        if live is not None and (
+            _is_job_running(live)
+            or live.get("status") == "queued"
+            or job_id in RENDER_QUEUE
+            or job_id == RENDER_CURRENT_JOB_ID
+        ):
+            return JSONResponse(
+                {"error": "Job đang chạy hoặc đang chờ trong hàng đợi, không thể xoá. Hãy hủy job trước."},
+                status_code=409)
+        if job_id in RENDER_QUEUE:
+            RENDER_QUEUE.remove(job_id)
+            removed_from_queue = True
         job = JOBS.pop(job_id, None)
+    if removed_from_queue:
+        _refresh_queue_positions()
     if not job and not job_dir.exists():
         return JSONResponse({"error": "Không tìm thấy job"}, status_code=404)
     if job_dir.exists() and job_dir.is_dir():
@@ -2401,6 +2538,21 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
     if not results:
         return JSONResponse({"error": "Không có dữ liệu cảnh nào để xuất phim"}, status_code=400)
 
+    # Nhóm C (audit #5): gate chống chạy chồng — compose thủ công không được
+    # chạy đè lên pipeline đang render / retry / rerender / compose khác.
+    with JOBS_LOCK:
+        if (_is_job_running(job) or job.get("is_retrying")
+                or job.get("status") == "queued" or job_id in RENDER_QUEUE
+                or job_id in _MANUAL_COMPOSE_JOBS
+                or _job_has_active_rerender(job)):
+            return JSONResponse(
+                {"error": "Job đang render — hãy đợi xong rồi thử lại."},
+                status_code=409)
+        # Thao tác mới của người dùng: xóa cờ hủy cũ để lần compose này chỉ
+        # dừng khi có lệnh hủy MỚI (audit #4).
+        job["cancelled"] = False
+        _MANUAL_COMPOSE_JOBS.add(job_id)
+
     output_dir = WORKSPACE / job_id
     title = (req.title if req else "movie").replace(" ", "_")
     font_size = req.font_size if req else 22
@@ -2431,6 +2583,9 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
             aspect_ratio=aspect_ratio,
             allow_partial=allow_partial,
         )
+        # Nhóm C (audit #4): hủy trong lúc compose thủ công -> không ghi final_video/done.
+        if _mark_cancelled_after_compose(job):
+            return JSONResponse({"error": "Job đã bị hủy trong lúc xuất phim."}, status_code=409)
         final_path = _unwrap_final_path(compose_res)
         rel = Path(final_path).name
         job["final_video"] = f"/api/jobs/{job_id}/video/{rel}"
@@ -2444,6 +2599,10 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
         job_log(job, f"❌ Lỗi xuất phim: {e}")
         _save_job_best_effort(job)
         return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        # Nhóm C (audit #5): luôn gỡ cờ compose thủ công, kể cả khi lỗi/hủy.
+        with JOBS_LOCK:
+            _MANUAL_COMPOSE_JOBS.discard(job_id)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -3812,16 +3971,61 @@ def api_clean_workspace(keep_projects: bool = True):
     if keep_projects:
         protected_dirs.update({"_projects", "_shot_desk_projects", "_batch_videos", "_story_projects"})
 
-    for item in WORKSPACE.iterdir():
-        if item.is_dir() and item.name not in protected_dirs:
-            try:
-                for root, dirs, files in os.walk(item):
-                    for file in files:
-                        bytes_freed += os.path.getsize(os.path.join(root, file))
-                shutil.rmtree(item)
-                deleted_jobs += 1
-            except Exception as e:
-                print(f"[CleanWorkspaceError] {e}")
+    # Nhóm C (audit #6): chụp snapshot thư mục TRƯỚC khi xóa (iterdir lazy có
+    # thể thấy thư mục job mới tạo giữa chừng).
+    items = [it for it in WORKSPACE.iterdir()
+             if it.is_dir() and it.name not in protected_dirs]
+    for item in items:
+        # Chỉ xóa thư mục job đã biết: có job_state.json với id khớp tên thư
+        # mục. Thư mục lạ/không rõ job thì để lại, không xóa bừa.
+        state_file = item / "job_state.json"
+        job_id = None
+        try:
+            if state_file.exists():
+                with open(state_file, "r", encoding="utf-8") as f:
+                    _state = json.load(f)
+                if isinstance(_state, dict) and _state.get("id") == item.name:
+                    job_id = item.name
+        except Exception:
+            job_id = None
+        if job_id is None:
+            continue
+        # Re-check ngay trước khi xóa: job có thể vừa được resume/render lại
+        # trong lúc dọn (check đầu hàm đã thả lock từ lâu).
+        with JOBS_LOCK:
+            _live = JOBS.get(job_id)
+            if ((_live is not None and (_live.get("status") in ("running", "queued")
+                                        or _is_job_running(_live)))
+                    or job_id in RENDER_QUEUE
+                    or job_id == RENDER_CURRENT_JOB_ID):
+                continue
+        try:
+            for root, dirs, files in os.walk(item):
+                for file in files:
+                    bytes_freed += os.path.getsize(os.path.join(root, file))
+            shutil.rmtree(item)
+            deleted_jobs += 1
+        except Exception as e:
+            print(f"[CleanWorkspaceError] {e}")
+            continue
+        # Sau khi xóa thư mục thì xóa khỏi bộ nhớ + hàng đợi (không để lại job
+        # ma). Re-check lần nữa: nếu job vừa trở nên active trong lúc xóa đĩa
+        # thì giữ lại trong JOBS (pipeline sẽ tự tạo lại thư mục).
+        _queue_changed = False
+        with JOBS_LOCK:
+            _live = JOBS.get(job_id)
+            if _live is None or (
+                _live.get("status") not in ("running", "queued")
+                and not _is_job_running(_live)
+                and job_id not in RENDER_QUEUE
+                and job_id != RENDER_CURRENT_JOB_ID
+            ):
+                JOBS.pop(job_id, None)
+                if job_id in RENDER_QUEUE:
+                    RENDER_QUEUE.remove(job_id)
+                    _queue_changed = True
+        if _queue_changed:
+            _refresh_queue_positions()
     mb_freed = round(bytes_freed / (1024 * 1024), 2)
     return {
         "success": True,

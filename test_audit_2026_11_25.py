@@ -177,6 +177,11 @@ def test_h3_workspace_clean_protects_batch_and_story_dirs(tmp_path, monkeypatch)
         d = ws / name
         d.mkdir(parents=True)
         (d / "marker.txt").write_text("ok", encoding="utf-8")
+    # Nhóm C (audit #6): temp_job_123 là thư mục job ĐÃ BIẾT (có job_state.json
+    # khớp id) nên vẫn bị xóa; thư mục lạ không có job_state.json thì được giữ
+    # lại (xem test_clean_workspace_skips_unknown_dirs).
+    (ws / "temp_job_123" / "job_state.json").write_text(
+        json.dumps({"id": "temp_job_123", "status": "done"}), encoding="utf-8")
 
     monkeypatch.setattr(app_module, "WORKSPACE", ws)
     # Bảo đảm không có job running giả trong bộ nhớ
