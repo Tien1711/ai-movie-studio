@@ -994,10 +994,14 @@ def _check_fabricated_patterns(text: str, patterns) -> List[Dict[str, Any]]:
 # số lượng, giữ thương hiệu + loại sản phẩm: "SỮA ENSURE GOLD".
 _PACKAGING_TOKENS = (
     r"\bCOMBO\b",
-    r"\b\d+\s*(LON|HỘP|GÓI|CHAI|TÚI|LỌ|VIÊN|GÓI)\b",
+    r"\bSET\b",
+    r"\bBỘ\b",
+    r"\b\d+\s*(LON|HỘP|GÓI|CHAI|TÚI|LỌ|VIÊN|GÓI|HŨ|BỊCH|THÙNG|CAN|CÁI|CHIẾC|PACK|PCS|PIECES)\b",
+    r"\b(LON|HỘP|GÓI|CHAI|TÚI|LỌ|HŨ|BỊCH|THÙNG)\b",
     r"\bDẠNG\s+\w+",
     r"\bHƯƠNG\s+\w+",
     r"\b\d+\s*(G|KG|ML|L|MG)\b",
+    r"\bX\d+\b",
     r"\b\d+\s*\+\s*\d+\b",
 )
 
@@ -1025,15 +1029,23 @@ def _product_search_keywords(cleaned_query: str) -> List[str]:
 
 
 def _image_url_matches_product(url: str, keywords: List[str]) -> bool:
-    """Ảnh web chỉ giữ khi URL chứa ít nhất 1 từ khóa sản phẩm.
+    """Ảnh web chỉ giữ khi URL chứa ít nhất 2 từ khóa sản phẩm, HOẶC chứa
+    từ khóa thương hiệu (từ dài nhất — vd "ensure" trong
+    ["sua", "ensure", "gold", "milk"]).
 
-    Ảnh nền tảng gốc (Shopee/TikTok) KHÔNG qua lọc này — chúng lấy từ chính
+    Audit #6 (2026-11-25): truoc day chi can 1 tu khoa — URL
+    gold-necklace.jpg dau loc cho Ensure Gold chi vi chua "gold".
+    Anh nền tảng gốc (Shopee/TikTok) KHÔNG qua lọc này — chúng lấy từ chính
     trang sản phẩm nên đáng tin. Lọc chỉ áp dụng cho kết quả tìm kiếm web.
     """
     if not keywords:
         return True
     hay = _strip_vi_diacritics(url or "").lower()
-    return any(k in hay for k in keywords)
+    hits = [k for k in keywords if k in hay]
+    if len(hits) >= 2:
+        return True
+    brand = max(keywords, key=len)
+    return brand in hay
 
 
 def _normalize_affiliate_script(

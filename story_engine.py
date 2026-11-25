@@ -112,6 +112,22 @@ _NO_EXTRA_SUBJECTS = (
 )
 
 _BIRD_WORDS = ("chim", "phượng")
+# Chi nhung tu nay moi la "chim than" can khoa phuong hoang vang (audit
+# #6, 2026-11-25): "chim" thuong (se, diep...) giu keyword "bird" chung.
+_MAGIC_BIRD_WORDS = ("phượng hoàng", "phượng", "chim thần")
+
+
+def _contains_word(text: str, word: str) -> bool:
+    """Kiem tra 1 tu/cum co xuat hien nhu MOT TU doc lap trong text khong
+    (word boundary), khong khop chuoi con.
+
+    Audit #14 (2026-11-25): "ma" trong "may/mang/mai", "oan" trong
+    "toan" khong duoc tinh. Dung chung cho _dramatic_score, _TWIST_WORDS,
+    moral check va _MAGIC_BIRD_WORDS — cung quy tac nhu _scene_keywords
+    (fix 2026-11-23)."""
+    if not text or not word:
+        return False
+    return re.search(r"\b" + re.escape(word) + r"\b", text.lower()) is not None
 
 
 def _clean_text(raw: str) -> str:
@@ -787,7 +803,8 @@ def _dramatic_score(sentence: str) -> int:
     if "?" in sentence:
         score += 2
     for w in _DRAMATIC_WORDS:
-        if w in s:
+        # Audit #14: khop theo TU (word boundary), khong khop chuoi con.
+        if _contains_word(s, w):
             score += 2
     if 20 <= len(sentence) <= 130:
         score += 1
@@ -822,7 +839,10 @@ def _scene_prompt(scene_text: str, visual_style: str, aspect_ratio: str,
              else "1:1 square format")
     kws = _scene_keywords(scene_text)
     low = scene_text.lower()
-    if any(w in low for w in _BIRD_WORDS):
+    # Audit #6: chi khoa phuong hoang vang khi ngu canh noi ve CHIM THAN
+    # (phuong/phuong hoang/chim than) — "chim se", "chim diep"... giu
+    # keyword "bird" chung de anh AI khong ve sai loai.
+    if any(_contains_word(low, w) for w in _MAGIC_BIRD_WORDS):
         # Khóa chim thần: thay "bird" chung chung bằng Character Block nguyên văn,
         # giống hệt mọi cảnh có chim để ảnh AI không đổi loài.
         kws = [MAGIC_BIRD_BLOCK if k == "bird" else k for k in kws]
@@ -934,7 +954,8 @@ def adapt_chapter(chapter_text: str, mode: str, scenes_count: int,
     elif mode == "suspense" and scenes:
         twist_at = None
         for i, sc in enumerate(scenes):
-            if any(w in sc["voiceover"].lower() for w in _TWIST_WORDS):
+            # Audit #14: khop theo TU, khong khop chuoi con.
+            if any(_contains_word(sc["voiceover"], w) for w in _TWIST_WORDS):
                 twist_at = i
                 break
         if twist_at is None:
@@ -944,8 +965,8 @@ def adapt_chapter(chapter_text: str, mode: str, scenes_count: int,
     elif mode == "podcast" and scenes:
         moral = None
         for s in reversed(sentences):
-            low = s.lower()
-            if any(k in low for k in ("bài học", "rút ra", "hãy nhớ", "đừng", "phải biết", "mới hiểu")):
+            # Audit #14: khop theo TU, khong khop chuoi con.
+            if any(_contains_word(s, k) for k in ("bài học", "rút ra", "hãy nhớ", "đừng", "phải biết", "mới hiểu")):
                 moral = s
                 break
         closing = (f"Bài học đọng lại sau câu chuyện này: {moral}"

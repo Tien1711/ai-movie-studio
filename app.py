@@ -11,6 +11,8 @@ FastAPI backend:
 import asyncio
 import base64
 import copy
+import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -23,6 +25,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import parse_qs
 
 import aiofiles
 import httpx
@@ -94,9 +97,44 @@ JOB_CANCEL_EVENTS: Dict[str, "asyncio.Event"] = {}
 # cho mỗi IP (bộ nhớ tiến trình; không thêm dependency slowapi/redis).
 _RATE_LIMIT_REQUESTS = 300
 _RATE_LIMIT_WINDOW_S = 60.0
+# Audit #5a (2026-11-25): gioi han kich thuoc dict bucket — vuot nguong thi
+# don cac bucket het han (truoc day khong bao gio xoa key IP cu -> ro ri RAM).
+_RATE_LIMIT_MAX_BUCKETS = 10000
 _rate_limit_buckets: Dict[str, list] = {}  # ip -> [window_start_monotonic, count]
 _RATE_LIMIT_LOCK = threading.Lock()
 _AUTH_WARNING_LOGGED = False
+
+
+def _client_ip_from_scope(scope) -> str:
+    """IP client that de tinh rate-limit / log.
+
+    Audit #5a (2026-11-25): truoc day doc thang scope["client"] — sau
+    proxy moi client chung 1 bucket (local thi tat ca la 127.0.0.1 nen
+    limit 300/phut thanh global). Gio uu tien X-Forwarded-For (entry
+    dau tien = client goc) NHUNG chi khi peer truc tiep KHONG phai IP
+    cong khai (loopback / private / CGNAT — tuc la dang sau proxy tin
+    cay hoac chay local). Peer cong khai ma gui XFF thi bo qua XFF de
+    khong ai tu gia mao IP ne rate-limit. XFF khong hop le thi dung peer.
+    """
+    client = scope.get("client") or ("unknown", 0)
+    peer = str(client[0]) if client else "unknown"
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if peer_ip.is_global:
+        return peer
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+               for k, v in scope.get("headers", [])}
+    xff = headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        try:
+            ipaddress.ip_address(first)
+            return first
+        except ValueError:
+            pass
+    return peer
 
 
 async def _send_json_via_asgi(send, status: int, payload: Dict[str, Any], extra_headers=None):
@@ -110,7 +148,10 @@ async def _send_json_via_asgi(send, status: int, payload: Dict[str, Any], extra_
 
 class _RateLimitMiddleware:
     """Giới hạn 300 request/phút/IP cho /api/* (bộ nhớ tiến trình), vượt -> 429.
-    Pure-ASGI passthrough: không đọc/đệm body nên không ảnh hưởng SSE/stream."""
+    Pure-ASGI passthrough: không đọc/đệm body nên không ảnh hưởng SSE/stream.
+    IP lay qua _client_ip_from_scope (uu tien X-Forwarded-For khi peer
+    khong phai IP cong khai); bucket het han duoc don khi dict vuot nguong
+    (audit #5a, 2026-11-25)."""
 
     def __init__(self, app, limit: int = _RATE_LIMIT_REQUESTS, window: float = _RATE_LIMIT_WINDOW_S):
         self.app = app
@@ -121,12 +162,16 @@ class _RateLimitMiddleware:
         if scope.get("type") != "http" or not str(scope.get("path", "")).startswith("/api/"):
             await self.app(scope, receive, send)
             return
-        client = scope.get("client") or ("unknown", 0)
-        ip = str(client[0]) if client else "unknown"
+        ip = _client_ip_from_scope(scope)
         now = time.monotonic()
         with _RATE_LIMIT_LOCK:
             bucket = _rate_limit_buckets.get(ip)
             if bucket is None or now - bucket[0] >= self.window:
+                if bucket is None and len(_rate_limit_buckets) >= _RATE_LIMIT_MAX_BUCKETS:
+                    # Don bucket het han de dict khong phi vo han.
+                    for _old_ip in [k for k, v in _rate_limit_buckets.items()
+                                    if now - v[0] >= self.window]:
+                        del _rate_limit_buckets[_old_ip]
                 _rate_limit_buckets[ip] = [now, 1]
                 allowed = True
             else:
@@ -147,10 +192,13 @@ class _ApiKeyAuthMiddleware:
       Frontend tĩnh gửi header này qua apiFetch() (static/js/app.js, lấy key
       từ localStorage 'ams-api-key'); xem GET /api/auth/status để biết
       server có bắt buộc key không.
-    - Miễn: "/" , "/health", "/api/health và "/api/jobs/{id}/sse" (EventSource của
-      trình duyệt không gửi được custom header; miễn SSE để khỏi vỡ frontend —
-      SSE chỉ lộ tiến độ/log của job_id, chấp nhận rủi ro này; TODO: cho SSE
-      nhận api_key qua query param khi frontend hỗ trợ).
+    - Miễn: "/" , "/health", "/api/health. Riêng "/api/jobs/{id}/sse"
+      (EventSource của trình duyệt không gửi được custom header): nhan
+      api_key qua query param `?api_key=...` (audit #5a, 2026-11-25 —
+      hoan thanh TODO cu); thieu/sai key -> 401 nhu cac endpoint khac.
+      Khi chua dat STUDIO_API_KEY thi SSE van mo nhu cu. Frontend gui
+      key qua initSSE() trong static/js/app.js.
+    - So key bang hmac.compare_digest (audit #5a: truoc day dung !=).
     """
 
     def __init__(self, app):
@@ -164,7 +212,8 @@ class _ApiKeyAuthMiddleware:
         if not path.startswith("/api/"):
             await self.app(scope, receive, send)
             return
-        if path in ("/api/health", "/api/auth/status") or (path.startswith("/api/jobs/") and path.endswith("/sse")):
+        is_sse = path.startswith("/api/jobs/") and path.endswith("/sse")
+        if path in ("/api/health", "/api/auth/status"):
             await self.app(scope, receive, send)
             return
         expected = os.getenv("STUDIO_API_KEY")
@@ -179,7 +228,13 @@ class _ApiKeyAuthMiddleware:
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers", [])}
-        if headers.get("x-api-key") != expected:
+        # Audit #5a: SSE nhan key qua query param (EventSource khong gui
+        # duoc custom header); endpoint thuong dung header X-API-Key.
+        if is_sse:
+            provided = parse_qs(scope.get("query_string", b"").decode("latin-1")).get("api_key", [""])[0]
+        else:
+            provided = headers.get("x-api-key") or ""
+        if not hmac.compare_digest(provided, expected):
             await _send_json_via_asgi(
                 send, 401, {"error": "Thiếu hoặc sai header X-API-Key"})
             return

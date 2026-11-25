@@ -941,7 +941,12 @@ class BatchVideoManager:
                     "error": None
                 }
                 if extra:
-                    item.update(extra)
+                    # Audit #6 (2026-11-25): extra khong duoc ghi de cac
+                    # truong he thong (id/status/...) — chi bo sung metadata.
+                    _reserved = {"id", "status", "order_num", "progress",
+                                 "created_at", "updated_at"}
+                    item.update({k: v for k, v in extra.items()
+                                 if k not in _reserved})
 
                 # Lưu metadata cục bộ của video an toàn
                 try:
@@ -963,6 +968,10 @@ class BatchVideoManager:
         return created_items
 
     def get_video(self, video_id: str) -> Optional[Dict[str, Any]]:
+        # Audit #6 (2026-11-25): chan ID khong an toan ngay tu dau (nhu
+        # delete_video / _process_single_video da lam).
+        if not is_safe_video_id(video_id):
+            return None
         videos = self._read_queue()
         for v in videos:
             if v.get("id") == video_id:
@@ -970,6 +979,11 @@ class BatchVideoManager:
         return None
 
     def update_video(self, video_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Audit #6: chan ID khong an toan — neu khong, BATCH_DIR/video_id
+        # o duoi co the thoat ra ngoai workspace khi ghi project.json.
+        if not is_safe_video_id(video_id):
+            logger.warning("Bỏ qua cập nhật video ID không an toàn: %s", video_id)
+            return None
         with _QUEUE_LOCK:
             videos = self._read_queue()
             target = None
@@ -1134,7 +1148,15 @@ class BatchVideoManager:
         from shot_desk import save_shot_desk_project, to_slug
 
         proj_slug = to_slug(v.get("title") or "video_hang_loat")
-        proj_id = f"{proj_slug}_{v['id'].replace('bv_', '')}"
+        proj_base = f"{proj_slug}_{v['id'].replace('bv_', '')}"
+        # Audit #6 (2026-11-25): convert 2 lan cung video khong duoc ghi
+        # de project cu (mat prompt/voice/transition/approval nguoi dung
+        # da sua) — tao proj_id moi voi hau to tang dan.
+        proj_id = proj_base
+        _suffix = 2
+        while (WORKSPACE_DIR / "_shot_desk_projects" / proj_id / "project.json").exists():
+            proj_id = f"{proj_base}_{_suffix}"
+            _suffix += 1
         proj_dir = WORKSPACE_DIR / "_shot_desk_projects" / proj_id
         proj_dir.mkdir(parents=True, exist_ok=True)
         (proj_dir / "clips").mkdir(exist_ok=True)
@@ -1459,6 +1481,12 @@ def _generate_fallback_clip(
     has_audio = audio_path and audio_path.exists() and audio_path.stat().st_size > 100
     if has_audio:
         cmd.extend(["-i", str(audio_path)])
+    else:
+        # Audit #12 (2026-11-25): input thu hai (anullsrc) phai dung
+        # TRUOC moi option output nhu -vf — truoc day -vf dung giua 2
+        # lenh -i nen ffmpeg hieu -vf la option cua input thu hai va loi
+        # 100% o nhanh khong-audio.
+        cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
 
     # Video filters: Tạo hiệu ứng zoom nhẹ + vignette + mờ viền
     v_filter = "format=yuv420p"
@@ -1467,7 +1495,7 @@ def _generate_fallback_clip(
     if has_audio:
         cmd.extend(["-c:a", "aac", "-b:a", "192k", "-shortest"])
     else:
-        cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-c:a", "aac", "-shortest"])
+        cmd.extend(["-c:a", "aac", "-shortest"])
 
     cmd.extend([
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
@@ -1711,8 +1739,10 @@ def _process_single_video(video_id: str):
         concat_txt = v_dir / "concat.txt"
         srt_file = v_dir / "subtitles.srt"
 
-        # Tạo file danh sách nối cảnh
-        lines = [f"file '{p.resolve().as_posix()}'" for p in scene_clips]
+        # Tạo file danh sách nối cảnh (escape ' theo chuan ffmpeg — audit
+        # #6, 2026-11-25: f-string tho vo khi username dang O'Brien).
+        from composer import _concat_list_line
+        lines = [_concat_list_line(str(p.resolve())) for p in scene_clips]
         concat_txt.write_text("\n".join(lines), encoding="utf-8")
 
         # Ghép re-encode để đồng bộ âm thanh và khung hình 100%

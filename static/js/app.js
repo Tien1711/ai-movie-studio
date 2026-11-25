@@ -25,7 +25,8 @@ let sseSource = null;
 // khi có key). Giữ nguyên mọi options khác, trả Response như fetch gốc.
 // BẢO MẬT: key lưu ở localStorage nên chỉ dùng cho tool cá nhân / trình
 // duyệt tin cậy, KHÔNG dùng chung máy công cộng. SSE (/api/jobs/{id}/sse)
-// vẫn miễn auth nên EventSource giữ nguyên, không qua apiFetch.
+// gui key qua query param ?api_key=... (server chap nhan tu 2026-11-25,
+// audit #5a) thay vi mien auth nhu truoc.
 const STUDIO_API_KEY_STORAGE = 'ams-api-key';
 let _apiKeyModalShown = false; // chống mở modal nhập key lặp trong cùng phiên
 
@@ -439,11 +440,11 @@ function voiceSelectHtml(selectedId = '', includeAiVoice = true) {
     th: '🇹🇭 Tiếng Thái (Thai)' 
   };
   return Object.entries(grouped).map(([lang, voices]) =>
-    `<optgroup label="${langName[lang]||lang}">${
+    `<optgroup label="${esc(langName[lang]||lang)}">${
       voices.map(v => {
-        if (v.lang === 'ai') return `<option value="${v.id}" ${v.id===selectedId?'selected':''}>🤖 ${v.label}</option>`;
+        if (v.lang === 'ai') return `<option value="${esc(v.id)}" ${v.id===selectedId?'selected':''}>🤖 ${esc(v.label)}</option>`;
         const prefix = v.gender === 'female' ? '👩 Nữ' : (v.gender === 'male' ? '👨 Nam' : '🎙️');
-        return `<option value="${v.id}" ${v.id===selectedId?'selected':''}>${prefix} - ${v.label}</option>`;
+        return `<option value="${esc(v.id)}" ${v.id===selectedId?'selected':''}>${prefix} - ${esc(v.label)}</option>`;
       }).join('')
     }</optgroup>`
   ).join('');
@@ -1860,11 +1861,20 @@ function startMonitoring(jobId, title, totalScenes) {
   initSSE(jobId);
 }
 
+function sseUrlFor(jobId) {
+  // Audit #5a (2026-11-25): SSE khong gui duoc custom header nen gui key
+  // qua query param; server chap nhan ?api_key=... khi STUDIO_API_KEY
+  // duoc dat. Khong co key thi URL giu nguyen (server mo khi chua dat key).
+  const key = (typeof getStudioApiKey === 'function') ? getStudioApiKey() : '';
+  const base = `/api/jobs/${jobId}/sse`;
+  return key ? `${base}?api_key=${encodeURIComponent(key)}` : base;
+}
+
 function initSSE(jobId) {
   if (sseSource) { sseSource.close(); sseSource = null; }
   setSseStatus('reconnecting', sseReconnectAttempts > 0 ? `Đang kết nối lại (${sseReconnectAttempts})...` : 'Đang kết nối...');
 
-  sseSource = new EventSource(`/api/jobs/${jobId}/sse`);
+  sseSource = new EventSource(sseUrlFor(jobId));
 
   sseSource.onopen = () => {
     sseReconnectAttempts = 0;

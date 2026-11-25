@@ -19,8 +19,10 @@ Hậu kỳ tự động điện ảnh nâng cao:
 """
 
 import os
+import queue
 import shutil
 import subprocess
+import threading
 import time
 import tempfile
 import math
@@ -308,6 +310,9 @@ SFX_PRESETS = {
 
 _DURATION_CACHE_MAX_SIZE = 512
 _DURATION_CACHE: Dict[Tuple[str, float, int], float] = {}
+# Audit #11c (2026-11-25): dict tran + check-then-act khong nguyen tu ->
+# khoa bao quanh moi get/set/evict (ca o day va o batch_engine.py).
+_DURATION_CACHE_LOCK = threading.Lock()
 
 
 def _unique_suffix() -> str:
@@ -422,14 +427,24 @@ def get_media_duration(file_path: str) -> float:
     Có cache theo (path, mtime, size), tối đa 512 entry (FIFO evict) để
     compose_full_movie / compute_timeline_offsets / create_srt không đo
     lặp cùng một clip nhiều lần (audit §3.5). Chỉ cache kết quả đo thành
-    công; file thiếu/lỗi vẫn trả 5.0 như trước."""
+    công.
+
+    Audit #11 (2026-11-25): KHÔNG còn trả 5.0 giả khi đo lỗi nữa — file
+    thiếu/lỗi trả 0.0 ("không rõ"). Caller phải coi 0.0 là không rõ, KHÔNG
+    được dùng làm thời lượng thật (đặc biệt không truyền `-t 0`/`-t 5.0`
+    vào ffmpeg — mix_multitrack_timeline / add_background_music bỏ hẳn
+    `-t` khi vid_dur <= 0). Những chỗ thực sự cần một con số để tính
+    timeline (compute_timeline_offsets, _merge_single_pass, pairwise)
+    tự ước lượng 5.0 TẠI CHỖ với comment ghi rõ — ffmpeg sẽ lỗi to nếu
+    clip thật sự hỏng, thay vì lặng lẽ cắt cụt phim."""
     if not file_path or not os.path.exists(file_path):
-        return 5.0
+        return 0.0
     cache_key = None
     try:
         st = os.stat(file_path)
         cache_key = (os.path.abspath(file_path), st.st_mtime, st.st_size)
-        hit = _DURATION_CACHE.get(cache_key)
+        with _DURATION_CACHE_LOCK:
+            hit = _DURATION_CACHE.get(cache_key)
         if hit is not None:
             return hit
     except Exception:
@@ -447,13 +462,14 @@ def get_media_duration(file_path: str) -> float:
         if m:
             dur = float(m.group(1)) * 3600 + float(m.group(2)) * 60 + float(m.group(3))
             if cache_key is not None:
-                if len(_DURATION_CACHE) >= _DURATION_CACHE_MAX_SIZE:
-                    _DURATION_CACHE.pop(next(iter(_DURATION_CACHE)), None)
-                _DURATION_CACHE[cache_key] = dur
+                with _DURATION_CACHE_LOCK:
+                    if len(_DURATION_CACHE) >= _DURATION_CACHE_MAX_SIZE:
+                        _DURATION_CACHE.pop(next(iter(_DURATION_CACHE)), None)
+                    _DURATION_CACHE[cache_key] = dur
             return dur
     except Exception as exc:
         print(f"[get_media_duration error] {exc}")
-    return 5.0
+    return 0.0
 
 
 def _fmt_srt_time(seconds: float) -> str:
@@ -562,7 +578,10 @@ def compute_timeline_offsets(clips: List[str], transitions: Optional[List[str]] 
     if n == 1:
         return [0.0]
 
-    durations = [get_media_duration(c) for c in clips]
+    # Audit #11: clip do khong duoc (get_media_duration -> 0.0) thi uoc
+    # luong 5.0 TAI CHO cho phep tinh timeline — ghi ro chu khong giau
+    # trong ham do; ffmpeg se loi to neu clip that su hong.
+    durations = [get_media_duration(c) or 5.0 for c in clips]
     t_durs = []
     for i in range(1, n):
         trans = (transitions[i - 1] or "dissolve").lower() if (transitions and (i - 1) < len(transitions)) else "dissolve"
@@ -941,6 +960,8 @@ def _merge_single_pass(
     sound_bridge_duration: float,
     output_path: str,
     progress_cb: Optional[Any] = None,
+    quality: str = "720p",
+    aspect_ratio: str = "9:16",
 ) -> str:
     """Ghép toàn bộ clip bằng MỘT lần gọi ffmpeg duy nhất (single-pass):
     - Video: chuỗi xfade nối tiếp cho dissolve/fade; concat cho bước cut.
@@ -949,14 +970,29 @@ def _merge_single_pass(
     compute_timeline_offsets (3 clip 2s + 2 dissolve 0.5s -> đúng 5.0s).
     Lỗi ở bất kỳ bước nào (khác fps/kích thước/sample-rate...) thì raise để
     caller fallback về nhánh pairwise cũ — không bao giờ dừng đột ngột.
+    - quality/aspect_ratio (audit #6, 2026-11-25): kich thuoc dich lay tu
+      QUALITY_PROFILES (vd draft 9:16 -> 480x854); profile khong nhan ra
+      thi giu kich thuoc clip dau nhu cu.
     """
     n = len(clips)
-    durations = [get_media_duration(c) for c in clips]
+    # Audit #11: uoc luong 5.0 tai cho cho clip do khong duoc (xem
+    # compute_timeline_offsets) — ffmpeg se loi to neu clip that su hong.
+    durations = [get_media_duration(c) or 5.0 for c in clips]
     infos = [_probe_video_info(c) for c in clips]
-    # Kích thước đích = kích thước clip đầu (giữ nguyên khung hình phim đã
-    # chọn); đo không được thì bỏ scale, xfade lỗi sẽ rơi về pairwise.
+    # Kích thước đích: uu tien profile quality/aspect_ratio duoc chon
+    # (audit #6, 2026-11-25); khong co profile thi giu kich thuoc clip
+    # dau nhu cu; do khong duoc thi bo scale, xfade loi se roi ve pairwise.
     _w0 = infos[0].get("width") or 0
     _h0 = infos[0].get("height") or 0
+    _q = (quality or "720p").lower()
+    if _q in ("preview", "draft"):
+        _q = "draft"
+    _prof = QUALITY_PROFILES.get(_q)
+    if _prof is not None:
+        _ar = _normalize_aspect_key(aspect_ratio)
+        _pw, _ph = _prof["res"].get(_ar, (0, 0))
+        if _pw and _ph:
+            _w0, _h0 = _pw, _ph
     t_durs: List[float] = []
     for i in range(1, n):
         trans = (transitions[i - 1] or "dissolve").lower()
@@ -1142,7 +1178,8 @@ def merge_clips_advanced(
     if os.environ.get("COMPOSE_MODE", "single").strip().lower() != "pairwise":
         try:
             return _merge_single_pass(
-                clips, transitions, sound_bridge_duration, output_path, progress_cb
+                clips, transitions, sound_bridge_duration, output_path, progress_cb,
+                quality=quality, aspect_ratio=aspect_ratio,
             )
         except Exception as sp_err:
             print(f"[merge_clips_advanced] Single-pass xfade thất bại ({sp_err}), fallback Pairwise...")
@@ -1160,8 +1197,9 @@ def merge_clips_advanced(
             step_out = os.path.join(out_dir, f"_step_{i}_{_unique_suffix()}.mp4")
             _pairwise_steps.append(step_out)
 
-            d1 = get_media_duration(current_merged)
-            d2 = get_media_duration(next_clip)
+            # Audit #11: uoc luong 5.0 tai cho cho clip do khong duoc.
+            d1 = get_media_duration(current_merged) or 5.0
+            d2 = get_media_duration(next_clip) or 5.0
             t_dur = min(sound_bridge_duration, min(d1, d2) * 0.4)
 
             if progress_cb:
@@ -1302,10 +1340,17 @@ def mix_multitrack_timeline(
     music_volume = _as_float(music_volume, "music_volume")
     sfx_volume = _as_float(sfx_volume, "sfx_volume")
     fade_duration = _as_float(fade_duration, "fade_duration")
+    # Audit #11: vid_dur = 0.0 nghia la KHONG DO DUOC (khong phai video 0s)
+    # -> khong truyen -t (de ffmpeg chay het video) thay vi -t 5.0 gia.
     vid_dur = get_media_duration(video_path)
-    fade_out_start = max(0.0, vid_dur - fade_duration)
+    fade_out_start = max(0.0, vid_dur - fade_duration) if vid_dur > 0 else None
 
-    q_prof = QUALITY_PROFILES.get((quality or "720p").lower(), QUALITY_PROFILES["720p"])
+    # Audit #5b (2026-11-25): "preview" map ve draft 480p nhu
+    # compose_scene_video (truoc day map ve 720p).
+    q_key = (quality or "720p").lower()
+    if q_key in ("preview", "draft"):
+        q_key = "draft"
+    q_prof = QUALITY_PROFILES.get(q_key, QUALITY_PROFILES["720p"])
     ar_key = _normalize_aspect_key(aspect_ratio)
     tw, th = q_prof["res"][ar_key]
     scale_pad_filter = (
@@ -1339,7 +1384,12 @@ def mix_multitrack_timeline(
         mix_labels.append("[sfx]")
 
     if idx_music != -1:
-        audio_inputs.append(f"[{idx_music}:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration},afade=t=out:st={fade_out_start:.2f}:d={fade_duration}[music]")
+        # Khong biet thoi luong video thi chi fade-in, khong fade-out
+        # (khong co moc cuoi de tinh st).
+        if fade_out_start is not None:
+            audio_inputs.append(f"[{idx_music}:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration},afade=t=out:st={fade_out_start:.2f}:d={fade_duration}[music]")
+        else:
+            audio_inputs.append(f"[{idx_music}:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration}[music]")
         mix_labels.append("[music]")
 
     if len(mix_labels) > 1:
@@ -1369,9 +1419,12 @@ def mix_multitrack_timeline(
         "-bufsize", bufsize_str,
         "-c:a", "aac",
         "-b:a", q_prof["b_a"],
-        "-t", f"{vid_dur:.3f}",
-        output_path
     ]
+    # Audit #11: chi gioi han -t khi biet chac thoi luong video; khong
+    # biet thi de ffmpeg chay het (truyen -t 5.0 gia se cat cut phim).
+    if vid_dur > 0:
+        cmd += ["-t", f"{vid_dur:.3f}"]
+    cmd += [output_path]
 
     _run(cmd, f"Xuất phim hoàn chỉnh ({quality} - Đa tầng âm thanh)", timeout=600)
     return output_path
@@ -1395,7 +1448,8 @@ def merge_audio_with_transitions(
         shutil.copy2(audio_clips[0], output_path)
         return output_path
 
-    durations = [get_media_duration(c) for c in audio_clips]
+    # Audit #11: uoc luong 5.0 tai cho cho clip do khong duoc.
+    durations = [get_media_duration(c) or 5.0 for c in audio_clips]
     t_durs = []
     for i in range(1, n):
         trans = (transitions[i - 1] or "dissolve").lower() if (transitions and (i - 1) < len(transitions)) else "dissolve"
@@ -1470,8 +1524,16 @@ def burn_subtitles(
     progress_cb: Optional[Any] = None,
     total_duration: Optional[float] = None,
     raise_on_error: bool = False,
+    timeout: float = 300,
 ):
-    """Khắc phụ đề (burn-in) phong cách điện ảnh: Chữ trắng viền đen sắc nét, căn giữa đáy, không hộp đen, không che nhân vật."""
+    """Khắc phụ đề (burn-in) phong cách điện ảnh: Chữ trắng viền đen sắc nét, căn giữa đáy, không hộp đen, không che nhân vật.
+
+    timeout: tran tong cho TOAN BO qua trinh burn-in, ke ca vong doc
+    stdout (audit #5d, 2026-11-25: truoc day timeout 300s chi ap sau
+    vong `for line in proc.stdout` — ffmpeg treo giua chung thi ket
+    vinh vien). Doc stdout trong thread rieng + deadline; het han thi
+    kill ffmpeg va fallback video goc (hoac raise neu raise_on_error).
+    """
     if not os.path.exists(srt_file) or os.path.getsize(srt_file) < 10:
         if raise_on_error:
             raise RuntimeError(f"File phụ đề rỗng hoặc không tồn tại ({srt_file})")
@@ -1519,7 +1581,39 @@ def burn_subtitles(
         if progress_cb and total_duration and total_duration > 0:
             with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err_file:
                 proc = subprocess.Popen(cmd, cwd=work_dir, stdout=subprocess.PIPE, stderr=err_file, text=True, bufsize=1)
-                for line in proc.stdout:
+                # Audit #5d: doc stdout trong thread rieng, vong chinh chi
+                # doi queue voi deadline — ffmpeg treo giua chung (khong
+                # EOF, khong thoat) cung bi kill khi het timeout. (Khong
+                # dung select: khong hoat dong tren pipe cua Windows.)
+                _lines: "queue.Queue[Optional[str]]" = queue.Queue()
+                _eof = object()
+
+                def _read_stdout():
+                    try:
+                        for _line in proc.stdout:
+                            _lines.put(_line)
+                    except Exception:
+                        pass
+                    finally:
+                        _lines.put(_eof)
+
+                _reader = threading.Thread(target=_read_stdout, daemon=True)
+                _reader.start()
+                _deadline = time.monotonic() + float(timeout)
+                _timed_out = False
+                while True:
+                    _remaining = _deadline - time.monotonic()
+                    if _remaining <= 0:
+                        _timed_out = True
+                        break
+                    try:
+                        line = _lines.get(timeout=min(_remaining, 1.0))
+                    except queue.Empty:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    if line is _eof:
+                        break
                     if line.startswith("out_time="):
                         t_str = line.split("=")[1].strip()
                         try:
@@ -1531,14 +1625,28 @@ def burn_subtitles(
                                 progress_cb(overall_pct, f"Đang khắc phụ đề điện ảnh: {sub_pct}% ({int(sec)}s / {int(total_duration)}s)...")
                         except Exception:
                             pass
+                if _timed_out:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        proc.wait(timeout=10)
+                    except Exception:
+                        pass
+                    if raise_on_error:
+                        raise RuntimeError(f"Quá thời gian (timeout {timeout}s) khi khắc phụ đề video bằng FFmpeg.")
+                    print(f"[FFmpeg Cảnh báo] Burn-in timeout sau {timeout}s, fallback video gốc.")
+                    shutil.copy2(input_video, output_video)
+                    return output_video
                 try:
-                    proc.wait(timeout=300)
+                    proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
                     if raise_on_error:
-                        raise RuntimeError("Quá thời gian (timeout 300s) khi khắc phụ đề video bằng FFmpeg.")
-                    print("[FFmpeg Cảnh báo] Burn-in timeout sau 300s, fallback video gốc.")
+                        raise RuntimeError(f"Quá thời gian (timeout {timeout}s) khi khắc phụ đề video bằng FFmpeg.")
+                    print(f"[FFmpeg Cảnh báo] Burn-in timeout sau {timeout}s, fallback video gốc.")
                     shutil.copy2(input_video, output_video)
                     return output_video
                 if proc.returncode != 0:
@@ -1550,7 +1658,7 @@ def burn_subtitles(
                     shutil.copy2(input_video, output_video)
                     return output_video
         else:
-            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, timeout=timeout)
             if result.returncode != 0:
                 if raise_on_error:
                     raise RuntimeError(f"Lỗi khắc phụ đề bằng FFmpeg: {result.stderr[-1000:].strip()}")
@@ -1583,16 +1691,24 @@ def add_background_music(
     music_volume = _as_float(music_volume, "music_volume")
     voice_volume = _as_float(voice_volume, "voice_volume")
     fade_duration = _as_float(fade_duration, "fade_duration")
+    # Audit #11: vid_dur = 0.0 nghia la KHONG DO DUOC -> khong truyen -t
+    # (de ffmpeg chay het video, -shortest se dung o cuoi video vi nhac
+    # loop vo han); chi fade-out khi biet moc cuoi.
     vid_dur = get_media_duration(input_video)
-    fade_out_start = max(0.0, vid_dur - fade_duration)
+    if vid_dur > 0:
+        fade_out_start = max(0.0, vid_dur - fade_duration)
+        music_chain = (f"[1:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration},"
+                       f"afade=t=out:st={fade_out_start:.2f}:d={fade_duration}[music]")
+    else:
+        music_chain = f"[1:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration}[music]"
 
     filter_complex = (
         f"[0:a]volume={voice_volume}[voice];"
-        f"[1:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration},afade=t=out:st={fade_out_start:.2f}:d={fade_duration}[music];"
+        f"{music_chain};"
         f"[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]"
     )
 
-    _run([
+    cmd = [
         FFMPEG, "-y",
         "-i", input_video,
         "-stream_loop", "-1", "-i", music_file,
@@ -1601,10 +1717,13 @@ def add_background_music(
         "-map", "[aout]",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
-        "-t", f"{vid_dur:.3f}",
         "-shortest",
-        output_video,
-    ], "Mix nhạc nền với Audio Fade", timeout=600)
+    ]
+    # Audit #11: chi gioi han -t khi biet chac thoi luong video.
+    if vid_dur > 0:
+        cmd += ["-t", f"{vid_dur:.3f}"]
+    cmd += [output_video]
+    _run(cmd, "Mix nhạc nền với Audio Fade", timeout=600)
 
 
 def audit_movie_scenes(arg1: Any, arg2: Any = None) -> Dict[str, Any]:

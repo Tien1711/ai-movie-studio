@@ -19,6 +19,7 @@ import mimetypes
 import os
 import re
 import shutil
+import threading
 import time
 import subprocess
 import uuid
@@ -44,6 +45,19 @@ from consistency import CONSISTENCY_ANCHOR_EVERY, consistency_anchor_reference  
 # Cache duration theo (path, mtime, size) — tránh spawn ffmpeg lặp lại (§3.5).
 _DURATION_CACHE: Dict[Tuple[str, float, int], float] = {}
 _DURATION_CACHE_MAX = 512
+# Audit #11c (2026-11-25): khoa cho cache (nhu composer.py).
+_DURATION_CACHE_LOCK = threading.Lock()
+
+
+def _estimate_audio_duration(text: str) -> float:
+    """Uoc luong thoi luong doc 1 doan thoai (giay) khi khong do duoc file
+    audio that.
+
+    Audit #13 (2026-11-25): toc do noi chuan ~15 ky tu/giay (nhu
+    tts_manager) — truoc day dung len/3.0 (sai ~5 lan: thoai 30 ky tu
+    uoc 10s thay vi 2s), lam clip keo dai / timeline lech. Dung chung
+    cho moi fallback trong process_scene. Toi thieu 2.0s."""
+    return max(2.0, len((text or "").strip()) / 15.0)
 
 # Thư mục workspace (resolve 1 lần). Mọi đường dẫn file cục bộ do user cung cấp
 # chỉ được phép nằm trong cây này — xem _resolve_safe_reference().
@@ -99,32 +113,49 @@ async def _download_validated(
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     total = 0
     first_chunk = b""
-    async with client.stream("GET", url, timeout=timeout) as resp:
-        resp.raise_for_status()
-        ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-        if ctype and not ctype.startswith(expected_ct) and ctype not in ("application/octet-stream", "binary/octet-stream"):
+    try:
+        async with client.stream("GET", url, timeout=timeout) as resp:
+            resp.raise_for_status()
+            ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if ctype and not ctype.startswith(expected_ct) and ctype not in ("application/octet-stream", "binary/octet-stream"):
+                raise RuntimeError(
+                    f"File tải về có Content-Type không hợp lệ: {ctype!r} (cần {expected_ct}*) — URL: {url[:120]}"
+                )
+            length = resp.headers.get("content-length")
+            try:
+                length_int = int(length) if length is not None else None
+            except (TypeError, ValueError):
+                # Header Content-Length khong phai so -> coi nhu khong biet
+                # kich thuoc, van gioi han theo so byte that da tai.
+                length_int = None
+            if length_int is not None and length_int > max_bytes:
+                raise RuntimeError(f"File tải về quá lớn ({length} bytes > {max_bytes}) — URL: {url[:120]}")
+            async with aiofiles.open(output_path, "wb") as f:
+                async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError(f"File tải về vượt giới hạn {max_bytes} bytes — URL: {url[:120]}")
+                    if not first_chunk:
+                        first_chunk = chunk[:16]
+                    await f.write(chunk)
+        if total < 100:
+            raise RuntimeError(f"File tải về quá nhỏ hoặc rỗng ({total} bytes) — URL: {url[:120]}")
+        if _sniff_media_kind(first_chunk) not in expected_kinds:
             raise RuntimeError(
-                f"File tải về có Content-Type không hợp lệ: {ctype!r} (cần {expected_ct}*) — URL: {url[:120]}"
+                f"File tải về không đúng định dạng {expected} (magic bytes lạ, có thể là trang lỗi HTML) — URL: {url[:120]}"
             )
-        length = resp.headers.get("content-length")
-        if length is not None and int(length) > max_bytes:
-            raise RuntimeError(f"File tải về quá lớn ({length} bytes > {max_bytes}) — URL: {url[:120]}")
-        async with aiofiles.open(output_path, "wb") as f:
-            async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > max_bytes:
-                    raise RuntimeError(f"File tải về vượt giới hạn {max_bytes} bytes — URL: {url[:120]}")
-                if not first_chunk:
-                    first_chunk = chunk[:16]
-                await f.write(chunk)
-    if total < 100:
-        raise RuntimeError(f"File tải về quá nhỏ hoặc rỗng ({total} bytes) — URL: {url[:120]}")
-    if _sniff_media_kind(first_chunk) not in expected_kinds:
-        raise RuntimeError(
-            f"File tải về không đúng định dạng {expected} (magic bytes lạ, có thể là trang lỗi HTML) — URL: {url[:120]}"
-        )
+    except BaseException:
+        # Audit #6 (2026-11-25): moi nhanh raise sau khi da ghi (qua
+        # max_bytes, file qua nho/sai magic bytes) deu de lai file do
+        # tren dia — caller sau do co the dung nham file do. Xoa truoc
+        # khi raise (ke ca khi task bi huy giua chung).
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        raise
     return output_path
 
 
@@ -240,15 +271,20 @@ async def get_media_duration_async(file_path: str) -> float:
 
 
 def get_media_duration(file_path: str) -> float:
-    """Đo thời lượng thực tế chính xác (giây) của file audio hoặc video bằng FFmpeg."""
+    """Đo thời lượng thực tế chính xác (giây) của file audio hoặc video bằng FFmpeg.
+
+    Audit #11 (2026-11-25): giong composer.get_media_duration — file
+    thieu/loi tra 0.0 ("khong ro"), KHONG tra 5.0 gia nua. Chi cache ket
+    qua do thanh cong; cache co lock (xem composer.py)."""
     try:
         st = os.stat(file_path)
         key = (os.path.abspath(file_path), st.st_mtime, st.st_size)
-        cached = _DURATION_CACHE.get(key)
+        with _DURATION_CACHE_LOCK:
+            cached = _DURATION_CACHE.get(key)
         if cached is not None:
             return cached
     except OSError:
-        return 5.0
+        return 0.0
     try:
         import subprocess
         import re
@@ -265,13 +301,14 @@ def get_media_duration(file_path: str) -> float:
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
         if m:
             dur = float(m.group(1)) * 3600 + float(m.group(2)) * 60 + float(m.group(3))
-            if len(_DURATION_CACHE) >= _DURATION_CACHE_MAX:
-                _DURATION_CACHE.clear()
-            _DURATION_CACHE[key] = dur
+            with _DURATION_CACHE_LOCK:
+                if len(_DURATION_CACHE) >= _DURATION_CACHE_MAX:
+                    _DURATION_CACHE.clear()
+                _DURATION_CACHE[key] = dur
             return dur
     except Exception as exc:
         print(f"[get_media_duration error] {exc}")
-    return 5.0
+    return 0.0
 
 
 # ── TTS cache: cache file audio theo hash (text chuẩn hóa + voice + speed) ──
@@ -1520,7 +1557,7 @@ async def process_scene(
                         except Exception as pref_err:
                             print(f"[batch_engine Warning] Prefetch TTS scene {idx} lỗi ({pref_err}) — sinh TTS lại.")
                         if _pref is not None and _pref.get("tts_started"):
-                            audio_duration = _pref.get("audio_duration") or max(2.0, len(voiceover) / 3.0)
+                            audio_duration = _pref.get("audio_duration") or _estimate_audio_duration(voiceover)
                             tts_failed = bool(_pref.get("tts_failed"))
                             tts_error = _pref.get("tts_error") or ""
                             tts_s = float(_pref.get("tts_s") or 0.0)
@@ -1528,7 +1565,7 @@ async def process_scene(
                             # Prefetch xong nhưng không sinh TTS (audio đã có
                             # sẵn từ trước): dùng nhánh ước lượng như khi
                             # tts_task None.
-                            audio_duration = max(2.0, len(voiceover) / 3.0)
+                            audio_duration = _estimate_audio_duration(voiceover)
                         else:
                             # Prefetch chết giữa chừng (hiếm): sinh TTS lại
                             # ngay tại đây — nối tiếp, không retry prefetch.
@@ -1564,7 +1601,7 @@ async def process_scene(
                             # duration uoc luong + danh dau tts_failed de
                             # scene van done voi canh bao mat tieng.
                             tts_task.cancel()
-                            audio_duration = max(2.0, len(voiceover or "") / 3.0)
+                            audio_duration = _estimate_audio_duration(voiceover or "")
                             tts_failed = True
                             tts_error = "TTS quá thời gian chờ (timeout)"
                         if tts_started is not None:
@@ -1585,16 +1622,16 @@ async def process_scene(
                     if audio_path and not await _is_complete_audio_file(audio_path):
                         print(f"[batch_engine Warning] TTS scene {idx} xong nhưng file audio "
                               f"không hoàn chỉnh — dùng duration ước lượng.")
-                        audio_duration = max(2.0, len(voiceover) / 3.0)
+                        audio_duration = _estimate_audio_duration(voiceover)
                         if not tts_failed and (voiceover or voice_segments):
                             tts_failed = True
                             tts_error = "file audio không hoàn chỉnh sau khi sinh TTS"
                 else:
                     if is_ai_voice:
                         text_len = len(voiceover) if voiceover else sum(len(s.get("text", "")) for s in voice_segments)
-                        audio_duration = max(float(duration), min(10.0, max(2.5, text_len / 3.0)))
+                        audio_duration = max(float(duration), min(10.0, max(2.5, text_len / 15.0)))
                     else:
-                        audio_duration = max(2.0, len(voiceover) / 3.0)
+                        audio_duration = _estimate_audio_duration(voiceover)
 
                 if progress_cb:
                     progress_cb(idx, "📥 Đang tải video về...")

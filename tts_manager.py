@@ -595,6 +595,22 @@ async def synthesize_voice(
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     estimated_dur = max(2.0, len(clean_text) / 15.0)
+    # Audit #6 (2026-11-25): giong VieNeu/Omni la KHONG duoc lang le doi
+    # sang Edge — validate voi catalog ngay dau; khong co trong catalog
+    # thi raise ro rang de caller danh tts_failed=True thay vi long
+    # nham giong khac vao video.
+    if voice.startswith("vieneu:"):
+        _valid_vn = {c["id"] for c in VIENEU_VOICES_CONFIG}
+        if voice not in _valid_vn:
+            raise ValueError(
+                f"Giọng VieNeu '{voice}' không có trong catalog. "
+                f"Các giọng hợp lệ: {', '.join(sorted(_valid_vn))}")
+    elif voice.startswith("omnivoice:"):
+        _valid_om = {c["id"] for c in OMNIVOICE_VOICES_CONFIG}
+        if voice not in _valid_om:
+            raise ValueError(
+                f"Giọng OmniVoice '{voice}' không có trong catalog. "
+                f"Các giọng hợp lệ: {', '.join(sorted(_valid_om))}")
     # Audit #7: moi lan goi engine deu co tran rieng (VieNeu/Omni chay qua
     # to_thread cung vay — wait_for huy phan await, thread cu keo dai
     # them chut nhung job khong ket).
