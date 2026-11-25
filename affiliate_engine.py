@@ -387,15 +387,61 @@ _FIDELITY_RISK_PATTERNS = (
 )
 
 
+# Các câu bắt buộc trong FIDELITY_BLOCK (chuẩn hóa: chữ thường + gộp khoảng
+# trắng). Kiểm nội dung khối thật thay vì chỉ marker (fix audit #15):
+# prompt chỉ chứa marker, hoặc block bị cắt/paraphrase thiếu câu then chốt,
+# đều được coi là chưa có block -> append lại toàn bộ khối chuẩn.
+_FIDELITY_REQUIRED_SENTENCES = (
+    "must look exactly like the product in the reference image",
+    "100% identical",
+    "same colors, same shape, same size and proportions",
+    "do not redraw, recolor, restyle, resize, reshape or redesign",
+    "do not add, remove or change any detail",
+    "show only the box/packaging",
+    "never invent or imagine what is inside",
+)
+
+
+def _normalize_fidelity_text(text: str) -> str:
+    """Chuẩn hóa để so khớp khối fidelity: chữ thường, gộp khoảng trắng."""
+    return re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+
+def fidelity_block_missing_sentences(prompt: str) -> List[str]:
+    """Các câu bắt buộc của FIDELITY_BLOCK còn thiếu trong prompt ([] = đủ)."""
+    norm = _normalize_fidelity_text(prompt)
+    return [s for s in _FIDELITY_REQUIRED_SENTENCES if s not in norm]
+
+
+def fidelity_block_complete(prompt: str) -> bool:
+    """Prompt có đủ toàn bộ khối fidelity chuẩn (không chỉ marker)."""
+    return not fidelity_block_missing_sentences(prompt)
+
+
+# Cụm phủ định + danh sách từ cấm (fix audit #15): khối fidelity viết lại
+# ("Do NOT redraw, recolor, restyle...") không được gắn cờ oan. Chỉ strip
+# đúng dạng "do not / don't / never + <từ cấm>" theo danh sách liệt kê —
+# "not" trần không tính, cụm khẳng định vẫn bị gắn cờ như cũ.
+_FIDELITY_NEGATED_LIST_RX = re.compile(
+    r"\b(?:do\s+not|don't|dont|never)\b"
+    r"(?:\s*,?\s*(?:or|and)?\s*(?:" + "|".join(
+        re.escape(p) for p in sorted(_FIDELITY_RISK_PATTERNS, key=len, reverse=True)
+    ) + r")\b)+",
+    re.I)
+
+
 def check_prompt_fidelity(prompt: str) -> List[str]:
     """Quét prompt, trả về các cụm từ cho phép thay đổi sản phẩm (nếu có).
 
     Trả [] khi prompt sạch. Dùng cho _normalize warnings + validate script.
     Chính khối FIDELITY BLOCK cũng nhắc tới các từ này ở dạng phủ định
     ("Do NOT redesign / recolor / restyle...") nên phải loại khối block ra
-    trước khi quét, nếu không mọi cảnh sẽ bị gắn cờ oan.
+    trước khi quét, nếu không mọi cảnh sẽ bị gắn cờ oan. Loại cả dạng viết
+    lại của khối ("Do NOT redraw, recolor...") — chỉ strip đúng dạng phủ
+    định do not/don't/never + từ cấm, cụm khẳng định vẫn bị gắn cờ.
     """
     text = (prompt or "").replace(FIDELITY_BLOCK, "")
+    text = _FIDELITY_NEGATED_LIST_RX.sub("", text)
     out: List[str] = []
     for pat in _FIDELITY_RISK_PATTERNS:
         if re.search(r"\b" + re.escape(pat) + r"\b", text, flags=re.I):
@@ -584,6 +630,21 @@ def validate_affiliate_script(
 # tuyệt đối mới ("hỗ trợ sức khỏe 100%").
 _COMPLIANCE_SEVERE = (
     # "100%" đi kèm tuyên bố khỏi bệnh/hiệu quả — xử lý TRƯỚC hết.
+    # Dạng có động từ cam kết đi trước ("cam kết 100% khỏi bệnh", "bao khỏi
+    # 100%") phải xử lý trước pattern ngắn, nếu không sẽ còn trơ lại động từ
+    # cam kết ("bao hỗ trợ hiệu quả") — audit #3.
+    (re.compile(r"(cam\s*kết|đảm\s*bảo|chắc\s*chắn|bao)\s+100%\s*khỏi\s*bệnh", re.I),
+     "hỗ trợ sức khỏe", "cam kết khỏi bệnh tuyệt đối"),
+    (re.compile(r"(cam\s*kết|đảm\s*bảo|chắc\s*chắn|bao)\s+khỏi\s*bệnh\s*100%", re.I),
+     "hỗ trợ sức khỏe", "cam kết khỏi bệnh tuyệt đối"),
+    (re.compile(r"(cam\s*kết|đảm\s*bảo|chắc\s*chắn|bao)\s+100%\s*khỏi", re.I),
+     "hỗ trợ hiệu quả", "cam kết khỏi bệnh tuyệt đối"),
+    (re.compile(r"(cam\s*kết|đảm\s*bảo|chắc\s*chắn|bao)\s+khỏi\s*100%", re.I),
+     "hỗ trợ hiệu quả", "cam kết khỏi bệnh tuyệt đối"),
+    (re.compile(r"100%\s*hiệu\s*quả", re.I), "hỗ trợ hiệu quả",
+     "cam kết hiệu quả 100% tuyệt đối"),
+    (re.compile(r"hiệu\s*quả\s*100%", re.I), "hỗ trợ hiệu quả",
+     "cam kết hiệu quả 100% tuyệt đối"),
     (re.compile(r"100%\s*khỏi\s+bệnh", re.I), "hỗ trợ sức khỏe",
      "tuyên bố khỏi bệnh tuyệt đối"),
     (re.compile(r"khỏi\s+bệnh\s*100%", re.I), "hỗ trợ sức khỏe",
@@ -614,10 +675,22 @@ _COMPLIANCE_SEVERE = (
      "tuyên bố chữa lành (tác dụng trị liệu)"),
     (re.compile(r"đặc\s+trị", re.I), "hỗ trợ chuyên biệt",
      "tuyên bố đặc trị"),
+    # "Trị dứt điểm" / "thần dược" — tuyên bố trị liệu tuyệt đối (audit #3).
+    (re.compile(r"(trị|chữa)\s+dứt\s+điểm", re.I), "hỗ trợ cải thiện dần dần",
+     "tuyên bố trị dứt điểm"),
+    (re.compile(r"dứt\s+điểm", re.I), "dần dần",
+     "tuyên bố dứt điểm (kết quả tuyệt đối)"),
+    (re.compile(r"thần\s+dược", re.I), "sản phẩm hỗ trợ sức khỏe",
+     "tuyên bố 'thần dược'"),
     (re.compile(r"khỏi\s+bệnh", re.I), "khỏe mạnh hơn",
      "tuyên bố khỏi bệnh"),
     (re.compile(r"khỏi\s+hẳn", re.I), "cải thiện rõ rệt",
      "tuyên bố khỏi hẳn"),
+    # "Khỏi hoàn toàn" — tuyên bố khỏi bệnh tuyệt đối (audit #3).
+    (re.compile(r"khỏi\s+hoàn\s+toàn", re.I), "cải thiện rõ rệt",
+     "tuyên bố khỏi hoàn toàn"),
+    (re.compile(r"hoàn\s+toàn\s+khỏi", re.I), "cải thiện rõ rệt",
+     "tuyên bố khỏi hoàn toàn"),
     (re.compile(r"cam\s*kết\s+khỏi", re.I), "hỗ trợ",
      "cam kết khỏi bệnh"),
     (re.compile(r"chắc\s+chắn\s+khỏi", re.I), "hỗ trợ",
@@ -628,13 +701,20 @@ _COMPLIANCE_SEVERE = (
      "cam kết khỏi bệnh"),
     (re.compile(r"hiệu\s+quả\s+tuyệt\s+đối", re.I), "hỗ trợ hiệu quả",
      "cam kết hiệu quả tuyệt đối"),
+    # Cam kết tuyệt đối về hiệu quả, không kèm "100%" (audit #3): "cam kết
+    # hiệu quả" trần từng lọt checker sau rewrite. Có cả dạng "cam kết hỗ
+    # trợ hiệu quả" — dang dở do pattern 100% thay trước.
+    (re.compile(r"(cam\s*kết|đảm\s*bảo|chắc\s*chắn|bao)\s+(hỗ\s+trợ\s+)?hiệu\s*quả",
+                re.I), "hỗ trợ hiệu quả", "cam kết hiệu quả tuyệt đối"),
     # Hiệu quả tức thì + mốc thời gian ngắn (fix PR #26 — trước đây checker
     # trả [] cho chính câu mặc định của app "tức thì chỉ sau 10 phút").
+    # Audit #3: mở rộng đơn vị thời gian sang tuần/tháng — "giảm 5kg trong
+    # 1 tuần" / "trắng sau 7 ngày" trước đây lọt vì chỉ khớp "ngày"/"lần".
     (re.compile(r"tức\s+thì", re.I), "dần dần",
      "hiệu quả tức thì (cần thời gian sử dụng)"),
-    (re.compile(r"chỉ\s+sau\s+\d+\s*(phút|giờ|ngày)(\s+sử\s+dụng)?", re.I),
+    (re.compile(r"chỉ\s+sau\s+\d+\s*(phút|giờ|ngày|tuần|tháng)(\s+sử\s+dụng)?", re.I),
      "sau một thời gian sử dụng", "hiệu quả nhanh sau mốc thời gian ngắn"),
-    (re.compile(r"ngay\s+sau\s+\d+\s*lần", re.I),
+    (re.compile(r"ngay\s+sau\s+\d+\s*(lần|ngày|tuần)", re.I),
      "sau một thời gian sử dụng", "hiệu quả ngay sau vài lần dùng"),
     (re.compile(r"ngay\s+lần\s+đầu\s+(dùng|sử\s+dụng)", re.I),
      "sau một thời gian sử dụng", "hiệu quả ngay lần đầu dùng"),
@@ -655,16 +735,21 @@ _COMPLIANCE_SEVERE = (
      "hỗ trợ phục hồi sức khỏe", "tuyên bố phục hồi sau bệnh"),
     (re.compile(r"tăng\s+cân\s+nhanh", re.I), "hỗ trợ tăng cân từ từ",
      "kết quả phi thực tế (tăng cân nhanh)"),
-    (re.compile(r"tăng\s+\d+\s*kg\s+trong\s+\d+\s*ngày", re.I),
+    # "Giảm/tăng cân cấp tốc" (audit #3). Chỉ khớp khi đi kèm động từ kết
+    # quả (giảm/tăng cân/kg) để không bắt nhầm "giao hàng cấp tốc".
+    # Replacement dùng \1 để giữ nguyên động từ khi viết lại.
+    (re.compile(r"((?:giảm|tăng)\s+(?:\d+\s*(?:kg|cm)|cân|mỡ|kg))\s+cấp\s+tốc",
+                re.I), r"\1 dần dần", "kết quả phi thực tế (cấp tốc)"),
+    (re.compile(r"tăng\s+\d+\s*kg\s+trong\s+\d+\s*(ngày|tuần|tháng)", re.I),
      "hỗ trợ tăng cân dần dần", "kết quả phi thực tế (tăng cân cấp tốc)"),
     # Kết quả phi thực tế: số đo + thời gian ngắn không tưởng.
-    (re.compile(r"giảm\s+\d+\s*kg\s+trong\s+\d+\s*ngày", re.I),
+    (re.compile(r"giảm\s+\d+\s*kg\s+trong\s+\d+\s*(ngày|tuần|tháng)", re.I),
      "hỗ trợ giảm cân dần dần", "kết quả phi thực tế (giảm cân cấp tốc)"),
-    (re.compile(r"giảm\s+\d+\s*cm\s+trong\s+\d+\s*ngày", re.I),
+    (re.compile(r"giảm\s+\d+\s*cm\s+trong\s+\d+\s*(ngày|tuần|tháng)", re.I),
      "hỗ trợ thon gọn dần dần", "kết quả phi thực tế"),
-    (re.compile(r"trắng\s+(ngay\s+)?sau\s+\d+\s*lần", re.I),
+    (re.compile(r"trắng\s+(?:\S+\s+)?(ngay\s+)?sau\s+\d+\s*(lần|ngày|tuần)", re.I),
      "hỗ trợ làm sáng da dần dần", "kết quả phi thực tế (trắng sau vài lần)"),
-    (re.compile(r"hết\s+(mụn|nám|thâm|tàn\s+nhang)\s+sau\s+\d+\s*lần", re.I),
+    (re.compile(r"hết\s+(mụn|nám|thâm|tàn\s+nhang)\s+sau\s+\d+\s*(lần|ngày|tuần)", re.I),
      "hỗ trợ cải thiện da dần dần", "kết quả phi thực tế"),
     (re.compile(r"trắng\s+ngay\s+lần\s+đầu", re.I),
      "hỗ trợ làm sáng da dần dần", "kết quả phi thực tế (trắng ngay lần đầu)"),
@@ -699,6 +784,16 @@ _COMPLIANCE_LIGHT = (
      "quà tặng 'giới hạn' (cần đúng số lượng thật)"),
     (re.compile(r"giảm\s+\d+\s*%", re.I),
      "mức giảm giá % (cần đúng giá gốc thật)"),
+    # Khuyến mãi/khan hiếm giả — audit #3: "sale 50%" lọt vì pattern trên
+    # đòi chữ "giảm"; "mua 1 tặng 1" không có pattern nào.
+    (re.compile(r"sale\s+\d+\s*%", re.I),
+     "khuyến mãi 'sale N%' (cần đúng giá thật)"),
+    (re.compile(r"mua\s+\d+\s+tặng\s+\d+", re.I),
+     "khuyến mãi 'mua N tặng N' (cần đúng ưu đãi thật)"),
+    (re.compile(r"only\s+\d+\s+left", re.I),
+     "khan hiếm 'only N left' (cần đúng số lượng thật)"),
+    (re.compile(r"limited\s+time", re.I),
+     "khuyến mãi 'limited time' (cần đúng thời gian thật)"),
     (re.compile(r"tiết\s+kiệm\s+\d+\s*%", re.I),
      "mức tiết kiệm % (cần đúng số liệu thật)"),
     (re.compile(r"sale\s+sốc", re.I), "khuyến mãi 'sale sốc' (cần đúng giá thật)"),
@@ -712,6 +807,10 @@ _COMPLIANCE_LIGHT = (
     # Tiếng Anh (prompt thương mại).
     (re.compile(r"\bbest in the world\b", re.I),
      "absolute 'best in the world' (needs evidence)"),
+    # "best ... in the world" có từ chen giữa (audit #3) — đặt SAU pattern
+    # khớp chính xác để span dài không nuốt span ngắn sai thứ tự.
+    (re.compile(r"\bbest\b.{0,30}?\bin the world\b", re.I),
+     "absolute 'best ... in the world' (needs evidence)"),
     (re.compile(r"\bnumber\s*1\b", re.I), "absolute 'number 1' (needs evidence)"),
     (re.compile(r"\bonly today\b", re.I),
      "urgency 'only today' (needs a real deadline)"),
@@ -754,17 +853,22 @@ def rewrite_affiliate_compliance(text: str) -> tuple[str, List[Dict[str, Any]]]:
     Trả (text_mới, changes) với changes = [{"matched", "replacement",
     "category"}]. Chỉ thay cụm từ vi phạm, không bịa con số mới, không làm
     mất ý bán hàng. Vi phạm nhẹ không được viết lại ở đây (chỉ warning).
+    Sau khi viết lại, hàm quét LẠI kết quả (fail-closed, fix audit #3):
+    nếu vẫn còn vi phạm NẶNG thì ghi thêm entry cảnh báo
+    {"remaining_violation": True, "replacement": ""} vào changes — caller
+    phải bắt người dùng sửa tay, không được im lặng cho qua.
     """
     out = text or ""
     changes: List[Dict[str, Any]] = []
     for rx, replacement, category in _COMPLIANCE_SEVERE:
         def _sub(m, rx=rx, replacement=replacement, category=category):
+            expanded = m.expand(replacement)
             changes.append({
                 "matched": m.group(0),
-                "replacement": replacement,
+                "replacement": expanded,
                 "category": category,
             })
-            return replacement
+            return expanded
         out = rx.sub(_sub, out)
     # Lưới an toàn (fix PR #26): nếu sau khi thay vẫn còn "100%" lơ lửng đi
     # kèm cụm hiệu quả/hỗ trợ ("hỗ trợ sức khỏe 100%") thì bỏ "100%" — tránh
@@ -780,6 +884,31 @@ def rewrite_affiliate_compliance(text: str) -> tuple[str, List[Dict[str, Any]]]:
             "category": "tuyên bố hiệu quả 100% còn sót sau viết lại",
         })
         out = _leftover_100.sub(lambda mm: mm.group(1), out)
+    # Lưới an toàn bổ sung (fix audit #3): "100%" đứng TRƯỚC cụm hỗ trợ
+    # ("100% cam kết hiệu quả" -> sau viết lại còn "100% hỗ trợ hiệu quả")
+    # cũng là tuyên bố tuyệt đối — bỏ "100%".
+    _leftover_100_prefix = re.compile(
+        r"100%\s+(?=(?:hỗ\s+trợ|hiệu\s+quả|cải\s+thiện|khỏe\s+mạnh)\b)", re.I)
+    m = _leftover_100_prefix.search(out)
+    if m:
+        changes.append({
+            "matched": m.group(0).strip(),
+            "replacement": "",
+            "category": "tuyên bố hiệu quả 100% còn sót sau viết lại",
+        })
+        out = _leftover_100_prefix.sub("", out)
+    # Re-check fail-closed (fix audit #3): quét lại kết quả sau viết lại.
+    # Còn vi phạm NẶNG -> ghi cảnh báo vào changes, KHÔNG tự ý xóa câu
+    # (người dùng sửa tay). Vi phạm nhẹ không ghi ở đây (warning ở tầng
+    # normalize như cũ).
+    for f in check_affiliate_compliance(out):
+        if f["level"] == "severe":
+            changes.append({
+                "matched": f["matched"],
+                "replacement": "",
+                "category": f"vẫn còn vi phạm sau viết lại: {f['category']}",
+                "remaining_violation": True,
+            })
     return out, changes
 
 
@@ -943,10 +1072,19 @@ def _normalize_affiliate_script(
         # 1. Tuân thủ chính sách: viết lại thoại vi phạm nặng, warning nhẹ.
         new_vo, _changes = rewrite_affiliate_compliance(s.voiceover or "")
         for ch in _changes:
-            warnings.append(
-                f"Cảnh {s.index}: đã viết lại câu vi phạm chính sách bán hàng: "
-                f"'{ch['matched']}' → '{ch['replacement']}' ({ch['category']})."
-            )
+            if ch.get("remaining_violation"):
+                # Fail-closed (fix audit #3): rewrite không xử lý hết — cảnh
+                # báo riêng, bắt sửa tay, không ghi như "đã viết lại".
+                warnings.append(
+                    f"Cảnh {s.index}: [CẢNH BÁO] vẫn còn vi phạm chính sách bán "
+                    f"hàng sau khi viết lại: '{ch['matched']}' ({ch['category']}) "
+                    "— sửa tay trước khi đăng."
+                )
+            else:
+                warnings.append(
+                    f"Cảnh {s.index}: đã viết lại câu vi phạm chính sách bán hàng: "
+                    f"'{ch['matched']}' → '{ch['replacement']}' ({ch['category']})."
+                )
         if new_vo != (s.voiceover or ""):
             s.voiceover = new_vo
         for f in check_affiliate_compliance(s.voiceover or ""):
@@ -1006,7 +1144,9 @@ def _normalize_affiliate_script(
         s.duration = snap_clip_duration(estimate_voiceover_seconds(s.voiceover))
         if PRODUCT_LOCK_MARKER not in (s.prompt or ""):
             s.prompt = f"{(s.prompt or '').strip()} {lock}".strip()
-        if FIDELITY_MARKER not in (s.prompt or ""):
+        # Kiểm nội dung khối thật (fix audit #15): chỉ có marker, hoặc block
+        # bị cắt/paraphrase thiếu câu then chốt, thì append lại khối chuẩn.
+        if not fidelity_block_complete(s.prompt or ""):
             s.prompt = f"{(s.prompt or '').strip()} {FIDELITY_BLOCK}".strip()
         words = len((s.voiceover or "").split())
         if words > AFFILIATE_VOICEOVER_MAX_WORDS:
@@ -1257,7 +1397,9 @@ def build_commercial_prompt(
         ).strip()
     # Khóa trung thực ảnh sản phẩm (quy tắc cứng 2026-11-24): sản phẩm phải
     # giống y hệt ảnh reference — không vẽ lại/đổi màu/đổi hình/đổi kích thước.
-    if FIDELITY_MARKER not in out:
+    # Kiểm nội dung khối thật (fix audit #15): chỉ có marker, hoặc block bị
+    # cắt/paraphrase thiếu câu then chốt, thì append lại khối chuẩn.
+    if not fidelity_block_complete(out):
         out = f"{out} {FIDELITY_BLOCK}".strip()
     return out
 
