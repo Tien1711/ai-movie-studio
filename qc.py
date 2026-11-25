@@ -57,8 +57,10 @@ def expected_resolution_for_size(size: Optional[str], quality: str = "720p") -> 
     q = (quality or "720p").lower()
     if q == "1080p":
         return (base[0] * 3 // 2, base[1] * 3 // 2)
-    if q == "preview":
-        return (base[0] * 2 // 3, base[1] * 2 // 3)
+    if q in ("preview", "draft"):
+        return ((base[0] * 2 // 3 + 1) & ~1, (base[1] * 2 // 3 + 1) & ~1)
+    if q == "540p":
+        return ((base[0] * 3 // 4 + 1) & ~1, (base[1] * 3 // 4 + 1) & ~1)
     if q == "4k":
         return (base[0] * 3, base[1] * 3)
     return base

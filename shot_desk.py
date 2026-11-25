@@ -1588,14 +1588,9 @@ def compose_shot_desk_timeline(
 
     total_movie_duration = get_media_duration(str(final_mp4_path))
 
-    # Dọn dẹp video tạm trong tmp_dir để tránh phình dung lượng đĩa
+    # Dọn dẹp toàn bộ file tạm của lần dựng này trong tmp_dir để tránh phình dung lượng đĩa
     try:
-        if merged_video.exists():
-            os.remove(merged_video)
-        if subtitle_mode == "burn_in":
-            with_sub_tmp = tmp_dir / f"with_sub_{ts}.mp4"
-            if with_sub_tmp.exists():
-                os.remove(with_sub_tmp)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     except Exception:
         pass
 

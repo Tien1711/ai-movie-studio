@@ -408,11 +408,22 @@ function populateAllVoiceDropdowns() {
     sel.innerHTML = `<option value="">-- Dùng giọng mặc định toàn phim --</option>` + voiceSelectHtml(cur);
     if (cur) sel.value = cur;
   });
+
+  // 5. Dropdown giọng Xưởng Tự Động & Truyện Thành Video (không hiển thị ai_voice vì ghép ảnh tĩnh cần file TTS thật)
+  ['factoryVoiceSelect', 'storyVoiceSelect', 'batchVoiceSelect'].forEach(selId => {
+    const el = document.getElementById(selId);
+    if (el && VOICES.length > 0) {
+      const cur = (el.value && el.value !== 'ai_voice') ? el.value : 'vi-VN-HoaiMyNeural';
+      el.innerHTML = voiceSelectHtml(cur, false);
+      if ([...el.options].some(o => o.value === cur)) el.value = cur;
+    }
+  });
 }
 
-function voiceSelectHtml(selectedId = '') {
+function voiceSelectHtml(selectedId = '', includeAiVoice = true) {
   const grouped = {};
   VOICES.forEach(v => {
+    if (!includeAiVoice && (v.lang === 'ai' || v.id === 'ai_voice')) return;
     if (!grouped[v.lang]) grouped[v.lang] = [];
     grouped[v.lang].push(v);
   });
@@ -2885,7 +2896,22 @@ document.addEventListener('paste', (e) => {
 
 // ── Utils ───────────────────────────────────────────────────────────────
 function esc(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escJsSingle(s) {
+  return esc(
+    String(s ?? '')
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "\\'")
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+  );
 }
 
 // ── Character Profiles Studio & Recognition Engine ───────────────────────
@@ -3564,6 +3590,8 @@ async function executeBeatBreakdown() {
           b.title || `Nhịp ${idx + 1}`,
           '',
           [],
+          '',
+          '',
           b.chain_from_previous !== undefined ? b.chain_from_previous : (idx > 0),
           b.camera_angle || 'front'
         );
@@ -3806,17 +3834,23 @@ function _renderQvHistory() {
   }
   grid.innerHTML = _qvHistory.map((h, i) => `
     <div style="background:var(--surface-2);border-radius:8px;padding:8px;border:1px solid var(--border);">
-      <video src="${h.videoUrl}" style="width:100%;border-radius:5px;background:#000;" muted loop
+      <video src="${esc(h.videoUrl)}" style="width:100%;border-radius:5px;background:#000;" muted loop
         onmouseenter="this.play()" onmouseleave="this.pause()"></video>
       <div style="font-size:11px;color:var(--text-muted);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-        title="${h.prompt}">${h.prompt}</div>
+        title="${esc(h.prompt)}">${esc(h.prompt)}</div>
       <div class="fx fx-g5 u-mt5">
-        <a href="${h.videoUrl}" download="quick_video_${i+1}.mp4" class="btn btn-ghost btn-sm u-fs11">⬇️</a>
-        <button class="btn btn-ghost btn-sm u-fs11"
-          onclick="document.getElementById('qvPrompt').value=${JSON.stringify(h.prompt)}">📋</button>
+        <a href="${esc(h.videoUrl)}" download="quick_video_${i+1}.mp4" class="btn btn-ghost btn-sm u-fs11">⬇️</a>
+        <button type="button" class="btn btn-ghost btn-sm u-fs11"
+          onclick="copyQvHistoryItem(${i})">📋</button>
       </div>
     </div>
   `).join('');
+}
+
+function copyQvHistoryItem(idx) {
+  const item = _qvHistory[idx];
+  const el = document.getElementById('qvPrompt');
+  if (item && el) el.value = item.prompt || '';
 }
 
 function clearQvHistory() {
@@ -5084,17 +5118,17 @@ function renderShotDeskOverview() {
   const p = currentShotDeskProject;
   const chars = p.characters || [];
 
-  const charCardsHtml = chars.map(c => `
+  const charCardsHtml = chars.map((c, cIdx) => `
     <div style="background:var(--bg0);border:1px solid var(--border);border-radius:6px;padding:8px 10px;display:flex;gap:10px;align-items:center;min-width:220px;">
       ${c.reference_image ? `
-        <img loading="lazy" decoding="async" src="/api/shot-desk/projects/${p.id}/assets/${c.reference_image}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid var(--accent);cursor:pointer;" onclick="openShotDeskImageModal(this.src, '${esc(c.name)}')">
+        <img loading="lazy" decoding="async" src="/api/shot-desk/projects/${encodeURIComponent(p.id)}/assets/${encodeURIComponent(c.reference_image).replace(/%2F/g, '/')}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid var(--accent);cursor:pointer;" onclick="openShotDeskImageModal(this.src, '${escJsSingle(c.name)}')">
       ` : `
-        <div style="width:40px;height:40px;border-radius:50%;background:rgba(99,102,241,0.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;">${(c.name||'C')[0]}</div>
+        <div style="width:40px;height:40px;border-radius:50%;background:rgba(99,102,241,0.15);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;">${esc((c.name||'C')[0])}</div>
       `}
       <div class="fx-f1">
         <div class="u-fw700 u-fs125 u-c-text">${esc(c.name)}</div>
         <div class="u-fs105 u-c-muted">${esc(c.voice || 'Giọng mặc định')}</div>
-        <div style="font-size:10px;color:var(--accent);cursor:pointer;margin-top:2px;" onclick="openCharacterBlockModal('${esc(c.name)}', '${esc(c.character_block || '')}')">👁️ Xem Character Block</div>
+        <div style="font-size:10px;color:var(--accent);cursor:pointer;margin-top:2px;" onclick="openShotDeskCharBlockByIdx(${cIdx})">👁️ Xem Character Block</div>
       </div>
     </div>
   `).join('');
@@ -8272,9 +8306,24 @@ function renderAffiliateSamplePills() {
     container.innerHTML = '';
     return;
   }
-  container.innerHTML = catData.sample_products.map(p => {
-    return `<button type="button" class="btn btn-ghost btn-xs" onclick="selectAffiliateSampleProduct('${p.replace(/'/g, "\'")}')" style="background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:12px;font-size:11px;padding:2px 8px;color:var(--text);">${p}</button>`;
+  container.innerHTML = catData.sample_products.map((p, idx) => {
+    return `<button type="button" class="btn btn-ghost btn-xs" onclick="selectAffiliateSampleProductByIdx(${idx})" style="background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:12px;font-size:11px;padding:2px 8px;color:var(--text);">${esc(p)}</button>`;
   }).join('');
+}
+
+function selectAffiliateSampleProductByIdx(idx) {
+  const cat = document.getElementById('affiliateCategory')?.value || 'gadgets';
+  const item = window.affiliateTemplates?.categories?.[cat]?.sample_products?.[idx];
+  if (item && typeof selectAffiliateSampleProduct === 'function') {
+    selectAffiliateSampleProduct(item);
+  }
+}
+
+function openShotDeskCharBlockByIdx(cIdx) {
+  const ch = currentShotDeskProject?.characters?.[cIdx];
+  if (ch && typeof openCharacterBlockModal === 'function') {
+    openCharacterBlockModal(ch.name || '', ch.character_block || '');
+  }
 }
 
 function onAffiliateCategoryChange() {
@@ -8409,7 +8458,7 @@ function testAffiliateVoice() {
   const v = document.getElementById('affiliateVoiceSelect')?.value || 'vieneu:AdamBua';
   const btn = document.getElementById('btnAffiliateVoiceTest');
   if (typeof testPlayVoice === 'function') {
-    testPlayVoice(v, btn);
+    testPlayVoice(v, '', btn);
   }
 }
 
@@ -8780,7 +8829,7 @@ function renderAffiliateScenes(scenes) {
               ${roleCfg.label}
             </span>
             ${imgBadge}
-            ${s.badge ? `<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text);font-size:10px;">🏷️ ${s.badge}</span>` : ''}
+            ${s.badge ? `<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text);font-size:10px;">🏷️ ${esc(s.badge)}</span>` : ''}
           </div>
           <div class="fx fx-ac fx-g8">
             <label class="u-fs11 u-c-muted u-m0">Thời lượng:</label>
@@ -8802,15 +8851,15 @@ function renderAffiliateScenes(scenes) {
               🔊 Nghe thử thoại
             </button>
           </div>
-          <textarea id="affSceneVo_${idx}" rows="2" class="form-control" oninput="onAffiliateVoiceoverInput(${idx}, this.value)" style="width:100%;font-size:13px;line-height:1.45;background:var(--bg3);border-color:rgba(255,255,255,0.1);">${s.voiceover || ''}</textarea>
+          <textarea id="affSceneVo_${idx}" rows="2" class="form-control" oninput="onAffiliateVoiceoverInput(${idx}, this.value)" style="width:100%;font-size:13px;line-height:1.45;background:var(--bg3);border-color:rgba(255,255,255,0.1);">${esc(s.voiceover || '')}</textarea>
         </div>
 
         <!-- Prompt Video (English) -->
         <div class="u-mb6">
           <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px;">
-            🎥 Prompt Quay Video (Tiếng Anh thương mại 9:16):
+            🎥 Prompt Quay Video (Tiếng Anh thương mại ${esc(document.getElementById('affiliateAspectRatio')?.value || '9:16')}):
           </label>
-          <textarea id="affScenePrompt_${idx}" rows="2" class="form-control" style="width:100%;font-size:11px;font-family:'JetBrains Mono',monospace;color:#94a3b8;background:rgba(0,0,0,0.2);">${s.prompt || ''}</textarea>
+          <textarea id="affScenePrompt_${idx}" rows="2" class="form-control" style="width:100%;font-size:11px;font-family:'JetBrains Mono',monospace;color:#94a3b8;background:rgba(0,0,0,0.2);">${esc(s.prompt || '')}</textarea>
         </div>
 
         <!-- Scene Voice Override -->
@@ -8984,12 +9033,14 @@ async function startAffiliateRenderJob() {
     const data = await resp.json();
     const jobId = data.job_id;
 
-    // Chuyển sang panel Monitor để theo dõi realtime
+    // Chuyển sang panel Monitor và kết nối SSE theo dõi realtime
+    activeJobId = jobId;
     showPanel('monitor');
-    if (typeof connectSSE === 'function') {
-      connectSSE(jobId);
+    if (typeof startMonitoring === 'function') {
+      startMonitoring(jobId, payload.title, scenesPayload.length);
     }
-    alert(`🎉 Đã bắt đầu sản xuất Video Tiếp Thị Liên Kết 9:16!\nJob ID: ${jobId}\nĐang tiến hành tạo video, lồng tiếng và ghép phụ đề tự động...`);
+    const queueNote = data.queued ? `\nTrạng thái: Đang chờ trong hàng đợi (vị trí ${data.queue_position})` : '';
+    alert(`🎉 Đã bắt đầu sản xuất Video Tiếp Thị Liên Kết (${payload.aspect_ratio || '9:16'})!\nJob ID: ${jobId}${queueNote}\nĐang tiến hành tạo video, lồng tiếng và ghép phụ đề tự động...`);
 
   } catch (err) {
     alert("Lỗi khi render: " + err.message);
@@ -9924,7 +9975,7 @@ function initFactoryPanel() {
   // Giọng đọc: dùng lại danh sách giọng Edge đã tải sẵn của app.
   const vSel = document.getElementById('factoryVoiceSelect');
   if (vSel && typeof voiceSelectHtml === 'function' && typeof VOICES !== 'undefined' && VOICES.length > 0) {
-    vSel.innerHTML = voiceSelectHtml('vi-VN-HoaiMyNeural');
+    vSel.innerHTML = voiceSelectHtml('vi-VN-HoaiMyNeural', false);
   }
   updateFactoryEstimate();
   loadFactoryTopics(false);
@@ -10229,7 +10280,7 @@ function initStoryPanel() {
   window.storyState.initialized = true;
   const vSel = document.getElementById('storyVoiceSelect');
   if (vSel && typeof voiceSelectHtml === 'function' && typeof VOICES !== 'undefined' && VOICES.length > 0) {
-    vSel.innerHTML = voiceSelectHtml('vi-VN-HoaiMyNeural');
+    vSel.innerHTML = voiceSelectHtml('vi-VN-HoaiMyNeural', false);
   }
   updateStoryScenesLabel();
   loadStoryLibrary();
@@ -10390,15 +10441,22 @@ async function searchStoryWeb() {
       box.innerHTML = '<p class="factory-card-sub">Không tìm thấy truyện nào khớp. Thử từ khóa khác, hoặc dán văn bản trực tiếp.</p>';
       return;
     }
-    box.innerHTML = results.map(r => `
+    window.storyState.searchResults = results;
+    box.innerHTML = results.map((r, rIdx) => `
       <div class="story-search-result">
         <b>${escapeHtml(r.title)}</b> <span class="badge badge-hot">${escapeHtml(r.source === 'library' ? 'Kho tác phẩm' : r.source === 'wikipedia' ? 'Wikipedia' : 'Wikisource')}</span>
         <p>${escapeHtml(r.snippet || '')}</p>
-        <button type="button" class="btn btn-primary btn-sm" onclick="fetchStoryWeb('${escapeHtml(r.title).replace(/'/g, "\\'")}', '${escapeHtml(r.source)}', '${escapeHtml(r.story_id || '')}')">📥 Lấy toàn văn và mở truyện</button>
+        <button type="button" class="btn btn-primary btn-sm" onclick="fetchStoryWebByIndex(${rIdx})">📥 Lấy toàn văn và mở truyện</button>
       </div>`).join('');
   } catch (e) {
     box.innerHTML = `<p class="story-msg err">❌ ${escapeHtml(e.message)}</p>`;
   }
+}
+
+async function fetchStoryWebByIndex(rIdx) {
+  const item = (window.storyState.searchResults || [])[rIdx];
+  if (!item) return;
+  await fetchStoryWeb(item.title, item.source, item.story_id || '');
 }
 
 async function fetchStoryWeb(title, source, storyId) {
@@ -10565,7 +10623,7 @@ async function openStoryAdaptModal(chapterIndex) {
       body: JSON.stringify({
         mode: cfg.mode, chapter_index: chapterIndex,
         scenes_count: cfg.scenes_count, visual_style: cfg.visual_style,
-        extra_req: cfg.extra_req,
+        aspect_ratio: cfg.aspect_ratio, extra_req: cfg.extra_req,
       }),
     });
     const data = await res.json();
@@ -10613,24 +10671,31 @@ function storyAdaptScenesFromForm() {
 async function saveStoryAdaptEdits() {
   const project = window.storyState.project;
   const ci = window.storyState.adaptChapterIndex;
-  if (!project || ci === null || ci === undefined) return;
+  if (!project || ci === null || ci === undefined) return false;
   const scenes = storyAdaptScenesFromForm();
   if (scenes.some(s => !s.voiceover || !s.prompt)) {
     showToast('❌ Mỗi cảnh cần có đủ lời thoại và prompt hình ảnh.', 'error');
-    return;
+    return false;
   }
   try {
     const cfg = storyConfig();
     const res = await apiFetch(`/api/story/projects/${encodeURIComponent(project.id)}/scripts/${ci}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scenes, mode: cfg.mode, visual_style: cfg.visual_style }),
+      body: JSON.stringify({
+        scenes, mode: cfg.mode, visual_style: cfg.visual_style,
+        aspect_ratio: cfg.aspect_ratio,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Lưu kịch bản lỗi');
     window.storyState.adaptScenes = scenes;
+    window.storyState.project = await (await apiFetch(`/api/story/projects/${encodeURIComponent(project.id)}`)).json();
+    renderStoryProject(window.storyState.project);
     showToast('💾 Đã lưu kịch bản chương.', 'success');
+    return true;
   } catch (e) {
     showToast(`❌ ${e.message}`, 'error');
+    return false;
   }
 }
 
@@ -10644,7 +10709,8 @@ function closeStoryAdaptModal() {
 async function createStoryVideoFromModal() {
   const ci = window.storyState.adaptChapterIndex;
   if (ci === null || ci === undefined) return;
-  await saveStoryAdaptEdits();
+  const savedOk = await saveStoryAdaptEdits();
+  if (!savedOk) return;
   closeStoryAdaptModal();
   await createStoryVideos(ci);
 }

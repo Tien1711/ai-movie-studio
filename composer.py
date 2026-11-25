@@ -236,14 +236,25 @@ QUALITY_PROFILES = {
     "draft": {
         "scale_9_16": "scale=480:854",
         "scale_16_9": "scale=854:480",
+        "res": {"9:16": (480, 854), "16:9": (854, 480), "1:1": (480, 480), "4:3": (640, 480), "21:9": (854, 360)},
         "crf": "26",
         "preset": "ultrafast",
         "b_a": "128k",
         "b_v": "1500k",
     },
+    "540p": {
+        "scale_9_16": "scale=540:960",
+        "scale_16_9": "scale=960:540",
+        "res": {"9:16": (540, 960), "16:9": (960, 540), "1:1": (540, 540), "4:3": (720, 540), "21:9": (960, 406)},
+        "crf": "24",
+        "preset": "veryfast",
+        "b_a": "128k",
+        "b_v": "2200k",
+    },
     "720p": {
         "scale_9_16": "scale=720:1280",
         "scale_16_9": "scale=1280:720",
+        "res": {"9:16": (720, 1280), "16:9": (1280, 720), "1:1": (720, 720), "4:3": (960, 720), "21:9": (1280, 540)},
         "crf": "20",
         "preset": "fast",
         "b_a": "192k",
@@ -252,6 +263,7 @@ QUALITY_PROFILES = {
     "1080p": {
         "scale_9_16": "scale=1080:1920",
         "scale_16_9": "scale=1920:1080",
+        "res": {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:3": (1440, 1080), "21:9": (1920, 810)},
         "crf": "18",
         "preset": "medium",
         "b_a": "256k",
@@ -260,12 +272,26 @@ QUALITY_PROFILES = {
     "4k": {
         "scale_9_16": "scale=2160:3840",
         "scale_16_9": "scale=3840:2160",
+        "res": {"9:16": (2160, 3840), "16:9": (3840, 2160), "1:1": (2160, 2160), "4:3": (2880, 2160), "21:9": (3840, 1620)},
         "crf": "16",
         "preset": "slow",
         "b_a": "320k",
         "b_v": "24000k",
     },
 }
+
+
+def _normalize_aspect_key(aspect_ratio: Optional[str]) -> str:
+    ar = (aspect_ratio or "16:9").strip().lower()
+    if any(k in ar for k in ("9:16", "9/16", "portrait", "vertical")):
+        return "9:16"
+    if any(k in ar for k in ("1:1", "1/1", "square")):
+        return "1:1"
+    if any(k in ar for k in ("4:3", "4/3")):
+        return "4:3"
+    if any(k in ar for k in ("21:9", "21/9", "ultrawide")):
+        return "21:9"
+    return "16:9"
 
 SFX_PRESETS = {
     "wind": "anoisesrc=d={dur}:c=pink:r=44100:a=0.3,lowpass=f=800,highpass=f=120,tremolo=f=0.5:d=0.6",
@@ -760,24 +786,28 @@ def compose_scene_video(
     Nếu không có scene_audio (chế độ không lồng tiếng), giữ nguyên 100% âm thanh & giọng gốc do AI sinh ra!
     """
     vf_filters = []
-    is_vertical = any(k in aspect_ratio.lower() for k in ["9:16", "9/16", "portrait", "vertical"])
+    ar_key = _normalize_aspect_key(aspect_ratio)
     q = (quality or "720p").lower()
 
-    if q == "preview":
-        w, h = (480, 854) if is_vertical else (854, 480)
+    if q in ("preview", "draft"):
+        w, h = QUALITY_PROFILES["draft"]["res"][ar_key]
         crf = "28"
         preset = "ultrafast"
+    elif q == "540p":
+        w, h = QUALITY_PROFILES["540p"]["res"][ar_key]
+        crf = "24"
+        preset = "veryfast"
     elif q == "1080p":
-        w, h = (1080, 1920) if is_vertical else (1920, 1080)
+        w, h = QUALITY_PROFILES["1080p"]["res"][ar_key]
         crf = "18"
         preset = "medium"
     elif q == "4k":
-        w, h = (2160, 3840) if is_vertical else (3840, 2160)
+        w, h = QUALITY_PROFILES["4k"]["res"][ar_key]
         crf = "16"
         preset = "slow"
     else:
         # Default 720p
-        w, h = (720, 1280) if is_vertical else (1280, 720)
+        w, h = QUALITY_PROFILES["720p"]["res"][ar_key]
         crf = "22"
         preset = "fast"
 
@@ -1275,9 +1305,13 @@ def mix_multitrack_timeline(
     vid_dur = get_media_duration(video_path)
     fade_out_start = max(0.0, vid_dur - fade_duration)
 
-    q_prof = QUALITY_PROFILES.get(quality, QUALITY_PROFILES["720p"])
-    is_vertical = any(k in aspect_ratio.lower() for k in ["9:16", "9/16", "portrait", "vertical"])
-    scale_filter = q_prof["scale_9_16"] if is_vertical else q_prof["scale_16_9"]
+    q_prof = QUALITY_PROFILES.get((quality or "720p").lower(), QUALITY_PROFILES["720p"])
+    ar_key = _normalize_aspect_key(aspect_ratio)
+    tw, th = q_prof["res"][ar_key]
+    scale_pad_filter = (
+        f"scale=w={tw}:h={th}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
+    )
 
     inputs = ["-i", video_path]
     idx_music = -1
@@ -1295,7 +1329,7 @@ def mix_multitrack_timeline(
         cur_idx += 1
 
     filter_complex_parts = []
-    filter_complex_parts.append(f"[0:v]{scale_filter}:flags=lanczos,format=yuv420p[vout]")
+    filter_complex_parts.append(f"[0:v]{scale_pad_filter}[vout]")
 
     audio_inputs = [f"[0:a]volume={voice_volume}[voice]"]
     mix_labels = ["[voice]"]

@@ -1710,12 +1710,23 @@ async def generate_affiliate_script_ai(
     # Product DNA lock: yêu cầu LLM dán nguyên văn vào cuối prompt MỌI cảnh;
     # hậu xử lý vẫn append lại nếu LLM quên (không viết lại prompt của LLM).
     _dna_lock = build_product_dna_lock_for_request(req)
+    _ar = (req.aspect_ratio or "9:16").strip()
+    _ar_desc = (
+        "dọc 9:16" if _ar == "9:16"
+        else "vuông 1:1" if _ar == "1:1"
+        else f"ngang {_ar}"
+    )
+    _ar_en = (
+        "vertical 9:16" if _ar == "9:16"
+        else "square 1:1" if _ar == "1:1"
+        else f"widescreen {_ar}"
+    )
     sys_instruction = (
         "Bạn là Chuyên gia Marketing Tiếp thị Liên kết hàng đầu (TikTok Shop & Shopee Top Creator).\n"
-        "Nhiệm vụ: Viết kịch bản video ngắn (15s-30s) dọc 9:16 bán hàng bùng nổ chuyển đổi theo đúng định dạng JSON.\n"
+        f"Nhiệm vụ: Viết kịch bản video ngắn (15s-30s) {_ar_desc} bán hàng bùng nổ chuyển đổi theo đúng định dạng JSON.\n"
         "Quy tắc bắt buộc:\n"
         "1. Phải có đúng 5 cảnh: Scene 1 (Hook 3s), Scene 2 (Pain point/Vấn đề), Scene 3 (Demo sản phẩm/Giải pháp), Scene 4 (Proof/Deal hời), Scene 5 (CTA giỏ hàng góc trái).\n"
-        "2. Prompt cho mỗi cảnh phải là TIẾNG ANH thương mại điện ảnh cực kỳ chi tiết, tỷ lệ vertical 9:16, studio lighting, 8k, photorealistic, no text, no watermark.\n"
+        f"2. Prompt cho mỗi cảnh phải là TIẾNG ANH thương mại điện ảnh cực kỳ chi tiết, tỷ lệ {_ar_en}, studio lighting, 8k, photorealistic, no text, no watermark.\n"
         "3. Voiceover phải là tiếng Việt tự nhiên, có dấu chấm câu ngắt nghỉ rõ ràng để máy đọc TTS chuẩn xác.\n"
         "4. Trả về DUY NHẤT một khối JSON hợp lệ theo schema:\n"
         "{\n"
@@ -1793,17 +1804,31 @@ async def generate_affiliate_script_ai(
                 parsed = _extract_json_object(raw_text)
                 if parsed is not None:
                     scenes_list = []
+                    _base_ref = req.koc_image or req.reference_image
+                    _shoot = getattr(req, "shooting_style", "faceless") or "faceless"
                     for item in parsed.get("scenes", []):
+                        _role = item.get("role", "demo")
                         scenes_list.append(AffiliateScene(
                             index=int(item.get("index", len(scenes_list) + 1)),
                             title=item.get("title", f"Cảnh {len(scenes_list) + 1}"),
-                            role=item.get("role", "demo"),
+                            role=_role,
                             duration=int(item.get("duration", AFFILIATE_SCENE_DURATION)),
-                            prompt=item.get("prompt", build_commercial_prompt("demo", req.product_name, req.category, req.key_features or "")),
+                            prompt=item.get(
+                                "prompt",
+                                build_commercial_prompt(
+                                    _role,
+                                    req.product_name,
+                                    req.category,
+                                    req.key_features or "",
+                                    koc_persona_id=req.koc_persona or "nam_bua_hai",
+                                    aspect_ratio=_ar,
+                                    shooting_style=_shoot,
+                                ),
+                            ),
                             voiceover=item.get("voiceover", ""),
                             voice=req.voice,
                             badge=item.get("badge", "GIỎ HÀNG GÓC TRÁI 👇"),
-                            reference_image=req.reference_image
+                            reference_image=_base_ref,
                         ))
                     if len(scenes_list) >= 3:
                         # Chuẩn hóa hậu xử lý: ép duration 10, append lock nếu
@@ -2192,7 +2217,8 @@ def import_affiliate_product_link(
             og = _og_tags(getattr(first, "text", "") or "")
             if og.get("og:title"):
                 result["product_name"] = og["og:title"]
-                result["image_url"] = og.get("og:image", "")
+                _og_vimg = (og.get("og:image") or "").strip()
+                result["image_url"] = _og_vimg if (_og_vimg and _is_image_url(_og_vimg)) else ""
                 result["source"] = "og_tags"
                 api_ok = True
         # (3) Fallback chắc chắn nhất: tên từ slug URL.
@@ -2224,9 +2250,12 @@ def import_affiliate_product_link(
             og_info = _tiktok_og_info_from_url(final_url)
             if og_info.get("title"):
                 result["product_name"] = og_info["title"]
-                result["image_url"] = og_info.get("image", "")
-                if og_info.get("image"):
-                    result["image_urls"] = [og_info["image"]]
+                _og_img = (og_info.get("image") or "").strip()
+                if _og_img and _is_image_url(_og_img):
+                    result["image_url"] = _og_img
+                    result["image_urls"] = [_og_img]
+                else:
+                    result["image_url"] = ""
                 result["source"] = "tiktok_og_info"
                 result["fetched"] = True
                 result["message"] = (
@@ -2263,7 +2292,8 @@ def import_affiliate_product_link(
             og = _og_tags(getattr(first, "text", "") or "")
             if og.get("og:title"):
                 result["product_name"] = og["og:title"]
-                result["image_url"] = og.get("og:image", "")
+                _og_vimg = (og.get("og:image") or "").strip()
+                result["image_url"] = _og_vimg if (_og_vimg and _is_image_url(_og_vimg)) else ""
                 result["source"] = "og_tags"
                 result["fetched"] = True
                 result["message"] = "Đã lấy thông tin video TikTok."
@@ -2383,7 +2413,8 @@ def _duckduckgo_image_search(query: str, get) -> List[str]:
 
 
 def _bing_image_search(query: str, get) -> List[str]:
-    """Ảnh từ Bing images HTML: bóc &quot;murl&quot; (URL ảnh trực tiếp)."""
+    """Ảnh từ Bing images HTML: bóc &quot;murl&quot; (URL ảnh trực tiếp, hỗ trợ query string chứa &amp;)."""
+    import html as _html_mod
     from urllib.parse import quote
 
     try:
@@ -2395,7 +2426,7 @@ def _bing_image_search(query: str, get) -> List[str]:
         if r.status_code != 200:
             return []
         html_text = getattr(r, "text", "") or ""
-        raw = re.findall(r"&quot;murl&quot;:&quot;([^&]+)&quot;", html_text)
+        raw = [_html_mod.unescape(m) for m in re.findall(r"&quot;murl&quot;:&quot;((?:(?!&quot;).)+)&quot;", html_text)]
         raw += re.findall(r'"murl":"([^"]+)"', html_text)
         return [u for u in raw if _is_image_url(u)]
     except Exception:

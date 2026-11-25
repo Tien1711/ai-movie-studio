@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import html as _html
 import io
+import ipaddress
 import json
 import logging
 import re
+import socket
 import time
+import urllib.parse
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
@@ -355,21 +358,112 @@ def fetch_web_text(title: str, source: str, http_get: Optional[Callable] = None)
     raise ValueError(f"Không tìm thấy nội dung cho '{title}' trên {source}")
 
 
-# ── 4. Nhập từ link ───────────────────────────────────────────────────────
+# ── 4. Nhập từ link (có bảo vệ chống SSRF & giới hạn stream) ──────────────
+
+MAX_DOC_UNCOMPRESSED_BYTES = 50 * 1024 * 1024  # 50MB tổng dung lượng sau giải nén DOCX/EPUB
+MAX_DOC_ARCHIVE_FILES = 1000
+
+
+def _is_blocked_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _validate_public_url(url: str, resolve_dns: bool = True) -> urllib.parse.ParseResult:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Link phải bắt đầu bằng http:// hoặc https://")
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise ValueError("Link thiếu tên miền hợp lệ")
+    if host in ("localhost", "0.0.0.0") or host.endswith((".local", ".internal", ".localhost")):
+        raise ValueError("Không cho phép truy cập địa chỉ nội bộ (SSRF blocked)")
+    try:
+        ipaddress.ip_address(host)
+        is_literal_ip = True
+    except ValueError:
+        is_literal_ip = False
+    if is_literal_ip:
+        if _is_blocked_ip(host):
+            raise ValueError("Không cho phép truy cập địa chỉ IP nội bộ (SSRF blocked)")
+        return parsed
+    if resolve_dns:
+        try:
+            infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+        except OSError as e:
+            raise ValueError(f"Không phân giải được tên miền '{host}': {e}")
+        if not infos:
+            raise ValueError(f"Không phân giải được tên miền '{host}'")
+        for info in infos:
+            addr = info[4][0]
+            if _is_blocked_ip(addr):
+                raise ValueError("Tên miền trỏ về địa chỉ IP nội bộ bị chặn (SSRF blocked)")
+    return parsed
+
+
+class _StreamedStoryResp:
+    def __init__(self, status_code: int, text: str):
+        self.status_code = status_code
+        self.text = text
+
+
+def _safe_story_url_get(url: str) -> _StreamedStoryResp:
+    """GET an toàn chống SSRF (kiểm tra DNS mỗi bước redirect) và giới hạn stream 2MB."""
+    current = url
+    headers = {"User-Agent": "Mozilla/5.0 (AI Movie Studio Story-to-Video)"}
+    with httpx.Client(timeout=RSS_TIMEOUT_S, follow_redirects=False, trust_env=False) as client:
+        for _ in range(6):
+            _validate_public_url(current, resolve_dns=True)
+            with client.stream("GET", current, headers=headers) as resp:
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("location")
+                    if not loc:
+                        raise ValueError("Link chuyển hướng thiếu header Location")
+                    current = urllib.parse.urljoin(current, loc)
+                    continue
+                if resp.status_code != 200:
+                    return _StreamedStoryResp(resp.status_code, "")
+                chunks: List[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes(chunk_size=16384):
+                    total += len(chunk)
+                    if total > MAX_URL_BYTES:
+                        raise ValueError("Trang web quá lớn (giới hạn 2MB) — hãy copy văn bản rồi dán trực tiếp")
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
+                enc = resp.encoding or "utf-8"
+                try:
+                    txt = raw.decode(enc, errors="replace")
+                except LookupError:
+                    txt = raw.decode("utf-8", errors="replace")
+                return _StreamedStoryResp(resp.status_code, txt)
+    raise ValueError("Link chuyển hướng quá nhiều lần (tối đa 5 lần)")
+
 
 def extract_text_from_url(url: str, http_get: Optional[Callable] = None) -> str:
     """Fetch 1 URL rồi trích văn bản chính (bỏ script/style/nav/quảng cáo).
 
-    Giới hạn 2MB. Không dùng bs4 (không có trong requirements) — chỉ regex.
+    Giới hạn 2MB + chống SSRF. Không dùng bs4 (không có trong requirements) — chỉ regex.
     """
     url = (url or "").strip()
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("Link phải bắt đầu bằng http:// hoặc https://")
-    get = http_get or _default_http_get
-    try:
-        res = get(url)
-    except Exception as e:
-        raise ValueError(f"Không mở được link: {e}")
+    _validate_public_url(url, resolve_dns=(http_get is None))
+    if http_get is None:
+        res = _safe_story_url_get(url)
+    else:
+        try:
+            res = http_get(url)
+        except Exception as e:
+            raise ValueError(f"Không mở được link: {e}")
     if getattr(res, "status_code", 0) != 200:
         raise ValueError(f"Link trả về lỗi HTTP {getattr(res, 'status_code', '?')}")
     html_text = getattr(res, "text", "") or ""
@@ -408,11 +502,32 @@ def _xml_local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
+def _safe_zip_read_member(zf: zipfile.ZipFile, member: str, total_budget: List[int]) -> bytes:
+    """Đọc 1 entry trong ZIP có kiểm tra chống Zip Bomb và symlink."""
+    zinfo = zf.getinfo(member)
+    if (zinfo.external_attr >> 16) & 0o170000 == 0o120000:
+        raise ValueError(f"File nén chứa symlink không an toàn: {member}")
+    if zinfo.file_size > MAX_DOC_UNCOMPRESSED_BYTES:
+        raise ValueError("Dung lượng giải nén vượt quá giới hạn an toàn (50MB)")
+    with zf.open(zinfo) as fp:
+        remain = MAX_DOC_UNCOMPRESSED_BYTES - total_budget[0]
+        data = fp.read(remain + 1)
+        total_budget[0] += len(data)
+        if total_budget[0] > MAX_DOC_UNCOMPRESSED_BYTES:
+            raise ValueError("Tổng dung lượng văn bản giải nén vượt quá giới hạn an toàn (50MB)")
+        return data
+
+
 def _parse_docx(data: bytes) -> str:
     """DOCX = file ZIP: đọc word/document.xml, trích text trong <w:t>."""
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            xml = zf.read("word/document.xml").decode("utf-8", errors="replace")
+            if len(zf.infolist()) > MAX_DOC_ARCHIVE_FILES:
+                raise ValueError("File DOCX chứa quá nhiều mục nén bất thường")
+            budget = [0]
+            xml = _safe_zip_read_member(zf, "word/document.xml", budget).decode("utf-8", errors="replace")
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"Không đọc được file DOCX (file có thể hỏng): {e}")
     paras: List[str] = []
@@ -434,11 +549,14 @@ def _parse_epub(data: bytes) -> str:
     except Exception as e:
         raise ValueError(f"Không đọc được file EPUB (file có thể hỏng): {e}")
     with zf:
+        if len(zf.infolist()) > MAX_DOC_ARCHIVE_FILES:
+            raise ValueError("File EPUB chứa quá nhiều mục nén bất thường")
+        budget = [0]
         try:
-            container = zf.read("META-INF/container.xml").decode("utf-8", errors="replace")
+            container = _safe_zip_read_member(zf, "META-INF/container.xml", budget).decode("utf-8", errors="replace")
         except KeyError:
             raise ValueError("File EPUB thiếu META-INF/container.xml")
-        m = re.search(r'full-path="([^"]+)"', container)
+        m = re.search(r'full-path=["\']([^"\']+)["\']', container)
         if not m:
             raise ValueError("Không tìm thấy đường dẫn OPF trong EPUB")
         opf_path = m.group(1)
@@ -446,24 +564,24 @@ def _parse_epub(data: bytes) -> str:
         if opf_dir == ".":
             opf_dir = ""
         try:
-            opf = zf.read(opf_path).decode("utf-8", errors="replace")
+            opf = _safe_zip_read_member(zf, opf_path, budget).decode("utf-8", errors="replace")
         except KeyError:
             raise ValueError(f"Không đọc được file OPF '{opf_path}' trong EPUB")
-        # manifest: id → href (bỏ namespace bằng regex)
+        # manifest: id → href (bỏ namespace bằng regex, hỗ trợ cả nháy đơn/kép và thiếu media-type)
         manifest: Dict[str, str] = {}
-        for item_m in re.finditer(r'<item[^>]+>', opf):
+        for item_m in re.finditer(r"<item\b[^>]*>", opf):
             tag = item_m.group(0)
-            id_m = re.search(r'id="([^"]+)"', tag)
-            href_m = re.search(r'href="([^"]+)"', tag)
-            type_m = re.search(r'media-type="([^"]+)"', tag)
-            if id_m and href_m and (type_m or "").group(1) in (
-                    "application/xhtml+xml", "text/html", ""):
+            id_m = re.search(r'\bid=["\']([^"\']+)["\']', tag)
+            href_m = re.search(r'\bhref=["\']([^"\']+)["\']', tag)
+            type_m = re.search(r'\bmedia-type=["\']([^"\']+)["\']', tag)
+            mtype = type_m.group(1).strip().lower() if type_m else ""
+            if id_m and href_m and mtype in ("application/xhtml+xml", "text/html", ""):
                 manifest[id_m.group(1)] = href_m.group(1)
         # spine: thứ tự đọc
         spine: List[str] = []
         spine_m = re.search(r"<spine[^>]*>(.*?)</spine>", opf, flags=re.DOTALL)
         if spine_m:
-            for ref_m in re.finditer(r'idref="([^"]+)"', spine_m.group(1)):
+            for ref_m in re.finditer(r'\bidref=["\']([^"\']+)["\']', spine_m.group(1)):
                 href = manifest.get(ref_m.group(1))
                 if href:
                     spine.append(href)
@@ -471,10 +589,12 @@ def _parse_epub(data: bytes) -> str:
             spine = list(manifest.values())
         parts: List[str] = []
         for href in spine:
-            href = href.split("#")[0]
+            href = href.split("#")[0].lstrip("/")
+            if ".." in Path(href).parts:
+                continue
             full = f"{opf_dir}/{href}" if opf_dir else href
             try:
-                xhtml = zf.read(full).decode("utf-8", errors="replace")
+                xhtml = _safe_zip_read_member(zf, full, budget).decode("utf-8", errors="replace")
             except KeyError:
                 continue
             xhtml = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", xhtml,
@@ -726,7 +846,13 @@ def adapt_chapter(chapter_text: str, mode: str, scenes_count: int,
         scenes[0]["voiceover"] = _trim_voiceover(
             extra_req.strip() + " " + scenes[0]["voiceover"])
 
-    return {"mode": mode, "scenes": scenes, "scene_count": len(scenes)}
+    return {
+        "mode": mode,
+        "scenes": scenes,
+        "scene_count": len(scenes),
+        "aspect_ratio": aspect_ratio,
+        "extra_req": (extra_req or "").strip(),
+    }
 
 
 # ── 7. Project (lưu JSON trong workspace/_story_projects) ────────────────
@@ -866,15 +992,33 @@ def create_story_videos(project_id: str, chapter_indexes: List[int],
             raise ValueError(f"Chỉ số chương {ci} không hợp lệ (truyện có {len(chapters)} chương)")
         ch = chapters[ci]
         saved = (project.get("scripts") or {}).get(str(ci))
-        if (saved and saved.get("mode") == mode
-                and saved.get("scenes_count") == scenes_count
-                and saved.get("visual_style") == visual_style
-                and saved.get("scenes")):
+        clean_extra = (extra_req or "").strip()
+        # Nếu người dùng đã sửa tay và lưu kịch bản (user_edited=True), LUÔN tôn trọng
+        # bản đã sửa thay vì ghi đè bằng adapt_chapter.
+        if saved and saved.get("user_edited") and saved.get("scenes"):
+            script = saved
+        elif (
+            saved
+            and saved.get("mode") == mode
+            and saved.get("requested_scenes_count", saved.get("scenes_count")) == scenes_count
+            and saved.get("visual_style") == visual_style
+            and saved.get("aspect_ratio", "9:16") == aspect_ratio
+            and saved.get("extra_req", "") == clean_extra
+            and saved.get("scenes")
+        ):
             script = saved
         else:
             script = adapt_chapter(ch["text"], mode, scenes_count, visual_style,
-                                   extra_req=extra_req, aspect_ratio=aspect_ratio)
-            script = {**script, "scenes_count": scenes_count, "visual_style": visual_style}
+                                   extra_req=clean_extra, aspect_ratio=aspect_ratio)
+            script = {
+                **script,
+                "scenes_count": len(script["scenes"]),
+                "requested_scenes_count": scenes_count,
+                "visual_style": visual_style,
+                "aspect_ratio": aspect_ratio,
+                "extra_req": clean_extra,
+                "user_edited": False,
+            }
             project.setdefault("scripts", {})[str(ci)] = script
             changed = True
         title = f"{project['title']} — {ch['title']}"

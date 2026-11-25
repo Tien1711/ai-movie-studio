@@ -235,7 +235,67 @@ PROJECTS_DIR = WORKSPACE / "_projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 JOB_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-]+$")
-PROTECTED_WORKSPACE_NAMES = {"_uploads", "_music", "_projects", "_shot_desk_projects", "_batch_videos", "_voice_previews", "_characters.json"}
+PROTECTED_WORKSPACE_NAMES = {
+    "_uploads", "_music", "_projects", "_shot_desk_projects",
+    "_batch_videos", "_story_projects", "_voice_previews",
+    "_tts_cache", "_factory_cache", "_characters.json",
+}
+_ALLOWED_BGM_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+
+
+def _validate_safe_studio_bgm_field(value: Optional[str]) -> Optional[str]:
+    """Validate bg_music_path ở biên API: chỉ nhận file nằm trong workspace/_music hoặc workspace/_uploads."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    norm = raw.replace("\\", "/")
+    if ".." in Path(norm).parts:
+        raise ValueError("bg_music_path không được chứa '..'")
+    music_root = MUSIC_DIR.resolve()
+    upload_root = UPLOAD_DIR.resolve()
+    ws_root = WORKSPACE.resolve()
+
+    if norm.startswith("/api/music/"):
+        cand = (MUSIC_DIR / Path(norm).name).resolve()
+    elif norm.startswith("/api/uploads/"):
+        cand = (UPLOAD_DIR / Path(norm).name).resolve()
+    elif "/" not in norm and ":" not in norm:
+        cand = (MUSIC_DIR / norm).resolve()
+    else:
+        p = Path(raw)
+        cand = p.resolve() if p.is_absolute() else ((ws_root / norm).resolve() if norm.startswith(("_music/", "_uploads/")) else p.resolve())
+
+    if not (cand.is_relative_to(music_root) or cand.is_relative_to(upload_root)):
+        raise ValueError("bg_music_path chỉ cho phép file nằm trong workspace/_music hoặc workspace/_uploads")
+    if cand.suffix.lower() not in _ALLOWED_BGM_EXTS:
+        raise ValueError(f"bg_music_path không phải định dạng nhạc hỗ trợ ({sorted(_ALLOWED_BGM_EXTS)})")
+    return raw
+
+
+def _resolve_existing_studio_bgm(value: Optional[str]) -> Optional[str]:
+    """Chuẩn hóa bg_music_path thành đường dẫn file thực tế tồn tại trong workspace/_music hoặc _uploads."""
+    validated = _validate_safe_studio_bgm_field(value)
+    if not validated:
+        return None
+    norm = validated.replace("\\", "/")
+    ws_root = WORKSPACE.resolve()
+    if norm.startswith("/api/music/"):
+        cand = (MUSIC_DIR / Path(norm).name).resolve()
+    elif norm.startswith("/api/uploads/"):
+        cand = (UPLOAD_DIR / Path(norm).name).resolve()
+    elif "/" not in norm and ":" not in norm:
+        cand = (MUSIC_DIR / norm).resolve()
+        if not cand.is_file():
+            cand = (UPLOAD_DIR / norm).resolve()
+    elif norm.startswith(("_music/", "_uploads/")):
+        cand = (ws_root / norm).resolve()
+    else:
+        cand = Path(validated).resolve()
+    if (cand.is_relative_to(MUSIC_DIR.resolve()) or cand.is_relative_to(UPLOAD_DIR.resolve())) and cand.is_file():
+        return str(cand)
+    return None
 
 def get_safe_job_dir(job_id: str) -> Path:
     """Kiểm tra và trả về thư mục job an toàn bên trong WORKSPACE, chống path traversal."""
@@ -409,6 +469,11 @@ class MovieRequest(BaseModel):
     start_scene_idx: Optional[int] = Field(default=1, ge=1)
     allow_partial: Optional[bool] = False
     scenes: List[SceneItem] = Field(max_length=200)  # audit §2.9: chặn DoS 1 request nghìn cảnh
+
+    @field_validator("bg_music_path")
+    @classmethod
+    def _check_bg_music_path(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_safe_studio_bgm_field(v)
 
 
 
@@ -1066,7 +1131,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     output_dir=str(output_dir),
                     project_title=req.title.replace(" ", "_"),
                     font_size=req.font_size,
-                    bg_music_path=req.bg_music_path,
+                    bg_music_path=_resolve_existing_studio_bgm(req.bg_music_path),
                     music_volume=req.music_volume if req.music_volume is not None else 0.25,
                     voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
                     subtitle_mode=req.subtitle_mode or "burn_in",
@@ -1461,7 +1526,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
                 output_dir=str(output_dir),
                 project_title=req.title.replace(" ", "_"),
                 font_size=req.font_size,
-                bg_music_path=req.bg_music_path,
+                bg_music_path=_resolve_existing_studio_bgm(req.bg_music_path),
                 music_volume=req.music_volume if req.music_volume is not None else 0.25,
                 voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
                 subtitle_mode=req.subtitle_mode or "burn_in",
@@ -1841,7 +1906,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
                             output_dir=str(output_dir),
                             project_title=req.title.replace(" ", "_"),
                             font_size=req.font_size,
-                            bg_music_path=req.bg_music_path,
+                            bg_music_path=_resolve_existing_studio_bgm(req.bg_music_path),
                             music_volume=req.music_volume if req.music_volume is not None else 0.25,
                             voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
                             subtitle_mode=req.subtitle_mode or "burn_in",
@@ -2319,6 +2384,11 @@ class ComposeJobRequest(BaseModel):
     music_volume: Optional[float] = Field(default=0.25, ge=0.0, le=2.0)
     voice_volume: Optional[float] = Field(default=1.0, ge=0.0, le=2.0)
 
+    @field_validator("bg_music_path")
+    @classmethod
+    def _check_bg_music_path(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_safe_studio_bgm_field(v)
+
 
 @app.post("/api/jobs/{job_id}/compose")
 async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = None):
@@ -2352,7 +2422,7 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
             output_dir=str(output_dir),
             project_title=title,
             font_size=font_size,
-            bg_music_path=bg_music_path,
+            bg_music_path=_resolve_existing_studio_bgm(bg_music_path),
             music_volume=music_volume,
             voice_volume=voice_volume,
             subtitle_mode=subtitle_mode,
@@ -3719,18 +3789,28 @@ def api_get_music_file(filename: str):
 def api_clean_workspace(keep_projects: bool = True):
     """Dọn dẹp các thư mục job tạm, giải phóng dung lượng đĩa cứng và bảo toàn thư viện dự án."""
     with JOBS_LOCK:
-        running = [jid for jid, j in JOBS.items() if j.get("status") == "running"]
+        running = [jid for jid, j in JOBS.items() if j.get("status") in ("running", "queued")]
         active_tasks = [jid for jid, t in JOB_TASKS.items() if not t.done()]
-    still_running = sorted(set(running) | set(active_tasks))
+        queued_jobs = list(RENDER_QUEUE)
+    active_sd = [pid for pid, sset in ACTIVE_SHOT_TASKS.items() if sset] + list(ACTIVE_SHOT_DESK_COMPOSE)
+    active_batch = []
+    try:
+        active_batch = [
+            v["id"] for v in BATCH_MANAGER.list_videos()
+            if v.get("status") in ("running", "queued")
+        ]
+    except Exception:
+        pass
+    still_running = sorted(set(running) | set(active_tasks) | set(queued_jobs) | set(active_sd) | set(active_batch))
     if still_running:
         return JSONResponse(
-            {"error": f"Không thể dọn dẹp: còn job đang chạy ({', '.join(still_running)}). Hãy hủy/đợi hoàn tất trước."},
+            {"error": f"Không thể dọn dẹp: còn tác vụ đang chạy/chờ ({', '.join(still_running[:10])}). Hãy hủy hoặc đợi hoàn tất trước."},
             status_code=409)
     deleted_jobs = 0
     bytes_freed = 0
-    protected_dirs = {"_uploads", "_music", "_voice_previews"}
+    protected_dirs = {"_uploads", "_music", "_voice_previews", "_tts_cache", "_factory_cache"}
     if keep_projects:
-        protected_dirs.update({"_projects", "_shot_desk_projects"})
+        protected_dirs.update({"_projects", "_shot_desk_projects", "_batch_videos", "_story_projects"})
 
     for item in WORKSPACE.iterdir():
         if item.is_dir() and item.name not in protected_dirs:
@@ -3988,19 +4068,18 @@ async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
                 "model": "muse-image"
             }
             if base_ref:
-                ref_str = str(base_ref)
-                if ref_str.startswith("/api/uploads/"):
-                    local_p = WORKSPACE / "_uploads" / os.path.basename(ref_str)
-                    if local_p.exists():
-                        with open(local_p, "rb") as f:
-                            payload["reference_image"] = f"data:image/png;base64,{base64.b64encode(f.read()).decode('ascii')}"
-                    else:
-                        payload["reference_image"] = f"http://localhost:8000{ref_str}"
-                elif os.path.exists(ref_str) and os.path.isfile(ref_str):
-                    with open(ref_str, "rb") as f:
-                        payload["reference_image"] = f"data:image/png;base64,{base64.b64encode(f.read()).decode('ascii')}"
-                else:
+                ref_str = str(base_ref).strip()
+                if ref_str.startswith(("http://", "https://", "data:image/")):
                     payload["reference_image"] = ref_str
+                else:
+                    from batch_engine import _resolve_safe_reference
+                    safe_local = _resolve_safe_reference(ref_str)
+                    if safe_local and safe_local.is_file():
+                        mime = mimetypes.guess_type(str(safe_local))[0] or "image/png"
+                        with open(safe_local, "rb") as f:
+                            payload["reference_image"] = f"data:{mime};base64,{base64.b64encode(f.read()).decode('ascii')}"
+                    elif ref_str.startswith("/api/uploads/"):
+                        payload["reference_image"] = f"http://localhost:8000{ref_str}"
 
             try:
                 res = await client.post(
@@ -4757,6 +4836,11 @@ class AffiliateRenderRequest(BaseModel):
     transition: Optional[str] = Field(default="none", max_length=20)
     font_size: Optional[int] = Field(default=22, ge=8, le=72)
 
+    @field_validator("bg_music_path")
+    @classmethod
+    def _check_bg_music_path(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_safe_studio_bgm_field(v)
+
 
 @app.get("/api/affiliate/templates")
 async def get_affiliate_templates():
@@ -4897,12 +4981,18 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
     job = new_job(job_id, len(movie_req.scenes), req=movie_req)
     _save_job_or_http500(job)
     _total_s = sum(s.duration for s in movie_req.scenes)
-    job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh, tổng ~{_total_s}s (9:16, chain sequential) — Giọng: {movie_req.voice}")
+    job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh, tổng ~{_total_s}s ({movie_req.aspect_ratio}, chain sequential) — Giọng: {movie_req.voice}")
     _save_job_or_http500(job)
-    # Nếu thiếu MUSE_API_KEY thì film_pipeline đánh dấu job error rõ ràng.
-    _spawn_job_task(job_id, film_pipeline(job, movie_req))
+    # Xếp vào RENDER_QUEUE để không đụng độ khi đang render phim khác.
+    queue_position = enqueue_render_job(job)
 
-    return {"job_id": job_id, "message": "Đã bắt đầu sản xuất video tiếp thị liên kết", "total_scenes": len(movie_req.scenes)}
+    return {
+        "job_id": job_id,
+        "message": "Đã bắt đầu sản xuất video tiếp thị liên kết" if queue_position <= 1 else f"Đã xếp hàng chờ render (vị trí {queue_position})",
+        "total_scenes": len(movie_req.scenes),
+        "queue_position": queue_position,
+        "queued": queue_position > 1,
+    }
 
 
 # ── TẠO VIDEO HÀNG LOẠT (BATCH VIDEO CREATOR) ────────────────────────────────
@@ -4952,6 +5042,8 @@ class BatchCreateRequest(BaseModel):
     @classmethod
     def validate_voice(cls, v: str) -> str:
         clean = v.strip()
+        if clean in ("ai_voice", "native", "none", "no_dub"):
+            raise ValueError(f"Chế độ '{clean}' không tạo file giọng đọc cho video ghép ảnh — hãy chọn giọng đọc TTS cụ thể")
         if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-:]+$", clean):
             raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
         return clean
@@ -5154,6 +5246,8 @@ class FactoryOrderRequest(BaseModel):
     @classmethod
     def validate_voice(cls, v: str) -> str:
         clean = v.strip()
+        if clean in ("ai_voice", "native", "none", "no_dub"):
+            raise ValueError(f"Chế độ '{clean}' không tạo file giọng đọc cho video ghép ảnh — hãy chọn giọng đọc TTS cụ thể")
         if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-:]+$", clean):
             raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
         return clean
@@ -5194,7 +5288,7 @@ async def get_factory_topics(source: str = "trending", refresh: bool = False):
     refresh=true: bỏ qua cache, lấy mới từ RSS."""
     if source not in ("trending", "news"):
         return JSONResponse({"error": "Nguồn nội dung chỉ nhận 'trending' hoặc 'news'"}, status_code=422)
-    return auto_factory.fetch_topics(source, use_cache=not refresh)
+    return await asyncio.to_thread(auto_factory.fetch_topics, source, None, not refresh)
 
 
 @app.post("/api/factory/order")
@@ -5205,12 +5299,13 @@ async def create_factory_order(req: FactoryOrderRequest):
     if req.source == "manual":
         topics = [t.strip() for t in (req.topics or []) if t and t.strip()]
     else:
-        fetched = auto_factory.fetch_topics(req.source)
+        fetched = await asyncio.to_thread(auto_factory.fetch_topics, req.source)
         topics = fetched["topics"][: req.count]
         fallback = fetched["fallback"]
     if not topics:
         return JSONResponse({"error": "Không lấy được chủ đề nào để sản xuất"}, status_code=422)
-    created = BATCH_MANAGER.add_batch(
+    created = await asyncio.to_thread(
+        BATCH_MANAGER.add_batch,
         prompts=topics,
         aspect_ratio=req.aspect_ratio,
         scenes_count=req.scenes_count,
@@ -5237,7 +5332,7 @@ async def get_factory_publish_pack(video_id: str):
     """Tải gói đăng bài ZIP của 1 video đã hoàn tất (video + thumbnail +
     tiêu đề/mô tả/hashtag + phụ đề + metadata)."""
     try:
-        zip_path = auto_factory.build_publish_pack(video_id)
+        zip_path = await asyncio.to_thread(auto_factory.build_publish_pack, video_id)
     except FileNotFoundError:
         return JSONResponse({"error": "Không tìm thấy video"}, status_code=404)
     except ValueError as e:
@@ -5251,7 +5346,7 @@ async def get_factory_publish_pack(video_id: str):
 @app.get("/api/factory/thumbnail/{video_id}")
 async def get_factory_thumbnail(video_id: str):
     """Ảnh thumbnail của video (trích từ final.mp4, có cache trong thư mục video)."""
-    thumb = auto_factory.get_thumbnail(video_id)
+    thumb = await asyncio.to_thread(auto_factory.get_thumbnail, video_id)
     if not thumb:
         return JSONResponse({"error": "Chưa có thumbnail cho video này"}, status_code=404)
     return FileResponse(str(thumb), media_type="image/jpeg")
@@ -5307,6 +5402,7 @@ class StoryAdaptRequest(BaseModel):
     chapter_index: Optional[int] = Field(default=None, ge=0)
     scenes_count: int = Field(default=5, ge=3, le=8)
     visual_style: str = Field(default="cinematic", max_length=50)
+    aspect_ratio: str = Field(default="9:16", max_length=10)
     extra_req: str = Field(default="", max_length=500)
 
     @field_validator("mode")
@@ -5321,6 +5417,13 @@ class StoryAdaptRequest(BaseModel):
     def validate_style(cls, v: str) -> str:
         if v not in BATCH_VISUAL_STYLES:
             raise ValueError(f"Phong cách '{v}' không hợp lệ")
+        return v
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls, v: str) -> str:
+        if v not in ("9:16", "16:9", "1:1"):
+            raise ValueError(f"Tỷ lệ khung hình '{v}' không hợp lệ. Cho phép: 9:16, 16:9, 1:1")
         return v
 
 
@@ -5351,6 +5454,8 @@ class StoryCreateVideosRequest(BaseModel):
     @classmethod
     def validate_voice(cls, v: str) -> str:
         clean = v.strip()
+        if clean in ("ai_voice", "native", "none", "no_dub"):
+            raise ValueError(f"Chế độ '{clean}' không tạo file giọng đọc cho video ghép ảnh — hãy chọn giọng đọc TTS cụ thể")
         if not clean or len(clean) < 3 or not re.match(r"^[a-zA-Z0-9_\-:]+$", clean):
             raise ValueError(f"Tên giọng đọc '{v}' không hợp lệ")
         return clean
@@ -5365,14 +5470,22 @@ class StoryCreateVideosRequest(BaseModel):
 
 class StorySaveScriptRequest(BaseModel):
     scenes: List[Dict[str, Any]] = Field(..., min_length=1, max_length=12)
-    mode: str = Field(default="custom", max_length=20)
+    mode: str = Field(default="short", max_length=20)
     visual_style: str = Field(default="cinematic", max_length=50)
+    aspect_ratio: str = Field(default="9:16", max_length=10)
 
     @field_validator("visual_style")
     @classmethod
     def validate_style(cls, v: str) -> str:
         if v not in BATCH_VISUAL_STYLES:
             raise ValueError(f"Phong cách '{v}' không hợp lệ")
+        return v
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls, v: str) -> str:
+        if v not in ("9:16", "16:9", "1:1"):
+            raise ValueError(f"Tỷ lệ khung hình '{v}' không hợp lệ. Cho phép: 9:16, 16:9, 1:1")
         return v
 
     @model_validator(mode="after")
@@ -5422,7 +5535,7 @@ async def search_story_web(q: str = ""):
     if not q.strip():
         return JSONResponse({"error": "Từ khóa tìm kiếm không được để trống"}, status_code=422)
     try:
-        return story_engine.search_web(q)
+        return await asyncio.to_thread(story_engine.search_web, q)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
 
@@ -5435,13 +5548,13 @@ async def fetch_story_web(title: str = "", source: str = "wikipedia"):
     if source not in ("library", "wikipedia", "wikisource"):
         return JSONResponse({"error": "Nguồn web chỉ nhận 'library', 'wikipedia' hoặc 'wikisource'"}, status_code=422)
     try:
-        text = story_engine.fetch_web_text(title, source)
+        text = await asyncio.to_thread(story_engine.fetch_web_text, title, source)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     author = {"library": "Dân gian", "wikipedia": "Wikipedia tiếng Việt",
               "wikisource": "Wikisource tiếng Việt"}[source]
     try:
-        project = story_engine.create_project(title.strip(), author, text, source="web")
+        project = await asyncio.to_thread(story_engine.create_project, title.strip(), author, text, "web")
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     return {"message": f"Đã tạo truyện '{project['title']}' ({project['chapter_count']} chương)", "project": project}
@@ -5451,7 +5564,7 @@ async def fetch_story_web(title: str = "", source: str = "wikipedia"):
 async def import_story_url(req: StoryImportUrlRequest):
     """Nhập truyện từ 1 link: fetch rồi trích văn bản chính, tạo project."""
     try:
-        text = story_engine.extract_text_from_url(req.url)
+        text = await asyncio.to_thread(story_engine.extract_text_from_url, req.url)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     title = req.title.strip()
@@ -5459,9 +5572,11 @@ async def import_story_url(req: StoryImportUrlRequest):
         host = re.sub(r"^https?://", "", req.url).split("/")[0]
         title = f"Truyện từ {host}"
     try:
-        project = story_engine.create_project(
-            title, "Không rõ", text, source="url",
-            style=req.style, chars_per_chapter=req.chars_per_chapter)
+        project = await asyncio.to_thread(
+            story_engine.create_project,
+            title, "Không rõ", text, "url",
+            req.style, req.chars_per_chapter,
+        )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     return {"message": f"Đã tạo truyện '{project['title']}' ({project['chapter_count']} chương)", "project": project}
@@ -5559,9 +5674,16 @@ async def adapt_story_project(project_id: str, req: StoryAdaptRequest):
             ch = chapters[ci]
             script = story_engine.adapt_chapter(
                 ch["text"], req.mode, req.scenes_count, req.visual_style,
-                extra_req=req.extra_req)
-            script = {**script, "scenes_count": req.scenes_count,
-                      "visual_style": req.visual_style}
+                extra_req=req.extra_req, aspect_ratio=req.aspect_ratio)
+            script = {
+                **script,
+                "scenes_count": len(script["scenes"]),
+                "requested_scenes_count": req.scenes_count,
+                "visual_style": req.visual_style,
+                "aspect_ratio": req.aspect_ratio,
+                "extra_req": (req.extra_req or "").strip(),
+                "user_edited": False,
+            }
             project.setdefault("scripts", {})[str(ci)] = script
             adapted.append({
                 "chapter_index": ci, "chapter_title": ch["title"],
@@ -5593,8 +5715,14 @@ async def save_story_script(project_id: str, chapter_index: int, req: StorySaveS
             "duration": sc.get("duration", 6),
         })
     project.setdefault("scripts", {})[str(chapter_index)] = {
-        "mode": req.mode, "scenes": scenes, "scene_count": len(scenes),
-        "scenes_count": len(scenes), "visual_style": req.visual_style,
+        "mode": req.mode,
+        "scenes": scenes,
+        "scene_count": len(scenes),
+        "scenes_count": len(scenes),
+        "requested_scenes_count": len(scenes),
+        "visual_style": req.visual_style,
+        "aspect_ratio": req.aspect_ratio,
+        "user_edited": True,
     }
     story_engine.save_project(project)
     return {"message": f"Đã lưu kịch bản chương {chapter_index + 1}", "project_id": project_id,

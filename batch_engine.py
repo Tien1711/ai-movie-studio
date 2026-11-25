@@ -162,8 +162,44 @@ def _resolve_safe_reference(ref_str: str) -> Optional[Path]:
             proj_id, rel_parts = parts[0], parts[1:]
             if any(p == ".." or ":" in p for p in rel_parts):
                 return None
-            base = (_WORKSPACE_ROOT / proj_id).resolve()
-            target = (base.joinpath(*rel_parts)).resolve()
+            sd_root = (_WORKSPACE_ROOT / "_shot_desk_projects").resolve()
+            base = (sd_root / proj_id).resolve()
+            if not base.is_relative_to(sd_root):
+                return None
+            # Hỗ trợ các route chuẩn của Shot Desk:
+            # 1) /api/shot-desk/projects/<id>/assets/<asset_path> -> <proj_dir>/<asset_path>
+            # 2) /api/shot-desk/projects/<id>/shots/<idx>/frames/<name> -> <proj_dir>/shots/shot_XXX/<name>
+            # 3) /api/shot-desk/projects/<id>/<rel> -> <proj_dir>/<rel> (và tương thích ngược workspace/<id>/<rel>)
+            if rel_parts[0] == "assets" and len(rel_parts) >= 2:
+                target = base.joinpath(*rel_parts[1:]).resolve()
+            elif (
+                len(rel_parts) == 4
+                and rel_parts[0] == "shots"
+                and rel_parts[1].isdigit()
+                and rel_parts[2] == "frames"
+            ):
+                shot_idx = int(rel_parts[1])
+                clean_frame = os.path.basename(rel_parts[3])
+                if not clean_frame or clean_frame in (".", ".."):
+                    return None
+                shot_dir = (base / "shots" / f"shot_{shot_idx:03d}").resolve()
+                target = (shot_dir / clean_frame).resolve()
+                if target.is_relative_to(shot_dir) and not target.exists() and shot_dir.is_dir():
+                    stem = Path(clean_frame).stem
+                    cands = [
+                        f for f in shot_dir.glob(f"{stem}.*")
+                        if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".avif")
+                    ]
+                    if cands:
+                        target = cands[0].resolve()
+            else:
+                target = base.joinpath(*rel_parts).resolve()
+                if not target.exists():
+                    legacy_base = (_WORKSPACE_ROOT / proj_id).resolve()
+                    legacy_target = legacy_base.joinpath(*rel_parts).resolve()
+                    if legacy_target.is_relative_to(legacy_base) and legacy_target.is_file():
+                        base = legacy_base
+                        target = legacy_target
         else:
             # Đường dẫn filesystem: chỉ chấp nhận khi nằm trong workspace/.
             target = (Path(s_norm).resolve())
@@ -325,7 +361,16 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str):
                 if dur and dur > 0.3:
                     return dur, False, ""
                 return max(2.0, len(clean) / 15.0), False, ""
-        dur = await synthesize_voice(text=text, voice=voice, output_path=output_path)
+        try:
+            dur = await synthesize_voice(
+                text=text,
+                voice=voice,
+                output_path=output_path,
+                allow_silent_fallback=False,
+            )
+        except TypeError:
+            # Tương thích các hàm mock trong unit test chỉ khai báo (text, voice, output_path)
+            dur = await synthesize_voice(text=text, voice=voice, output_path=output_path)
         if use_cache and cache_path is not None and dur and dur > 0:
             try:
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:

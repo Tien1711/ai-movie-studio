@@ -1143,49 +1143,109 @@ class BatchVideoManager:
         (proj_dir / "final").mkdir(exist_ok=True)
 
         v_dir = BATCH_DIR / video_id
+        default_voice = v.get("voice") or "vi-VN-HoaiMyNeural"
+        if default_voice in ("ai_voice", "native", "none", "no_dub"):
+            default_voice = "vi-VN-HoaiMyNeural"
+        aspect_ratio = v.get("aspect_ratio", "9:16")
         shots = []
-        for s in v.get("scenes", []):
-            s_idx = s["index"]
-            clip_name = f"clip_{s_idx}.mp4"
-            audio_name = f"scene_{s_idx}.mp3"
+        for i, s in enumerate(v.get("scenes", [])):
+            s_idx = int(s.get("index") or (i + 1))
+            src_clip_name = f"clip_{s_idx}.mp4"
+            src_audio_name = f"scene_{s_idx}.mp3"
+            dst_clip_rel = f"clips/shot_{s_idx:03d}_clip.mp4"
+            dst_audio_rel = f"audio/shot_{s_idx:03d}_tts.mp3"
+            shot_dir = proj_dir / "shots" / f"shot_{s_idx:03d}"
+            shot_dir.mkdir(parents=True, exist_ok=True)
 
-            # Sao chép clip/audio nếu đã sinh sẵn
+            # Sao chép clip/audio/ảnh theo đúng chuẩn file & URL của Shot Desk
             target_clip = None
-            shot_status = "pending"
-            src_clip = v_dir / "clips" / clip_name
-            if src_clip.exists():
-                dst_clip = proj_dir / "clips" / clip_name
+            video_url = None
+            audio_url = None
+            first_frame = None
+            first_frame_url = None
+            shot_status = "ready"
+
+            src_clip = v_dir / "clips" / src_clip_name
+            if src_clip.exists() and src_clip.stat().st_size > 500:
+                dst_clip = proj_dir / dst_clip_rel
                 try:
                     shutil.copy2(src_clip, dst_clip)
-                    target_clip = f"clips/{clip_name}"
+                    target_clip = dst_clip_rel
+                    video_url = f"/api/shot-desk/projects/{proj_id}/shots/{s_idx}/video"
                     shot_status = "approved"
                 except Exception as e:
                     logger.warning("Không thể copy clip sang shot desk: %s", e)
 
-            src_audio = v_dir / "audio" / audio_name
-            if src_audio.exists():
-                dst_audio = proj_dir / "audio" / audio_name
+            src_audio = v_dir / "audio" / src_audio_name
+            if src_audio.exists() and src_audio.stat().st_size > 100:
+                dst_audio = proj_dir / dst_audio_rel
                 try:
                     shutil.copy2(src_audio, dst_audio)
+                    audio_url = f"/api/shot-desk/projects/{proj_id}/shots/{s_idx}/audio"
                 except Exception:
                     pass
 
+            src_img = v_dir / "images" / f"scene_{s_idx}.webp"
+            if src_img.exists() and src_img.stat().st_size > 500:
+                dst_img = shot_dir / "first_frame.webp"
+                try:
+                    shutil.copy2(src_img, dst_img)
+                    first_frame = f"shots/shot_{s_idx:03d}/first_frame.webp"
+                    first_frame_url = f"/api/shot-desk/projects/{proj_id}/shots/{s_idx}/frames/first_frame.webp"
+                except Exception:
+                    pass
+
+            dur_val = int(round(float(s.get("actual_duration") or s.get("duration") or 6)))
             shots.append({
                 "index": s_idx,
                 "title": f"Cảnh {s_idx} ({s.get('role', 'scene')})",
                 "prompt": s.get("prompt", ""),
+                "compliance_prompt": None,
+                "risk_level": "low",
                 "voiceover": s.get("voiceover", ""),
-                "duration": s.get("duration", 6),
+                "voice_mode": "narration",
+                "speaker": "",
+                "voice": default_voice,
+                "lip_sync": False,
+                "duration": max(2, dur_val),
+                "first_frame": first_frame,
+                "middle_frame": None,
+                "last_frame": None,
+                "first_frame_url": first_frame_url,
+                "middle_frame_url": None,
+                "last_frame_url": None,
+                "transition_in": None,
+                "transition_out": None,
+                "transition_note": "",
+                "characters": [v["character"].get("name")] if v.get("character") and v["character"].get("name") else [],
                 "status": shot_status,
                 "clip_path": target_clip,
-                "error": None
+                "video_url": video_url,
+                "audio_url": audio_url,
+                "used_prompt": s.get("prompt", "") if target_clip else None,
+                "used_compliance": False,
+                "has_middle_frame": False,
+                "error": None,
+                "audit": {
+                    "character_check": "Đã đồng bộ từ Batch Video" if target_clip else "Chờ render",
+                    "aspect_ratio_check": aspect_ratio,
+                    "watermark_clean": True,
+                    "continuity_note": "",
+                },
             })
 
         project_obj = {
             "id": proj_id,
+            "format_version": "1.0",
             "title": v.get("title", "Video Hàng Loạt"),
-            "aspect_ratio": v.get("aspect_ratio", "9:16"),
+            "genre": "Video ngắn",
+            "logline": v.get("prompt", ""),
+            "aspect_ratio": aspect_ratio,
             "visual_style": v.get("visual_style", "anime"),
+            "default_voice": default_voice,
+            "default_voice_mode": "narration",
+            "total_duration": sum(sh["duration"] for sh in shots),
+            "shot_duration": 6,
             "shots": shots,
             "characters": [v["character"]] if v.get("character") else [],
             "timeline_settings": {
@@ -1210,10 +1270,32 @@ _worker_thread: Optional[threading.Thread] = None
 _worker_lock = threading.Lock()
 
 
+def _resolve_character_ref_data_uri(ref_str: Optional[str]) -> Optional[str]:
+    """Chuẩn hóa avatar nhân vật thành URL/data URI an toàn (chỉ cho phép file trong workspace/)."""
+    raw = (ref_str or "").strip()
+    if not raw:
+        return None
+    if raw.startswith(("http://", "https://", "data:image/")):
+        return raw
+    import base64
+    import mimetypes
+    from batch_engine import _resolve_safe_reference
+    safe_path = _resolve_safe_reference(raw)
+    if not safe_path or not safe_path.is_file():
+        return None
+    try:
+        mime = mimetypes.guess_type(str(safe_path))[0] or "image/png"
+        b64 = base64.b64encode(safe_path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+
 def _generate_scene_image(
     prompt: str,
     aspect_ratio: str,
-    out_img_path: Path
+    out_img_path: Path,
+    reference_image: Optional[str] = None,
 ) -> bool:
     """Tạo ảnh tĩnh độ phân giải cao cho phân cảnh thông qua Muse2API."""
     from batch_engine import generate_keyframe_image
@@ -1223,18 +1305,35 @@ def _generate_scene_image(
         logger.warning("MUSE2API_KEY / MUSE_API_KEY chưa được cấu hình trong môi trường, bỏ qua gọi Muse AI.")
         return False
 
+    ref_payload = _resolve_character_ref_data_uri(reference_image)
     try:
-        res = asyncio.run(generate_keyframe_image(
+        asyncio.run(generate_keyframe_image(
             prompt=prompt,
             base_url=base_url,
             api_key=api_key,
             output_path=str(out_img_path),
-            aspect_ratio=aspect_ratio
+            aspect_ratio=aspect_ratio,
+            reference_image=ref_payload,
         ))
-        return out_img_path.exists() and out_img_path.stat().st_size > 1000
+        if out_img_path.exists() and out_img_path.stat().st_size > 1000:
+            return True
     except Exception as e:
         logger.warning("Không thể sinh ảnh Muse AI cho prompt '%s': %s", prompt[:60], e)
-        return False
+
+    # Nếu truyền reference_image lỗi, thử lại không kèm reference_image
+    if ref_payload:
+        try:
+            asyncio.run(generate_keyframe_image(
+                prompt=prompt,
+                base_url=base_url,
+                api_key=api_key,
+                output_path=str(out_img_path),
+                aspect_ratio=aspect_ratio,
+            ))
+            return out_img_path.exists() and out_img_path.stat().st_size > 1000
+        except Exception as e2:
+            logger.warning("Fallback sinh ảnh không reference cũng thất bại: %s", e2)
+    return False
 
 
 def _convert_image_and_audio_to_clip(
@@ -1427,7 +1526,10 @@ def _process_single_video(video_id: str):
         images_dir.mkdir(parents=True, exist_ok=True)
 
         import batch_engine
-        voice = v.get("voice", "vi-VN-HoaiMyNeural")
+        voice = v.get("voice") or "vi-VN-HoaiMyNeural"
+        if voice in ("ai_voice", "native", "none", "no_dub"):
+            logger.warning("Video %s cấu hình voice='%s' không tạo TTS cho ảnh tĩnh; tự động chuyển về vi-VN-HoaiMyNeural.", video_id, voice)
+            voice = "vi-VN-HoaiMyNeural"
         aspect_ratio = v.get("aspect_ratio", "9:16")
         mode = v.get("mode", "free")
         character_id = v.get("character_id")
@@ -1526,10 +1628,16 @@ def _process_single_video(video_id: str):
                     except Exception:
                         pass
                 prompt_to_gen = sc.get("prompt", "")
+                char_ref = None
+                if mode == "character":
+                    cur_v = BATCH_MANAGER.get_video(video_id) or v
+                    char_obj = cur_v.get("character") or {}
+                    char_ref = char_obj.get("avatar") if isinstance(char_obj, dict) else None
                 _generate_scene_image(
                     prompt=prompt_to_gen,
                     aspect_ratio=aspect_ratio,
-                    out_img_path=img_path
+                    out_img_path=img_path,
+                    reference_image=char_ref,
                 )
 
             # Đánh giá kết quả tạo ảnh AI thông qua kiểm tra magic bytes và PIL giải mã (Point 2 & 7)
@@ -1705,6 +1813,7 @@ def _process_single_video(video_id: str):
 
 def _worker_loop():
     """Vòng lặp lấy các video 'queued' và xử lý lần lượt, có cơ chế chờ và chống race condition."""
+    global _worker_thread
     idle_rounds = 0
     while True:
         target_id = None

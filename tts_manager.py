@@ -553,10 +553,13 @@ async def synthesize_voice(
     ref_audio: Optional[str] = None,
     instruct: Optional[str] = None,
     speed: float = 1.0,
+    allow_silent_fallback: bool = True,
 ) -> float:
     """
     Hàm phân phối TTS duy nhất cho toàn bộ hệ thống AI Movie Studio.
     Hỗ trợ VieNeu-TTS, OmniVoice, Edge-TTS, AI Native Voice, tự động fallback an toàn.
+    Khi allow_silent_fallback=False (dùng bởi generate_tts_with_status), hàm sẽ raise
+    RuntimeError khi mọi engine thật đều lỗi để caller ghi nhận tts_failed và không lưu cache câm.
     """
     clean_text = text.strip()
     if not clean_text or voice in ("ai_voice", "native", "none", "no_dub"):
@@ -578,14 +581,20 @@ async def synthesize_voice(
             )
             if dur and dur > 0.2:
                 return dur
+            raise RuntimeError("VieNeu trả về thời lượng audio rỗng")
         except Exception as e:
             logger.warning(f"[VieNeu Error] {e}. Falling back to Edge-TTS...")
             # Fallback sang Edge-TTS theo giới tính
             # Suy luận giới tính bằng token (không substring "nam" thô — §1.17).
             fb_voice = "vi-VN-NamMinhNeural" if _is_male_voice(voice) else "vi-VN-HoaiMyNeural"
             try:
-                return await synthesize_edge_tts(clean_text, fb_voice, output_path)
+                dur2 = await synthesize_edge_tts(clean_text, fb_voice, output_path)
+                if dur2 and dur2 > 0.2:
+                    return dur2
+                raise RuntimeError("Edge-TTS fallback trả về thời lượng audio rỗng")
             except Exception as e2:
+                if not allow_silent_fallback:
+                    raise RuntimeError(f"VieNeu ({e}) và Edge-TTS fallback ({e2}) đều thất bại") from e2
                 logger.error(f"[TTS Fallback Error] {e2}. Creating silent audio.")
                 return await _silent_fallback_or_raise(output_path, estimated_dur)
 
@@ -603,43 +612,59 @@ async def synthesize_voice(
             )
             if dur and dur > 0.2:
                 return dur
+            raise RuntimeError("OmniVoice trả về thời lượng audio rỗng")
         except Exception as e:
             logger.warning(f"[OmniVoice Error] {e}. Falling back to VieNeu / Edge-TTS...")
             # Thử fallback sang VieNeu trước
             try:
                 fb_vieneu = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
-                return await asyncio.to_thread(
+                dur_vn = await asyncio.to_thread(
                     VieNeuEngine.synthesize,
                     text=clean_text,
                     voice_key=fb_vieneu,
                     output_path=output_path,
                     speed=speed,
                 )
+                if dur_vn and dur_vn > 0.2:
+                    return dur_vn
+                raise RuntimeError("VieNeu fallback trả về thời lượng audio rỗng")
             except Exception:
                 try:
                     fb_voice = "vi-VN-NamMinhNeural" if _is_male_voice(voice) else "vi-VN-HoaiMyNeural"
-                    return await synthesize_edge_tts(clean_text, fb_voice, output_path)
+                    dur_ed = await synthesize_edge_tts(clean_text, fb_voice, output_path)
+                    if dur_ed and dur_ed > 0.2:
+                        return dur_ed
+                    raise RuntimeError("Edge-TTS fallback trả về thời lượng audio rỗng")
                 except Exception as e3:
+                    if not allow_silent_fallback:
+                        raise RuntimeError(f"OmniVoice ({e}) và fallback ({e3}) đều thất bại") from e3
                     logger.error(f"[TTS Fallback Error] {e3}. Creating silent audio.")
                     return await _silent_fallback_or_raise(output_path, estimated_dur)
 
     # 3. Dispatch Edge-TTS
     else:
         try:
-            return await synthesize_edge_tts(clean_text, voice, output_path)
+            dur = await synthesize_edge_tts(clean_text, voice, output_path)
+            if dur and dur > 0.2:
+                return dur
+            raise RuntimeError("Edge-TTS trả về thời lượng audio rỗng")
         except Exception as e:
             logger.warning(f"[Edge-TTS Error] {e}. Trying VieNeu fallback...")
             try:
                 # Nếu là tiếng Việt thì fallback sang VieNeu
                 if voice.startswith("vi"):
                     fb_vn = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
-                    return await asyncio.to_thread(
+                    dur_vn = await asyncio.to_thread(
                         VieNeuEngine.synthesize,
                         text=clean_text,
                         voice_key=fb_vn,
                         output_path=output_path,
                         speed=speed,
                     )
+                    if dur_vn and dur_vn > 0.2:
+                        return dur_vn
             except Exception:
                 pass
+            if not allow_silent_fallback:
+                raise RuntimeError(f"Edge-TTS thất bại cho giọng '{voice}': {e}") from e
             return await _silent_fallback_or_raise(output_path, estimated_dur)
