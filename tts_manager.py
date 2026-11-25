@@ -570,6 +570,45 @@ async def _silent_fallback_or_raise(output_path: str, estimated_dur: float) -> f
         raise RuntimeError("Silent audio fallback thất bại (ffmpeg lỗi, không có file audio).")
     return fb_dur
 
+async def _synthesize_threaded(engine, output_path: str, timeout: float, **kwargs) -> float:
+    """Publish audio only after this attempt completes within its timeout."""
+    output = Path(output_path)
+    staging = None
+    lock = threading.Lock()
+    abandoned = False
+    finished = False
+
+    def render():
+        nonlocal finished, staging
+        with lock:
+            if abandoned:
+                return 0.0
+            with tempfile.NamedTemporaryFile(
+                prefix=".tts-", suffix=output.suffix, dir=output.parent, delete=False,
+            ) as handle:
+                staging = Path(handle.name)
+        try:
+            return engine(output_path=str(staging), **kwargs)
+        finally:
+            with lock:
+                finished = True
+                if abandoned:
+                    staging.unlink(missing_ok=True)
+
+    try:
+        duration = await asyncio.wait_for(asyncio.to_thread(render), timeout=timeout)
+        if duration and duration > 0.2:
+            if staging.stat().st_size == 0:
+                raise RuntimeError("Engine TTS không tạo được file âm thanh.")
+            os.replace(staging, output)
+        return duration
+    finally:
+        with lock:
+            abandoned = True
+            if finished:
+                staging.unlink(missing_ok=True)
+
+
 async def synthesize_voice(
     text: str,
     voice: str,
@@ -611,24 +650,17 @@ async def synthesize_voice(
             raise ValueError(
                 f"Giọng OmniVoice '{voice}' không có trong catalog. "
                 f"Các giọng hợp lệ: {', '.join(sorted(_valid_om))}")
-    # Audit #7: moi lan goi engine deu co tran rieng (VieNeu/Omni chay qua
-    # to_thread cung vay — wait_for huy phan await, thread cu keo dai
-    # them chut nhung job khong ket).
     attempt_timeout = timeout if timeout is not None else _tts_timeout_for(clean_text)
 
     # 1. Dispatch VieNeu-TTS
     if voice.startswith("vieneu:"):
         try:
-            dur = await asyncio.wait_for(
-                asyncio.to_thread(
-                    VieNeuEngine.synthesize,
-                    text=clean_text,
-                    voice_key=voice,
-                    output_path=output_path,
-                    ref_audio=ref_audio,
-                    speed=speed,
-                ),
-                timeout=attempt_timeout,
+            dur = await _synthesize_threaded(
+                VieNeuEngine.synthesize, output_path, attempt_timeout,
+                text=clean_text,
+                voice_key=voice,
+                ref_audio=ref_audio,
+                speed=speed,
             )
             if dur and dur > 0.2:
                 return dur
@@ -652,17 +684,13 @@ async def synthesize_voice(
     # 2. Dispatch OmniVoice
     elif voice.startswith("omnivoice:"):
         try:
-            dur = await asyncio.wait_for(
-                asyncio.to_thread(
-                    OmniVoiceEngine.synthesize,
-                    text=clean_text,
-                    voice_key=voice,
-                    output_path=output_path,
-                    ref_audio=ref_audio,
-                    instruct=instruct,
-                    speed=speed,
-                ),
-                timeout=attempt_timeout,
+            dur = await _synthesize_threaded(
+                OmniVoiceEngine.synthesize, output_path, attempt_timeout,
+                text=clean_text,
+                voice_key=voice,
+                ref_audio=ref_audio,
+                instruct=instruct,
+                speed=speed,
             )
             if dur and dur > 0.2:
                 return dur
@@ -672,15 +700,11 @@ async def synthesize_voice(
             # Thử fallback sang VieNeu trước
             try:
                 fb_vieneu = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
-                dur_vn = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        VieNeuEngine.synthesize,
-                        text=clean_text,
-                        voice_key=fb_vieneu,
-                        output_path=output_path,
-                        speed=speed,
-                    ),
-                    timeout=attempt_timeout,
+                dur_vn = await _synthesize_threaded(
+                    VieNeuEngine.synthesize, output_path, attempt_timeout,
+                    text=clean_text,
+                    voice_key=fb_vieneu,
+                    speed=speed,
                 )
                 if dur_vn and dur_vn > 0.2:
                     return dur_vn
@@ -711,15 +735,11 @@ async def synthesize_voice(
                 # Nếu là tiếng Việt thì fallback sang VieNeu
                 if voice.startswith("vi"):
                     fb_vn = "vieneu:DucTri" if _is_male_voice(voice) else "vieneu:TrucLy"
-                    dur_vn = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            VieNeuEngine.synthesize,
-                            text=clean_text,
-                            voice_key=fb_vn,
-                            output_path=output_path,
-                            speed=speed,
-                        ),
-                        timeout=attempt_timeout,
+                    dur_vn = await _synthesize_threaded(
+                        VieNeuEngine.synthesize, output_path, attempt_timeout,
+                        text=clean_text,
+                        voice_key=fb_vn,
+                        speed=speed,
                     )
                     if dur_vn and dur_vn > 0.2:
                         return dur_vn

@@ -25,7 +25,6 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import parse_qs
 
 import aiofiles
 import httpx
@@ -38,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from batch_engine import run_batch, generate_keyframe_image, heal_prompt_with_ai, apply_style_locks, sanitize_prompt_heuristics
-from composer import compose_full_movie, audit_movie_scenes, compose_scene_video
+from composer import compose_full_movie, audit_movie_scenes, compose_scene_video, run_cancellable_compose
 from consistency import run_consistency_checks
 from tts_manager import list_all_voices, synthesize_voice, VIENEU_VOICES_CONFIG, OMNIVOICE_VOICES_CONFIG
 from affiliate_engine import (
@@ -185,35 +184,40 @@ class _RateLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+_STUDIO_SESSION_COOKIE = "ams_session"
+_STUDIO_SESSION_SECONDS = 12 * 60 * 60
+
+
+def _studio_key_matches(provided: str, expected: str) -> bool:
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _studio_session_signature(key: str, claims: str) -> str:
+    return hmac.new(key.encode("utf-8"), f"studio-session:{claims}".encode("utf-8"), "sha256").hexdigest()
+
+
+def _studio_session_valid(request: Request, key: str) -> bool:
+    token = request.cookies.get(_STUDIO_SESSION_COOKIE, "")
+    match = re.fullmatch(r"(\d{1,12}\.[a-f0-9]{32})\.([a-f0-9]{64})", token, flags=re.ASCII)
+    if match is None:
+        return False
+    claims, signature = match.groups()
+    expires_at = int(claims.split(".", 1)[0])
+    return expires_at > time.time() and hmac.compare_digest(signature, _studio_session_signature(key, claims))
+
+
 class _ApiKeyAuthMiddleware:
-    """Auth tối thiểu cho /api/* (audit §2.1).
-    - Nếu env STUDIO_API_KEY được đặt: bắt buộc header X-API-Key khớp, sai/thiếu -> 401.
-    - Nếu chưa đặt: cho qua + log warning 1 lần ("auth disabled for local dev").
-      Frontend tĩnh gửi header này qua apiFetch() (static/js/app.js, lấy key
-      từ localStorage 'ams-api-key'); xem GET /api/auth/status để biết
-      server có bắt buộc key không.
-    - Miễn: "/" , "/health", "/api/health. Riêng "/api/jobs/{id}/sse"
-      (EventSource của trình duyệt không gửi được custom header): nhan
-      api_key qua query param `?api_key=...` (audit #5a, 2026-11-25 —
-      hoan thanh TODO cu); thieu/sai key -> 401 nhu cac endpoint khac.
-      Khi chua dat STUDIO_API_KEY thi SSE van mo nhu cu. Frontend gui
-      key qua initSSE() trong static/js/app.js.
-    - So key bang hmac.compare_digest (audit #5a: truoc day dung !=).
-    """
+    """Authenticate API clients by header and browsers by session cookie."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http":
+        path = scope.get("path", "")
+        if scope.get("type") != "http" or not path.startswith("/api/"):
             await self.app(scope, receive, send)
             return
-        path = str(scope.get("path", ""))
-        if not path.startswith("/api/"):
-            await self.app(scope, receive, send)
-            return
-        is_sse = path.startswith("/api/jobs/") and path.endswith("/sse")
-        if path in ("/api/health", "/api/auth/status"):
+        if path in ("/api/health", "/api/auth/status", "/api/auth/session"):
             await self.app(scope, receive, send)
             return
         expected = os.getenv("STUDIO_API_KEY")
@@ -221,24 +225,24 @@ class _ApiKeyAuthMiddleware:
             global _AUTH_WARNING_LOGGED
             if not _AUTH_WARNING_LOGGED:
                 _AUTH_WARNING_LOGGED = True
-                logger.warning(
-                    "STUDIO_API_KEY chưa được đặt — auth cho /api/* đang TẮT "
-                    "(local dev). Đặt STUDIO_API_KEY để bắt buộc header X-API-Key.")
+                logger.warning("STUDIO_API_KEY chưa được đặt, Studio chạy ở chế độ local.")
             await self.app(scope, receive, send)
             return
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
-                   for k, v in scope.get("headers", [])}
-        # Audit #5a: SSE nhan key qua query param (EventSource khong gui
-        # duoc custom header); endpoint thuong dung header X-API-Key.
-        if is_sse:
-            provided = parse_qs(scope.get("query_string", b"").decode("latin-1")).get("api_key", [""])[0]
-        else:
-            provided = headers.get("x-api-key") or ""
-        if not hmac.compare_digest(provided, expected):
-            await _send_json_via_asgi(
-                send, 401, {"error": "Thiếu hoặc sai header X-API-Key"})
+
+        request = Request(scope)
+        provided = request.headers.get("x-api-key")
+        if provided is not None and _studio_key_matches(provided, expected):
+            await self.app(scope, receive, send)
             return
-        await self.app(scope, receive, send)
+        if _studio_session_valid(request, expected):
+            origin = request.headers.get("origin")
+            if request.method not in ("GET", "HEAD", "OPTIONS") and origin is not None:
+                if origin != f"{request.url.scheme}://{request.url.netloc}":
+                    await _send_json_via_asgi(send, 403, {"error": "Origin không hợp lệ."})
+                    return
+            await self.app(scope, receive, send)
+            return
+        await _send_json_via_asgi(send, 401, {"error": "Cần đăng nhập Studio hoặc gửi X-API-Key."})
 
 
 @asynccontextmanager
@@ -674,6 +678,8 @@ def load_all_persisted_jobs(force: bool = False):
                     with open(state_file, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     _normalize_scene_keys(data)
+                    if isinstance(data.get("req"), dict) and data["req"]:
+                        data["req"] = MovieRequest(**data["req"])
                     with JOBS_LOCK:
                         if item.name in JOBS:
                             continue  # bộ nhớ luôn mới hơn đĩa trong cùng 1 tiến trình
@@ -742,12 +748,14 @@ def get_or_restore_job(job_id: str) -> Optional[Dict]:
 
 
 def _is_job_running(job: Optional[Dict]) -> bool:
-    """Job đang chạy thật hay không (status running hoặc còn task pipeline sống)."""
+    """Check whether the job still has an active render or export."""
     if not job:
         return False
-    if job.get("status") == "running":
+    job_id = job["id"]
+    if (job.get("status") == "running" or job_id in _MANUAL_COMPOSE_JOBS
+            or job_id == RENDER_CURRENT_JOB_ID):
         return True
-    task = JOB_TASKS.get(job["id"])
+    task = JOB_TASKS.get(job_id)
     return task is not None and not task.done()
 
 
@@ -1698,8 +1706,7 @@ async def retry_failed_scenes(job_id: str, auto_fix: bool = True):
         # (các gate nhìn thấy cờ của nhau nên _spawn_job_task không bao giờ phải
         # từ chối spawn sau khi đã set is_retrying).
         if (_is_job_running(job) or job.get("status") == "queued"
-                or job_id in RENDER_QUEUE or job_id in _MANUAL_COMPOSE_JOBS
-                or _job_has_active_rerender(job)):
+                or job_id in RENDER_QUEUE or _job_has_active_rerender(job)):
             return JSONResponse(
                 {"error": "Job đang render — hãy đợi xong rồi thử lại."},
                 status_code=409)
@@ -2132,7 +2139,6 @@ async def retry_single_scene_endpoint(
         # Check + set cờ trong cùng 1 lock để 2 request liên tiếp không cùng lọt.
         if (_is_job_running(job) or job.get("is_retrying")
                 or job.get("status") == "queued" or job_id in RENDER_QUEUE
-                or job_id in _MANUAL_COMPOSE_JOBS
                 or _scene(job, scene_idx).get("rerendering")):
             return JSONResponse(
                 {"error": "Job đang render (hoặc cảnh này đang được render lại) — hãy đợi xong rồi thử lại."},
@@ -2280,7 +2286,6 @@ async def rerender_single_scene_endpoint(
     # (tránh _spawn_job_task phải từ chối sau khi đã set cờ rerendering).
     if (_is_job_running(job) or job.get("is_retrying")
             or job.get("status") == "queued" or job_id in RENDER_QUEUE
-            or job_id in _MANUAL_COMPOSE_JOBS
             or _scene(job, scene_idx).get("rerendering")):
         return JSONResponse(
             {"error": "Job đang render (hoặc cảnh này đang được render lại) — hãy đợi xong rồi thử lại."},
@@ -2448,7 +2453,7 @@ async def job_sse(job_id: str, request: Request):
                 last_log_count = len(job["logs"])
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-                if job["status"] in ("done", "error") and not job.get("is_retrying"):
+                if job["status"] in ("done", "error", "cancelled") and not job.get("is_retrying"):
                     break
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
@@ -2598,14 +2603,14 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
     with JOBS_LOCK:
         if (_is_job_running(job) or job.get("is_retrying")
                 or job.get("status") == "queued" or job_id in RENDER_QUEUE
-                or job_id in _MANUAL_COMPOSE_JOBS
                 or _job_has_active_rerender(job)):
             return JSONResponse(
                 {"error": "Job đang render — hãy đợi xong rồi thử lại."},
                 status_code=409)
-        # Thao tác mới của người dùng: xóa cờ hủy cũ để lần compose này chỉ
-        # dừng khi có lệnh hủy MỚI (audit #4).
+        # A new export can be requested after cancelling an earlier one.
         job["cancelled"] = False
+        if job.get("status") == "cancelled":
+            job["status"] = "audit_pending"
         _MANUAL_COMPOSE_JOBS.add(job_id)
 
     output_dir = WORKSPACE / job_id
@@ -2624,7 +2629,9 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
         job_log(job, f"🎞️ Đang tiến hành xuất phim ({'Xuất bản nháp' if allow_partial else 'Xuất hoàn chỉnh'}, quality={quality}, sub={subtitle_mode}, trans={transition})...")
         aspect_ratio = req.aspect_ratio or "16:9" if req else "16:9"
         compose_res = await asyncio.to_thread(
+            run_cancellable_compose,
             compose_full_movie,
+            lambda: _job_cancel_requested(job),
             results=results,
             output_dir=str(output_dir),
             project_title=title,
@@ -2640,6 +2647,14 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
         )
         # Nhóm C (audit #4): hủy trong lúc compose thủ công -> không ghi final_video/done.
         if _mark_cancelled_after_compose(job):
+            final_dir = (get_safe_job_dir(job_id) / "final").resolve()
+            result_paths = [_unwrap_final_path(compose_res)]
+            if isinstance(compose_res, dict) and compose_res.get("srt_path"):
+                result_paths.append(compose_res["srt_path"])
+            for result_path in result_paths:
+                path = Path(result_path).resolve()
+                if path.parent == final_dir:
+                    path.unlink(missing_ok=True)
             return JSONResponse({"error": "Job đã bị hủy trong lúc xuất phim."}, status_code=409)
         final_path = _unwrap_final_path(compose_res)
         rel = Path(final_path).name
@@ -2651,6 +2666,8 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
         _save_job_best_effort(job)
         return {"success": True, "video_url": job["final_video"], "srt_file": job.get("srt_file")}
     except Exception as e:
+        if _mark_cancelled_after_compose(job):
+            return JSONResponse({"error": "Job đã bị hủy trong lúc xuất phim."}, status_code=409)
         job_log(job, f"❌ Lỗi xuất phim: {e}")
         _save_job_best_effort(job)
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2661,7 +2678,7 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-def api_cancel_job(job_id: str):
+async def api_cancel_job(job_id: str):
     """Dừng hoặc hủy job đang chạy (cancel thật task pipeline + cờ cancelled)."""
     job = get_or_restore_job(job_id)
     if not job:
@@ -2699,11 +2716,9 @@ async def api_resume_job(job_id: str, payload: Optional[ResumeJobRequest] = None
     job = get_or_restore_job(job_id)
     if not job or not job.get("req"):
         return JSONResponse({"error": "Không tìm thấy job hoặc cấu hình ban đầu"}, status_code=404)
-    req: MovieRequest = job["req"]
     start_idx = payload.from_scene_idx if payload and payload.from_scene_idx else 1
-    req.start_scene_idx = start_idx
     with JOBS_LOCK:
-        if _is_job_running(job):
+        if (_is_job_running(job) or job.get("is_retrying") or _job_has_active_rerender(job)):
             return JSONResponse(
                 {"error": "Job đang chạy, không thể resume chồng lên tiến trình hiện tại."},
                 status_code=409)
@@ -2712,9 +2727,17 @@ async def api_resume_job(job_id: str, payload: Optional[ResumeJobRequest] = None
             return JSONResponse(
                 {"error": "Job đã xếp hàng chờ render, không thể resume chồng lên."},
                 status_code=409)
+        previous = job["req"], job.get("cancelled", False), job["status"]
+        job["req"] = job["req"].model_copy(update={"start_scene_idx": start_idx})
         job["cancelled"] = False
+        job["status"] = "queued"
     job_log(job, f"▶️ Tiếp tục chạy job từ Cảnh {start_idx}...")
-    _save_job_or_http500(job)
+    try:
+        _save_job_or_http500(job)
+    except HTTPException:
+        with JOBS_LOCK:
+            job["req"], job["cancelled"], job["status"] = previous
+        raise
     # Nhóm 1: resume cũng qua hàng đợi render (nối tiếp, không chồng job khác).
     queue_position = enqueue_render_job(job)
     return {"success": True, "message": f"Đang tiếp tục chạy job từ Cảnh {start_idx}",
@@ -4005,7 +4028,7 @@ def api_clean_workspace(keep_projects: bool = True):
     with JOBS_LOCK:
         running = [jid for jid, j in JOBS.items() if j.get("status") in ("running", "queued")]
         active_tasks = [jid for jid, t in JOB_TASKS.items() if not t.done()]
-        queued_jobs = list(RENDER_QUEUE)
+        queued_jobs = set(RENDER_QUEUE) | _MANUAL_COMPOSE_JOBS
     active_sd = [pid for pid, sset in ACTIVE_SHOT_TASKS.items() if sset] + list(ACTIVE_SHOT_DESK_COMPOSE)
     active_batch = []
     try:
@@ -4619,12 +4642,39 @@ async def preview_voice(voice: str = "vi-VN-HoaiMyNeural", text: str = ""):
 
 
 @app.get("/api/auth/status")
-async def auth_status():
-    """Cho frontend biết server có bắt buộc X-API-Key không. Miễn auth.
+async def auth_status(request: Request):
+    key = os.getenv("STUDIO_API_KEY")
+    return JSONResponse(
+        {"auth_required": bool(key), "authenticated": bool(key and _studio_session_valid(request, key))},
+        headers={"Cache-Control": "no-store"},
+    )
 
-    Chỉ trả boolean — không trả key hay bất kỳ secret nào.
-    """
-    return {"auth_required": bool(os.getenv("STUDIO_API_KEY"))}
+
+@app.post("/api/auth/session")
+async def create_studio_session(request: Request):
+    key = os.getenv("STUDIO_API_KEY")
+    if not key:
+        return JSONResponse({"authenticated": False}, headers={"Cache-Control": "no-store"})
+    if not _studio_key_matches(request.headers.get("x-api-key", ""), key):
+        return JSONResponse({"error": "Khóa API Studio không đúng."}, status_code=401)
+    claims = f"{int(time.time()) + _STUDIO_SESSION_SECONDS}.{uuid.uuid4().hex}"
+    response = JSONResponse({"authenticated": True}, headers={"Cache-Control": "no-store"})
+    response.set_cookie(
+        _STUDIO_SESSION_COOKIE, f"{claims}.{_studio_session_signature(key, claims)}",
+        max_age=_STUDIO_SESSION_SECONDS, path="/api", httponly=True,
+        secure=request.url.scheme == "https", samesite="strict",
+    )
+    return response
+
+
+@app.delete("/api/auth/session")
+async def delete_studio_session(request: Request):
+    origin = request.headers.get("origin")
+    if origin is not None and origin != f"{request.url.scheme}://{request.url.netloc}":
+        return JSONResponse({"error": "Origin không hợp lệ."}, status_code=403)
+    response = JSONResponse({"authenticated": False}, headers={"Cache-Control": "no-store"})
+    response.delete_cookie(_STUDIO_SESSION_COOKIE, path="/api")
+    return response
 
 
 @app.get("/api/health")
@@ -6008,11 +6058,22 @@ async def create_story_project_videos(project_id: str, req: StoryCreateVideosReq
     }
 
 
+def _studio_bind_host() -> str:
+    host = os.getenv("STUDIO_HOST", "127.0.0.1")
+    try:
+        is_local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_local = host.lower() == "localhost"
+    if not is_local and not os.getenv("STUDIO_API_KEY"):
+        raise SystemExit("Cần cấu hình STUDIO_API_KEY khi mở Studio ngoài loopback.")
+    return host
+
+
 if __name__ == "__main__":
 
     import sys
     import uvicorn
     sys.stdout.reconfigure(encoding="utf-8")
     port = int(os.getenv("PORT", "8000"))
-    print(f"\nAI Movie Studio running at: http://localhost:{port}\n")
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+    host = _studio_bind_host()
+    uvicorn.run(app, host=host, port=port, reload=False)

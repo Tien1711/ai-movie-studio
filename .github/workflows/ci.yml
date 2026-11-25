@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONUTF8: "1"
+      MUSE2API_URL: http://127.0.0.1:9
+      MUSE2API_KEY: ci-placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -r requirements.txt pytest==8.3.4
+      - run: node --check static/js/app.js
+      - run: node --check static/js/ui.js
+      - run: >-
+          python -m pytest -q
+          --ignore=test_audit_fixes.py
+          --ignore=test_new_audit_fixes.py
+          --ignore=test_e2e_video_subtitles.py
+          --ignore=test_tts_multi_engine.py

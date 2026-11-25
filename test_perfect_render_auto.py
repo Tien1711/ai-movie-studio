@@ -426,8 +426,8 @@ def test_cancel_queued_job_removes_from_queue(monkeypatch, tmp_path):
         job2 = _queue_job(monkeypatch, "cjob2", "Phim hai")
         app_mod.enqueue_render_job(job1)
         app_mod.enqueue_render_job(job2)
-        # Hủy job 2 lúc còn chờ (gọi trực tiếp endpoint sync).
-        resp = app_mod.api_cancel_job("cjob2")
+        # Hủy job 2 lúc còn chờ.
+        resp = await app_mod.api_cancel_job("cjob2")
         assert resp.get("success") is True
         assert "cjob2" not in app_mod.RENDER_QUEUE
         assert job2["status"] == "cancelled"

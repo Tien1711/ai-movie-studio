@@ -20,56 +20,52 @@ let sceneIdCounter = 0;
 let activeJobId = null;
 let sseSource = null;
 
-// ── apiFetch: fetch() dùng chung cho mọi gọi /api/* ─────────────────────
-// Tự gắn header X-API-Key lấy từ localStorage key 'ams-api-key' (chỉ gắn
-// khi có key). Giữ nguyên mọi options khác, trả Response như fetch gốc.
-// BẢO MẬT: key lưu ở localStorage nên chỉ dùng cho tool cá nhân / trình
-// duyệt tin cậy, KHÔNG dùng chung máy công cộng. SSE (/api/jobs/{id}/sse)
-// gui key qua query param ?api_key=... (server chap nhan tu 2026-11-25,
-// audit #5a) thay vi mien auth nhu truoc.
-const STUDIO_API_KEY_STORAGE = 'ams-api-key';
-let _apiKeyModalShown = false; // chống mở modal nhập key lặp trong cùng phiên
+// API requests, media and EventSource use the same browser session.
+const LEGACY_STUDIO_API_KEY_STORAGE = 'ams-api-key';
+let _apiKeyModalShown = false;
 
-function getStudioApiKey() {
-  try { return localStorage.getItem(STUDIO_API_KEY_STORAGE) || ''; } catch { return ''; }
-}
-
-// UI (static/js/ui.js) gọi hàm này sau khi lưu key để modal 401 hiện lại
-// được nếu key mới cũng bị từ chối.
 function resetApiKeyModalFlag() { _apiKeyModalShown = false; }
 
-async function apiFetch(url, options = {}) {
-  const key = getStudioApiKey();
-  const headers = new Headers(options.headers || {});
-  if (key) headers.set('X-API-Key', key);
-  const res = await window.fetch(url, { ...options, headers });
-  if (res.status === 401) {
-    // Key đã lưu (nếu có) vừa bị server từ chối -> xóa để lần sau nhập lại.
-    if (key) { try { localStorage.removeItem(STUDIO_API_KEY_STORAGE); } catch {} }
-    // Hiện modal nhập key MỘT lần; vẫn trả Response 401 về cho caller
-    // (không tự retry vô hạn, không nuốt lỗi).
-    if (!_apiKeyModalShown && typeof window.showApiKeyModal === 'function') {
-      _apiKeyModalShown = true;
-      window.showApiKeyModal();
-    }
-    showToast('Cần nhập Khóa API Studio (X-API-Key) để tiếp tục.', 'warning');
+async function createStudioSession(key) {
+  const response = await window.fetch('/api/auth/session', {
+    method: 'POST',
+    headers: { 'X-API-Key': key },
+  });
+  if (!response.ok) return false;
+  return (await response.json()).authenticated === true;
+}
+
+function promptStudioSignIn() {
+  if (_apiKeyModalShown) return;
+  if (typeof window.showApiKeyModal !== 'function') {
+    document.addEventListener('DOMContentLoaded', promptStudioSignIn, { once: true });
+    return;
   }
+  _apiKeyModalShown = true;
+  window.showApiKeyModal();
+}
+
+async function apiFetch(url, options = {}) {
+  const res = await window.fetch(url, options);
+  if (res.status === 401) promptStudioSignIn();
   return res;
 }
 
-// Kiểm tra server có bắt buộc X-API-Key không; nếu có mà trình duyệt chưa
-// lưu key thì hiện modal nhập key ngay khi load trang (không chặn các load
-// khác). /api/auth/status được miễn auth nên luôn trả 200.
 async function checkStudioAuthStatus() {
   try {
-    const r = await apiFetch('/api/auth/status');
+    const r = await window.fetch('/api/auth/status');
     const data = await r.json();
-    if (data && data.auth_required && !getStudioApiKey()) {
-      // setTimeout: init() chạy trong lúc app.js parse, ui.js (định nghĩa
-      // window.showApiKeyModal) chạy ngay sau đó — đợi 1 tick cho chắc.
-      setTimeout(() => { if (typeof window.showApiKeyModal === 'function') window.showApiKeyModal(); }, 0);
+    let savedKey = '';
+    try {
+      savedKey = localStorage.getItem(LEGACY_STUDIO_API_KEY_STORAGE) || '';
+      localStorage.removeItem(LEGACY_STUDIO_API_KEY_STORAGE);
+    } catch {}
+    if (!data?.auth_required || data.authenticated) return;
+    if (savedKey) {
+      try { if (await createStudioSession(savedKey)) return; } catch {}
     }
-  } catch { /* lỗi mạng: bỏ qua, các load khác tự báo lỗi */ }
+    promptStudioSignIn();
+  } catch { /* Other API requests can retry the auth check. */ }
 }
 
 // Gọi lại các hàm load chính sau khi lưu key mới (không reload cả trang).
@@ -79,6 +75,7 @@ async function reloadStudioDataAfterKeySave() {
   try { if (typeof loadCharacterLibrary === 'function') await loadCharacterLibrary(); } catch {}
   try { if (typeof loadCharacters === 'function') await loadCharacters(); } catch {}
   try { checkApiHealth(); } catch {}
+  if (activeJobId) initSSE(activeJobId);
   try {
     if (document.getElementById('panel-library')?.classList.contains('active')) loadLibrary();
   } catch {}
@@ -1861,20 +1858,11 @@ function startMonitoring(jobId, title, totalScenes) {
   initSSE(jobId);
 }
 
-function sseUrlFor(jobId) {
-  // Audit #5a (2026-11-25): SSE khong gui duoc custom header nen gui key
-  // qua query param; server chap nhan ?api_key=... khi STUDIO_API_KEY
-  // duoc dat. Khong co key thi URL giu nguyen (server mo khi chua dat key).
-  const key = (typeof getStudioApiKey === 'function') ? getStudioApiKey() : '';
-  const base = `/api/jobs/${jobId}/sse`;
-  return key ? `${base}?api_key=${encodeURIComponent(key)}` : base;
-}
-
 function initSSE(jobId) {
   if (sseSource) { sseSource.close(); sseSource = null; }
   setSseStatus('reconnecting', sseReconnectAttempts > 0 ? `Đang kết nối lại (${sseReconnectAttempts})...` : 'Đang kết nối...');
 
-  sseSource = new EventSource(sseUrlFor(jobId));
+  sseSource = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/sse`);
 
   sseSource.onopen = () => {
     sseReconnectAttempts = 0;
@@ -3624,7 +3612,7 @@ async function executeBeatBreakdown() {
 // ── Init ────────────────────────────────────────────────────────────────
 (async function init() {
   loadCfg();
-  checkStudioAuthStatus();
+  await checkStudioAuthStatus();
   await loadVoices();
   await loadCharacterLibrary();
   await loadCharacters();
@@ -4159,12 +4147,13 @@ function renderSceneAuditCard(audit, data, jobId) {
 }
 
 async function composeDraftMovie() {
-  if (!activeJobId) return;
+  const jobId = activeJobId;
+  if (!jobId) return;
   if (!confirm('⚠️ Bạn có chắc muốn xuất Bản Nháp (Draft Movie)?\nPhim sẽ chỉ ghép các cảnh đã thành công và bỏ qua các cảnh bị lỗi.')) {
     return;
   }
   try {
-    const res = await apiFetch(`/api/jobs/${activeJobId}/compose`, {
+    const res = await apiFetch(`/api/jobs/${jobId}/compose`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4178,8 +4167,9 @@ async function composeDraftMovie() {
       })
     });
     const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    alert('🎉 Đã bắt đầu xuất bản nháp! Vui lòng theo dõi khung Video thành phẩm.');
+    if (!res.ok || !data.success) throw new Error(data.error || 'Không thể xuất bản nháp.');
+    if (activeJobId === jobId) initSSE(jobId);
+    showToast('Đã xuất bản nháp.', 'success');
   } catch (e) {
     alert(`Lỗi xuất bản nháp: ${e.message}`);
   }

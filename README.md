@@ -59,7 +59,7 @@
 ## 🚀 Hướng Dẫn Cài Đặt & Khởi Chạy
 
 ### 1. Yêu cầu hệ thống
-- Python 3.10+
+- Python 3.12 (phiên bản dùng để chạy CI)
 - FFmpeg (Tự động tải qua `imageio-ffmpeg` hoặc cài đặt hệ thống)
 - Gateway Muse2API đang chạy tại `http://localhost:18610`
 
@@ -81,7 +81,9 @@ cp .env.example .env
 Nội dung `.env`:
 ```env
 MUSE2API_URL=http://localhost:18610
-MUSE2API_KEY=m2a_studio_secret_2026
+MUSE2API_KEY=
+STUDIO_HOST=127.0.0.1
+STUDIO_API_KEY=
 MAX_CONCURRENT=12
 PORT=8000
 ```
@@ -90,7 +92,9 @@ PORT=8000
 ```bash
 python app.py
 ```
-Mở trình duyệt truy cập: **`http://localhost:8000`**
+Mở [Studio trên máy này](http://127.0.0.1:8000). Điền `MUSE2API_KEY` do gateway cấp để dùng các tính năng render.
+
+Để truy cập Studio từ máy khác, đặt `STUDIO_HOST=0.0.0.0` và cấp một `STUDIO_API_KEY` riêng. Dùng HTTPS khi triển khai qua mạng. Trình duyệt dùng phiên đăng nhập có thời hạn 12 giờ sau khi nhập khóa. Các công cụ gọi API có thể tiếp tục gửi header `X-API-Key`.
 
 ---
 
@@ -134,25 +138,16 @@ Kết quả kiểm thử tự động xác nhận 6/6 tính năng hoạt động
 
 ### CI (GitHub Actions)
 
-Workflow `.github/workflows/ci.yml` chạy toàn bộ test suite (Python 3.12) trên
-mỗi push và pull request vào `main`. Chạy tương đương trên máy local:
+Workflow `.github/workflows/ci.yml` chạy kiểm thử tự động trên Ubuntu và Windows với Python 3.12 khi push hoặc mở pull request vào `main`. Cài Node.js để chạy các bài kiểm thử JavaScript.
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pip install pytest httpx   # pytest KHÔNG nằm trong requirements.txt
-env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
-    -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
-  python -m pytest test_affiliate_continuity.py test_affiliate_suite.py \
-    test_audit_medium_minor.py test_audit_severe.py test_character_scope.py \
-    test_consistency_mode.py test_core_suite.py test_e2e_stress_suite.py \
-    test_fixes.py test_render_speed.py test_timeline_editor.py \
-    test_tts_multi_engine.py test_ui_layout.py test_ui_theme.py -q
+python -m pip install -r requirements.txt pytest==8.3.4
+node --check static/js/app.js
+node --check static/js/ui.js
+python -m pytest -q --ignore=test_audit_fixes.py --ignore=test_new_audit_fixes.py --ignore=test_e2e_video_subtitles.py --ignore=test_tts_multi_engine.py
 ```
-Lưu ý:
-- Biến proxy phải gỡ khi chạy pytest, nếu không httpx báo lỗi `InvalidURL` giả.
-- `test_sub.py` và `test_bottom_sub.py` bị loại khỏi CI vì lỗi collection có từ trước.
-- `requirements.txt` đã pin đúng phiên bản (`==`); muốn nâng cấp thư viện thì sửa
-  pin rồi chạy lại toàn bộ suite trong venv sạch trước khi commit.
+
+Chạy riêng bốn tệp kiểm thử tích hợp khi đã cấu hình Studio, Muse2API và dịch vụ TTS cần thiết.
 
 ---
 

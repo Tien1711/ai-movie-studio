@@ -52,7 +52,7 @@ import story_engine
 import tts_manager
 
 
-FFMPEG = "/usr/bin/ffmpeg"
+FFMPEG = composer.FFMPEG
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -305,8 +305,11 @@ def test_sse_requires_key_when_configured(monkeypatch):  # [RED-OLD]
     status, _ = asyncio.run(_call_middleware(
         mw, "/api/jobs/bv_abc123/sse", query=b"api_key=wrong"))
     assert status == 401
-    status, body = asyncio.run(_call_middleware(
+    status, _ = asyncio.run(_call_middleware(
         mw, "/api/jobs/bv_abc123/sse", query=b"api_key=test-secret-123"))
+    assert status == 401
+    status, body = asyncio.run(_call_middleware(
+        mw, "/api/jobs/bv_abc123/sse", headers=[(b"x-api-key", b"test-secret-123")]))
     assert status == 200 and body == b"ok"
 
 
@@ -333,7 +336,7 @@ def test_api_key_compared_with_compare_digest(monkeypatch):  # [RED-OLD]
     status, _ = asyncio.run(_call_middleware(mw, "/api/jobs", headers=headers))
     assert status == 200
     assert calls, "phai so key bang hmac.compare_digest, khong phai !="
-    assert calls[0] == ("test-secret-123", "test-secret-123")
+    assert calls[0] == (b"test-secret-123", b"test-secret-123")
 
 
 # ── #5b — mix preview map ve draft ──────────────────────────────────────────
@@ -642,7 +645,7 @@ def test_convert_to_shot_desk_does_not_overwrite(ws):  # [RED-OLD]
     r1 = mgr.convert_to_shot_desk(vid)
     r2 = mgr.convert_to_shot_desk(vid)
     assert r1["project_id"] != r2["project_id"], "lan convert 2 phai tao project moi"
-    p1 = json.loads((shot_desk.SHOT_DESK_DIR / r1["project_id"] / "project.json").read_text())
+    p1 = json.loads((shot_desk.SHOT_DESK_DIR / r1["project_id"] / "project.json").read_text(encoding="utf-8"))
     assert p1["shots"][0]["prompt"] == "PROMPT GOC", "project cu phai giu nguyen prompt"
 
 
@@ -721,7 +724,7 @@ def test_voice_select_html_escapes_ids_and_labels(tmp_path):  # [RED-OLD]
     )
     js = tmp_path / "harness.js"
     js.write_text(harness, encoding="utf-8")
-    res = subprocess.run(["node", str(js)], capture_output=True, text=True, timeout=30)
+    res = subprocess.run(["node", str(js)], capture_output=True, encoding="utf-8", timeout=30)
     assert res.returncode == 0, res.stderr
     out = res.stdout
     assert 'onmouseover="alert(1)' not in out
@@ -731,9 +734,10 @@ def test_voice_select_html_escapes_ids_and_labels(tmp_path):  # [RED-OLD]
 
 # ── #6 — concat list / get_video / update_video / add_batch ─────────────────
 
-def test_concat_list_line_escapes_apostrophe():  # [GREEN-OLD]
-    line = composer._concat_list_line("/home/user/O'Brien/clip.mp4")
-    assert line == "file '/home/user/O'\\''Brien/clip.mp4'\n"
+def test_concat_list_line_escapes_apostrophe(tmp_path):
+    path = tmp_path / "O'Brien" / "clip.mp4"
+    expected = path.as_posix().replace("'", "'\\''")
+    assert composer._concat_list_line(str(path)) == f"file '{expected}'\n"
 
 
 def test_batch_concat_uses_escaped_concat_line():  # [RED-OLD]

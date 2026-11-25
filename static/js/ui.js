@@ -209,11 +209,7 @@
     new MutationObserver(scheduleObserve).observe(document.body, { childList: true, subtree: true });
   }
 
-  /* ── Khóa API Studio (X-API-Key) — modal + panel Cài đặt ──────────────
-     Key lưu ở localStorage key 'ams-api-key', chỉ gửi tới chính server
-     Studio này qua header X-API-Key (xem apiFetch trong js/app.js).
-     Chỉ dùng cho tool cá nhân / trình duyệt tin cậy, KHÔNG dùng chung máy
-     công cộng. SSE vẫn miễn auth nên EventSource giữ nguyên. */
+  /* ── Khóa API Studio và phiên trình duyệt ─────────────────────────────── */
   function showApiKeyModal() {
     const m = $('#apiKeyModal');
     if (!m) return;
@@ -226,52 +222,54 @@
   window.showApiKeyModal = showApiKeyModal;
   window.hideApiKeyModal = hideApiKeyModal;
 
-  function saveStudioApiKey(value) {
-    const v = (value || '').trim();
-    if (!v) return false;
-    try { localStorage.setItem('ams-api-key', v); } catch (e) { /* bỏ qua */ }
-    if (typeof window.resetApiKeyModalFlag === 'function') window.resetApiKeyModalFlag();
-    refreshStudioApiKeyStatus();
-    if (typeof window.reloadStudioDataAfterKeySave === 'function') window.reloadStudioDataAfterKeySave();
-    return true;
+  async function saveStudioApiKey(value, button, status) {
+    const key = (value || '').trim();
+    if (!key) {
+      if (status) status.textContent = 'Chưa nhập key.';
+      return false;
+    }
+    if (button) button.disabled = true;
+    try {
+      if (!await window.createStudioSession(key)) {
+        if (status) status.textContent = 'Khóa API Studio không đúng hoặc xác thực chưa được bật.';
+        return false;
+      }
+      window.resetApiKeyModalFlag();
+      refreshStudioApiKeyStatus();
+      window.reloadStudioDataAfterKeySave();
+      return true;
+    } catch {
+      if (status) status.textContent = 'Không kết nối được với server Studio.';
+      return false;
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
 
   async function refreshStudioApiKeyStatus() {
     const el = $('#studioApiKeyStatus');
-    let authRequired = null;
-    try {
-      const f = (typeof window.apiFetch === 'function') ? window.apiFetch : window.fetch.bind(window);
-      const r = await f('/api/auth/status');
-      const d = await r.json();
-      authRequired = !!(d && d.auth_required);
-    } catch { authRequired = null; }
-    let saved = '';
-    try { saved = localStorage.getItem('ams-api-key') || ''; } catch (e) { /* bỏ qua */ }
-    if (el) {
-      if (authRequired === null) {
-        el.textContent = 'Không kiểm tra được server.';
-      } else if (!authRequired) {
-        el.textContent = 'Server đang TẮT xác thực — không cần key.';
-      } else if (saved) {
-        el.textContent = 'Server đang BẬT xác thực — đã lưu key (•••).';
-      } else {
-        el.textContent = 'Server đang BẬT xác thực — chưa nhập key.';
-      }
-    }
     const input = $('#studioApiKeyInput');
-    if (input) input.placeholder = saved ? 'Đã lưu key (•••) — nhập key mới để đổi' : 'Nhập khóa X-API-Key do server cấp';
+    try {
+      const response = await window.fetch('/api/auth/status');
+      if (!response.ok) throw new Error('Studio auth status unavailable');
+      const data = await response.json();
+      if (el) {
+        if (!data.auth_required) el.textContent = 'Server đang tắt xác thực.';
+        else el.textContent = data.authenticated ? 'Đã đăng nhập Studio.' : 'Cần nhập khóa API Studio.';
+      }
+      if (input) input.placeholder = 'Nhập khóa X-API-Key do server cấp';
+    } catch {
+      if (el) el.textContent = 'Không kiểm tra được server.';
+    }
   }
   window.refreshStudioApiKeyStatus = refreshStudioApiKeyStatus;
 
-  // Nút trong modal nhập key
-  $('#btnSaveApiKeyModal')?.addEventListener('click', () => {
+  $('#btnSaveApiKeyModal')?.addEventListener('click', async (event) => {
     const input = $('#apiKeyModalInput');
-    const err = $('#apiKeyModalError');
-    if (!saveStudioApiKey(input ? input.value : '')) {
-      if (err) err.textContent = 'Chưa nhập key.';
-      return;
+    if (await saveStudioApiKey(input?.value, event.currentTarget, $('#apiKeyModalError'))) {
+      if (input) input.value = '';
+      hideApiKeyModal();
     }
-    hideApiKeyModal();
   });
   $('#apiKeyModalInput')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('#btnSaveApiKeyModal')?.click();
@@ -283,26 +281,21 @@
     if (e.target && e.target.id === 'apiKeyModal') hideApiKeyModal(); // bấm ra ngoài = bỏ qua
   });
 
-  // Mục "Khóa API Studio" trong panel Cài đặt
-  $('#btnSaveStudioApiKey')?.addEventListener('click', () => {
+  $('#btnSaveStudioApiKey')?.addEventListener('click', async (event) => {
     const input = $('#studioApiKeyInput');
-    const v = (input ? input.value : '').trim();
-    if (!v) {
-      let saved = '';
-      try { saved = localStorage.getItem('ams-api-key') || ''; } catch (e) { /* bỏ qua */ }
-      if (saved) { if (input) input.value = ''; refreshStudioApiKeyStatus(); return; } // giữ nguyên key đã lưu
-      const el = $('#studioApiKeyStatus');
-      if (el) el.textContent = 'Chưa nhập key để lưu.';
-      return;
+    if (await saveStudioApiKey(input?.value, event.currentTarget, $('#studioApiKeyStatus')) && input) {
+      input.value = '';
     }
-    if (saveStudioApiKey(v) && input) input.value = '';
   });
-  $('#btnClearStudioApiKey')?.addEventListener('click', () => {
-    try { localStorage.removeItem('ams-api-key'); } catch (e) { /* bỏ qua */ }
-    const input = $('#studioApiKeyInput');
-    if (input) input.value = '';
-    if (typeof window.resetApiKeyModalFlag === 'function') window.resetApiKeyModalFlag();
-    refreshStudioApiKeyStatus();
+  $('#btnClearStudioApiKey')?.addEventListener('click', async () => {
+    try {
+      const response = await window.fetch('/api/auth/session', { method: 'DELETE' });
+      if (!response.ok) throw new Error('Studio logout failed');
+      window.location.reload();
+    } catch {
+      const status = $('#studioApiKeyStatus');
+      if (status) status.textContent = 'Không thể đăng xuất Studio.';
+    }
   });
   /* ── Batch Matrix: thu gọn thành dải tiến độ compact ───────────────────
      Khi job có video cuối, app.js (updateMonitor) tự gọi setTaskMatrixCollapsed(true).

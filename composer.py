@@ -29,6 +29,7 @@ import math
 import re
 import uuid
 import imageio_ffmpeg
+from contextvars import ContextVar
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -766,10 +767,60 @@ def create_srt(
     return output_srt
 
 
+_COMPOSE_CANCEL_CHECK = ContextVar("compose_cancel_check", default=None)
+
+
+def _check_compose_cancelled() -> None:
+    should_cancel = _COMPOSE_CANCEL_CHECK.get()
+    if should_cancel is not None and should_cancel():
+        raise RuntimeError("Đã hủy xuất phim.")
+
+
+def run_cancellable_compose(compose, should_cancel, **kwargs):
+    token = _COMPOSE_CANCEL_CHECK.set(should_cancel)
+    try:
+        _check_compose_cancelled()
+        return compose(**kwargs)
+    finally:
+        _COMPOSE_CANCEL_CHECK.reset(token)
+
+
+def _run_compose_ffmpeg(cmd, *, capture_output=True, text=False, timeout, cwd=None, check=False):
+    if _COMPOSE_CANCEL_CHECK.get() is None:
+        return subprocess.run(
+            cmd, capture_output=capture_output, text=text, timeout=timeout, cwd=cwd, check=check,
+        )
+
+    _check_compose_cancelled()
+    deadline = time.monotonic() + timeout
+    pipe = subprocess.PIPE if capture_output else None
+    with subprocess.Popen(cmd, stdout=pipe, stderr=pipe, text=text, cwd=cwd,
+                          **({"encoding": "utf-8", "errors": "replace"} if text else {})) as proc:
+        try:
+            while True:
+                _check_compose_cancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                try:
+                    stdout, stderr = proc.communicate(timeout=min(remaining, 0.2))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            proc.kill()
+            proc.communicate()
+            raise
+        result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        if check:
+            result.check_returncode()
+        return result
+
+
 def _run(cmd: List[str], label: str = "", timeout: int = 120):
     print(f"[FFmpeg] {label}")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = _run_compose_ffmpeg(cmd, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"FFmpeg timeout ({label}) sau {timeout}s")
     if result.returncode != 0:
@@ -1123,12 +1174,12 @@ def merge_clips_advanced(
                 f.write(_concat_list_line(c))
         try:
             try:
-                subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", output_path], check=True, capture_output=True, timeout=120)
+                _run_compose_ffmpeg([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", output_path], check=True, capture_output=True, timeout=120)
                 return output_path
             except Exception:
                 pass
             # Fallback sang encode 1 lượt nếu stream copy không tương thích
-            subprocess.run([
+            _run_compose_ffmpeg([
                 FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "20",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_path
@@ -1234,9 +1285,9 @@ def merge_clips_advanced(
                         f.write(_concat_list_line(next_clip))
                     try:
                         try:
-                            subprocess.run([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", step_out], check=True, capture_output=True, timeout=120)
+                            _run_compose_ffmpeg([FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist, "-c", "copy", step_out], check=True, capture_output=True, timeout=120)
                         except Exception:
-                            subprocess.run([
+                            _run_compose_ffmpeg([
                                 FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", clist,
                                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
                                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", step_out
@@ -1658,7 +1709,7 @@ def burn_subtitles(
                     shutil.copy2(input_video, output_video)
                     return output_video
         else:
-            result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, timeout=timeout)
+            result = _run_compose_ffmpeg(cmd, cwd=work_dir, text=True, timeout=timeout)
             if result.returncode != 0:
                 if raise_on_error:
                     raise RuntimeError(f"Lỗi khắc phụ đề bằng FFmpeg: {result.stderr[-1000:].strip()}")
@@ -1843,11 +1894,13 @@ def compose_full_movie(
     """
     ts = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
     final_dir = os.path.join(output_dir, "final")
-    tmp_dir = os.path.join(output_dir, "_tmp")
     os.makedirs(final_dir, exist_ok=True)
-    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="_compose_", dir=output_dir)
+    published_paths = []
+    completed = False
 
     try:
+        _check_compose_cancelled()
         expected_total = total_scenes or len(results)
         audit = audit_movie_scenes(results, expected_total)
 
@@ -1893,6 +1946,7 @@ def compose_full_movie(
         scene_clips = []
         clip_durations = []
         for r in ok_results:
+            _check_compose_cancelled()
             idx = r["index"]
             clip_out = os.path.join(tmp_dir, f"clip_{idx:03d}.mp4")
             act_audio = get_media_duration(r["audio_path"]) if (r.get("audio_path") and os.path.exists(r["audio_path"])) else float(r.get("audio_duration", 5))
@@ -1929,17 +1983,8 @@ def compose_full_movie(
         #   - "srt_only": SRT là sản phẩm chính → giữ trong final/ như cũ.
         #   - "none": không tạo SRT.
         srt_filename = f"{safe_title}_{ts}.srt"
-        if subtitle_mode == "srt_only":
-            srt_path = os.path.join(final_dir, srt_filename)
-            create_srt(
-                ok_results,
-                srt_path,
-                clip_durations=clip_durations,
-                media_paths=scene_clips,
-                timeline_offsets=timeline_offsets,
-            )
-            print(f"[Hậu kỳ] Đã tạo file SRT phụ đề chuẩn âm thanh: {srt_path}")
-        elif subtitle_mode == "burn_in":
+        srt_path = None
+        if subtitle_mode in ("srt_only", "burn_in"):
             srt_path = os.path.join(tmp_dir, srt_filename)
             create_srt(
                 ok_results,
@@ -1948,59 +1993,53 @@ def compose_full_movie(
                 media_paths=scene_clips,
                 timeline_offsets=timeline_offsets,
             )
-            print(f"[Hậu kỳ] Đã tạo file SRT tạm để khắc phụ đề: {srt_path}")
-        else:
-            srt_path = None
 
-        # Bước 3: Ghép tất cả clip với hiệu ứng chuyển cảnh
+        _check_compose_cancelled()
         merged = os.path.join(tmp_dir, f"merged_{ts}.mp4")
         merge_all_scenes(scene_clips, merged, transition=transition)
         print(f"[Hậu kỳ] Đã ghép video thành công: {merged}")
 
-        # Bước 4: Xử lý phụ đề theo cấu hình người dùng
-        if subtitle_mode == "burn_in":
+        video_to_mix = merged
+        if subtitle_mode == "burn_in" and srt_path and os.path.getsize(srt_path) > 0:
             with_sub = os.path.join(tmp_dir, f"with_sub_{ts}.mp4")
-            try:
-                burn_subtitles(merged, srt_path, with_sub, font_size=font_size)
-                if os.path.exists(with_sub) and os.path.getsize(with_sub) > 1000:
-                    video_to_mix = with_sub
-                    print(f"[Hậu kỳ] Đã khắc phụ đề Burn-in: {with_sub}")
-                else:
-                    video_to_mix = merged
-            except Exception as burn_err:
-                print(f"[Hậu kỳ Cảnh báo] Không thể khắc phụ đề ({burn_err}), giữ nguyên video gốc.")
-                video_to_mix = merged
-        else:
-            # "srt_only" hoặc "none" -> Giữ video gốc không khắc chữ
-            video_to_mix = merged
-            print(f"[Hậu kỳ] Bỏ qua Burn-in (Chế độ phụ đề: {subtitle_mode})")
+            burn_subtitles(merged, srt_path, with_sub, font_size=font_size, raise_on_error=True)
+            if not os.path.isfile(with_sub) or os.path.getsize(with_sub) <= 1000:
+                raise RuntimeError("FFmpeg không tạo được video đã khắc phụ đề.")
+            video_to_mix = with_sub
 
-        # Bước 5: Mix nhạc nền nếu có
+        _check_compose_cancelled()
         final_video_name = f"{safe_title}_{ts}.mp4"
         final_path = os.path.join(final_dir, final_video_name)
-
         if bg_music_path and os.path.exists(bg_music_path):
+            mixed = os.path.join(tmp_dir, "mixed.mp4")
             add_background_music(
                 input_video=video_to_mix,
                 music_file=bg_music_path,
-                output_video=final_path,
+                output_video=mixed,
                 music_volume=music_volume,
                 voice_volume=voice_volume,
             )
-            print(f"[Hậu kỳ] Đã mix nhạc nền hoàn tất: {final_path}")
+            video_to_mix = mixed
+        total_movie_duration = get_media_duration(video_to_mix)
+
+        _check_compose_cancelled()
+        if subtitle_mode == "srt_only":
+            final_srt = os.path.join(final_dir, srt_filename)
+            os.replace(srt_path, final_srt)
+            published_paths.append(final_srt)
         else:
-            shutil.copy2(video_to_mix, final_path)
-            print(f"[Hậu kỳ] Không có nhạc nền, xuất thẳng video: {final_path}")
-
-        total_movie_duration = get_media_duration(final_path)
-
+            final_srt = None
+        os.replace(video_to_mix, final_path)
+        published_paths.append(final_path)
+        _check_compose_cancelled()
+        completed = True
         return {
             "video_path": final_path,
             "video_filename": final_video_name,
             # Chỉ "srt_only" mới trả file SRT (burn_in đã khắc vào video, file
             # SRT chỉ nằm trong _tmp để khắc; "none" thì không có SRT) — tránh
             # trình phát tự nạp phụ đề cùng tên chồng lên chữ đã khắc.
-            "srt_path": srt_path if subtitle_mode == "srt_only" else None,
+            "srt_path": final_srt,
             "srt_filename": srt_filename if subtitle_mode == "srt_only" else None,
             "duration": round(total_movie_duration, 2),
             "audit": audit,
@@ -2012,5 +2051,7 @@ def compose_full_movie(
         }
 
     finally:
-        # Dọn thư mục tạm (_tmp: clip cảnh / merged / with_sub) kể cả khi lỗi.
+        if not completed:
+            for path in published_paths:
+                Path(path).unlink(missing_ok=True)
         shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -1883,11 +1883,15 @@ def start_batch_worker():
             logger.info("🚀 Đã khởi động BatchVideoWorker daemon thread.")
 
 
-# Khởi tạo singleton quản lý hàng đợi và tự động khôi phục / kích hoạt worker cho các job dở dang (Point 1)
+def start_pending_batch_worker():
+    """Resume both already queued jobs and jobs recovered from an interruption."""
+    if any(video.get("status") == "queued" for video in BATCH_MANAGER._read_queue()):
+        start_batch_worker()
+
+
 BATCH_MANAGER = BatchVideoManager()
 try:
-    if getattr(BATCH_MANAGER, "recovered_on_init", 0) > 0:
-        start_batch_worker()
+    start_pending_batch_worker()
 except Exception as _e_rec:
     logger.warning("Không thể tự động khởi động worker sau recovery: %s", _e_rec)
 

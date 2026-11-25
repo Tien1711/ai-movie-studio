@@ -3214,7 +3214,7 @@
       </div>
       <div class="card">
         <div class="card-title u-mb16">🔑 Khóa API Studio (X-API-Key)</div>
-        <p style="color:var(--muted);font-size:12px;margin:0 0 12px;">Khi server đặt <code>STUDIO_API_KEY</code>, trình duyệt phải gửi key này theo mỗi yêu cầu API. Key chỉ lưu trên trình duyệt của bạn (localStorage, key <code>ams-api-key</code>), không gửi đi đâu khác ngoài server Studio này. Không nhầm với API Key Muse2API ở trên.</p>
+        <p style="color:var(--muted);font-size:12px;margin:0 0 12px;">Khi server đặt <code>STUDIO_API_KEY</code>, nhập khóa để đăng nhập Studio. Phiên đăng nhập dùng chung cho API, trình phát video và tải tệp.</p>
         <div class="form-row cols-2">
           <div>
             <label>Khóa API Studio</label>
@@ -3226,8 +3226,8 @@
           </div>
         </div>
         <div class="fx fx-g10">
-          <button class="btn btn-primary" id="btnSaveStudioApiKey">💾 Lưu key</button>
-          <button class="btn btn-ghost" id="btnClearStudioApiKey">🚪 Xóa key / Đăng xuất</button>
+          <button class="btn btn-primary" id="btnSaveStudioApiKey">Đăng nhập</button>
+          <button class="btn btn-ghost" id="btnClearStudioApiKey">Đăng xuất</button>
         </div>
       </div>
       <div class="card">
@@ -3250,8 +3250,8 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js?v=20261123_07" defer></script>
-<script src="static/js/ui.js?v=20261123_03" defer></script>
+<script src="static/js/app.js?v=20261125_01" defer></script>
+<script src="static/js/ui.js?v=20261125_01" defer></script>
 
 <!-- Floating Multi-Shot Batch Action Bar -->
 <div id="sdBatchActionBar" class="sd-batch-toolbar">
@@ -3304,7 +3304,7 @@
 </div>
 
 
-<!-- Modal nhập Khóa API Studio: hiện khi server bật auth mà trình duyệt chưa có key, hoặc key đã lưu bị từ chối (401). -->
+<!-- Modal nhập Khóa API Studio: hiện khi server bật xác thực và trình duyệt chưa đăng nhập. -->
 <!-- Timeline Editor: hộp thoại render lại 1 shot (mở bằng js/ui.js TimelineEditor) -->
 <div id="tlRerenderModal" class="modal-backdrop" style="display:none;">
   <div class="modal-window" style="max-width:560px;">
@@ -3349,13 +3349,13 @@
       <button class="btn btn-ghost btn-sm" id="btnCloseApiKeyModal">✕</button>
     </div>
     <div class="modal-body">
-      <p style="color:var(--muted);font-size:13px;margin:0 0 12px;">Server đã bật xác thực (<code>STUDIO_API_KEY</code>). Nhập khóa để tiếp tục dùng Studio. Khóa chỉ lưu trên trình duyệt này (localStorage) — không dùng chung máy công cộng.</p>
+      <p style="color:var(--muted);font-size:13px;margin:0 0 12px;">Nhập khóa API Studio để đăng nhập và tiếp tục sử dụng.</p>
       <label>Khóa API Studio (X-API-Key)</label>
       <input class="u-w100" type="password" id="apiKeyModalInput" placeholder="Dán khóa X-API-Key vào đây" autocomplete="off">
       <div id="apiKeyModalError" style="color:#f87171;font-size:12px;min-height:16px;margin-top:6px;"></div>
       <div class="fx fx-g10 u-mt12">
-        <button class="btn btn-primary" id="btnSaveApiKeyModal">💾 Lưu key</button>
-        <button class="btn btn-ghost" id="btnSkipApiKeyModal">Dùng không cần key</button>
+        <button class="btn btn-primary" id="btnSaveApiKeyModal">Đăng nhập</button>
+        <button class="btn btn-ghost" id="btnSkipApiKeyModal">Đóng</button>
       </div>
     </div>
   </div>
