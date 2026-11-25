@@ -230,7 +230,10 @@ def test_extract_text_from_url_prefers_article_strips_ads():
     <p>Ông lão cảm động, tặng chàng một hạt giống thần kỳ để trồng sau vườn.</p></article>
     <footer>Copyright 2026 - Liên hệ quảng cáo</footer>
     <script>var x = 1;</script></body></html>"""
-    text = extract_text_from_url("https://example.com/truyen", http_get=lambda url: _FakeResp(html_doc))
+    # IP literal công khai (93.184.216.34 = example.com): extract_text_from_url
+    # luôn kiểm tra DNS (audit #2c) nên URL hostname sẽ chạm DNS thật trong
+    # test — dùng IP literal để test trích xuất không phụ thuộc mạng/DNS.
+    text = extract_text_from_url("https://93.184.216.34/truyen", http_get=lambda url: _FakeResp(html_doc))
     assert "chàng trai nghèo" in text
     assert "Quảng cáo giảm giá" not in text
     assert "Mua ngay giảm 50%" not in text
@@ -241,10 +244,10 @@ def test_extract_text_from_url_errors():
     with pytest.raises(ValueError, match="http"):
         extract_text_from_url("ftp://example.com/x")
     with pytest.raises(ValueError, match="HTTP 404"):
-        extract_text_from_url("https://example.com/x",
+        extract_text_from_url("https://93.184.216.34/x",
                               http_get=lambda url: _FakeResp("not found", 404))
     with pytest.raises(ValueError, match="Không trích được"):
-        extract_text_from_url("https://example.com/x",
+        extract_text_from_url("https://93.184.216.34/x",
                               http_get=lambda url: _FakeResp("<html><body><p>Ngắn.</p></body></html>"))
 
 

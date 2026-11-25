@@ -16,19 +16,21 @@ Biến một truyện dài thành nhiều video ngắn (mỗi chương = 1 tập
 from __future__ import annotations
 
 import html as _html
+import http.client
 import io
 import ipaddress
 import json
 import logging
 import re
 import socket
+import ssl
 import time
 import urllib.parse
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -369,17 +371,15 @@ def _is_blocked_ip(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return True
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    # Allowlist: chỉ IP toàn cầu (global) mới được phép. Dùng is_global thay
+    # vì liệt kê is_private/is_loopback/is_link_local/... — các dải như
+    # CGNAT 100.64.0.0/10 có is_private=False nhưng is_global=False nên vẫn
+    # bị chặn (audit #2a, kiểm chứng trên Python 3.12).
+    return not ip.is_global
 
 
-def _validate_public_url(url: str, resolve_dns: bool = True) -> urllib.parse.ParseResult:
+def _parse_and_check_url_host(url: str) -> Tuple[urllib.parse.ParseResult, str, bool]:
+    """Kiểm tra scheme + hostname (chưa chạm DNS). Trả (parsed, host, is_literal)."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("Link phải bắt đầu bằng http:// hoặc https://")
@@ -390,24 +390,69 @@ def _validate_public_url(url: str, resolve_dns: bool = True) -> urllib.parse.Par
         raise ValueError("Không cho phép truy cập địa chỉ nội bộ (SSRF blocked)")
     try:
         ipaddress.ip_address(host)
-        is_literal_ip = True
+        is_literal = True
     except ValueError:
-        is_literal_ip = False
-    if is_literal_ip:
+        is_literal = False
+    return parsed, host, is_literal
+
+
+def _resolve_public_ip(host: str, port: int) -> str:
+    """Phân giải DNS ĐÚNG MỘT lần, chặn mọi IP nội bộ, trả IP công khai để pin.
+
+    Raise ValueError nếu bất kỳ IP nào DNS trả về bị chặn — kể cả khi có IP
+    công khai khác trong danh sách (fail-closed: không đoán IP nào an toàn).
+    Ưu tiên IPv4 (ổn định hơn cho http.client), rồi mới IPv6.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError as e:
+        raise ValueError(f"Không phân giải được tên miền '{host}': {e}")
+    if not infos:
+        raise ValueError(f"Không phân giải được tên miền '{host}'")
+    addrs: List[str] = []
+    for info in infos:
+        addr = info[4][0]
+        if _is_blocked_ip(addr):
+            raise ValueError("Tên miền trỏ về địa chỉ IP nội bộ bị chặn (SSRF blocked)")
+        addrs.append(addr)
+    for addr in addrs:
+        try:
+            if isinstance(ipaddress.ip_address(addr), ipaddress.IPv4Address):
+                return addr
+        except ValueError:
+            continue
+    return addrs[0]
+
+
+def _validate_and_resolve_url(url: str) -> Tuple[urllib.parse.ParseResult, str]:
+    """Validate URL + phân giải DNS 1 lần, trả (parsed, IP đã pin).
+
+    Chống DNS-rebinding TOCTOU (audit #2b): caller PHẢI kết nối tới IP trả về
+    này, không được phân giải DNS lại. IP literal -> chính nó.
+    """
+    parsed, host, is_literal = _parse_and_check_url_host(url)
+    if is_literal:
         if _is_blocked_ip(host):
             raise ValueError("Không cho phép truy cập địa chỉ IP nội bộ (SSRF blocked)")
+        return parsed, host
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed, _resolve_public_ip(host, port)
+
+
+def _validate_public_url(url: str, resolve_dns: bool = True) -> urllib.parse.ParseResult:
+    """Validate URL công khai (giữ chữ ký cũ cho tương thích).
+
+    resolve_dns=True (mặc định): kiểm tra cả DNS (và pin IP bên trong).
+    resolve_dns=False chỉ kiểm scheme/host/IP literal, không chạm DNS — chỉ
+    dùng cho đường test/mock, KHÔNG dùng cho fetch thật: extract_text_from_url
+    luôn ép resolve_dns=True (audit #2c).
+    """
+    if not resolve_dns:
+        parsed, host, is_literal = _parse_and_check_url_host(url)
+        if is_literal and _is_blocked_ip(host):
+            raise ValueError("Không cho phép truy cập địa chỉ IP nội bộ (SSRF blocked)")
         return parsed
-    if resolve_dns:
-        try:
-            infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
-        except OSError as e:
-            raise ValueError(f"Không phân giải được tên miền '{host}': {e}")
-        if not infos:
-            raise ValueError(f"Không phân giải được tên miền '{host}'")
-        for info in infos:
-            addr = info[4][0]
-            if _is_blocked_ip(addr):
-                raise ValueError("Tên miền trỏ về địa chỉ IP nội bộ bị chặn (SSRF blocked)")
+    parsed, _ip = _validate_and_resolve_url(url)
     return parsed
 
 
@@ -417,36 +462,100 @@ class _StreamedStoryResp:
         self.text = text
 
 
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection kết nối tới IP đã pin; SNI + xác thực chứng chỉ theo hostname gốc.
+
+    Chống DNS-rebinding TOCTOU (audit #2b): socket mở tới IP đã kiểm tra,
+    nhưng TLS SNI và hostname kiểm chứng chỉ vẫn là tên miền gốc.
+    """
+
+    def __init__(self, host, port=None, *, pinned_ip, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, context=None):
+        super().__init__(host, port, timeout=timeout, context=context)
+        self._pinned_ip = pinned_ip
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address)
+        self.sock = self.context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _pinned_fetch(url: str, headers: Optional[Dict[str, str]], timeout: float,
+                  max_bytes: int, oversize_msg: str) -> Tuple[int, Dict[str, str], bytes]:
+    """GET 1 URL tới IP đã pin (không theo redirect).
+
+    Trả (status_code, headers thường-hoá, body). Raise ValueError khi URL bị
+    chặn / vượt giới hạn dung lượng; lỗi mạng (timeout/kết nối) raise nguyên
+    như trước (httpx ConnectError -> socket OSError, caller xử lý như cũ).
+    """
+    parsed, pinned_ip = _validate_and_resolve_url(url)
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    host_header = host
+    if (scheme == "http" and port != 80) or (scheme == "https" and port != 443):
+        host_header = f"{host}:{port}"
+    if scheme == "https":
+        context = ssl.create_default_context()
+        conn = _PinnedHTTPSConnection(
+            host, port, pinned_ip=pinned_ip, timeout=timeout, context=context)
+    else:
+        conn = http.client.HTTPConnection(pinned_ip, port, timeout=timeout)
+    try:
+        conn.putrequest("GET", path, skip_host=True)
+        conn.putheader("Host", host_header)
+        for key, value in (headers or {}).items():
+            conn.putheader(key, value)
+        # http.client không tự giải nén gzip — xin bản thô để parse được.
+        if not any(k.lower() == "accept-encoding" for k in (headers or {})):
+            conn.putheader("Accept-Encoding", "identity")
+        conn.endheaders()
+        resp = conn.getresponse()
+        status = resp.status
+        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        body = b""
+        while True:
+            chunk = resp.read(16384)
+            if not chunk:
+                break
+            body += chunk
+            if len(body) > max_bytes:
+                raise ValueError(oversize_msg)
+        return status, resp_headers, body
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _safe_story_url_get(url: str) -> _StreamedStoryResp:
-    """GET an toàn chống SSRF (kiểm tra DNS mỗi bước redirect) và giới hạn stream 2MB."""
+    """GET an toàn chống SSRF (IP pinning + kiểm tra từng hop redirect) và giới hạn stream 2MB."""
     current = url
     headers = {"User-Agent": "Mozilla/5.0 (AI Movie Studio Story-to-Video)"}
-    with httpx.Client(timeout=RSS_TIMEOUT_S, follow_redirects=False, trust_env=False) as client:
-        for _ in range(6):
-            _validate_public_url(current, resolve_dns=True)
-            with client.stream("GET", current, headers=headers) as resp:
-                if resp.status_code in (301, 302, 303, 307, 308):
-                    loc = resp.headers.get("location")
-                    if not loc:
-                        raise ValueError("Link chuyển hướng thiếu header Location")
-                    current = urllib.parse.urljoin(current, loc)
-                    continue
-                if resp.status_code != 200:
-                    return _StreamedStoryResp(resp.status_code, "")
-                chunks: List[bytes] = []
-                total = 0
-                for chunk in resp.iter_bytes(chunk_size=16384):
-                    total += len(chunk)
-                    if total > MAX_URL_BYTES:
-                        raise ValueError("Trang web quá lớn (giới hạn 2MB) — hãy copy văn bản rồi dán trực tiếp")
-                    chunks.append(chunk)
-                raw = b"".join(chunks)
-                enc = resp.encoding or "utf-8"
-                try:
-                    txt = raw.decode(enc, errors="replace")
-                except LookupError:
-                    txt = raw.decode("utf-8", errors="replace")
-                return _StreamedStoryResp(resp.status_code, txt)
+    for _ in range(6):
+        status, resp_headers, raw = _pinned_fetch(
+            current, headers, RSS_TIMEOUT_S, MAX_URL_BYTES,
+            "Trang web quá lớn (giới hạn 2MB) — hãy copy văn bản rồi dán trực tiếp",
+        )
+        if status in (301, 302, 303, 307, 308):
+            loc = resp_headers.get("location")
+            if not loc:
+                raise ValueError("Link chuyển hướng thiếu header Location")
+            current = urllib.parse.urljoin(current, loc)
+            continue
+        if status != 200:
+            return _StreamedStoryResp(status, "")
+        ctype = resp_headers.get("content-type", "")
+        m = re.search(r"charset=([^\s;]+)", ctype, re.IGNORECASE)
+        enc = m.group(1) if m else "utf-8"
+        try:
+            txt = raw.decode(enc, errors="replace")
+        except LookupError:
+            txt = raw.decode("utf-8", errors="replace")
+        return _StreamedStoryResp(status, txt)
     raise ValueError("Link chuyển hướng quá nhiều lần (tối đa 5 lần)")
 
 
@@ -456,7 +565,9 @@ def extract_text_from_url(url: str, http_get: Optional[Callable] = None) -> str:
     Giới hạn 2MB + chống SSRF. Không dùng bs4 (không có trong requirements) — chỉ regex.
     """
     url = (url or "").strip()
-    _validate_public_url(url, resolve_dns=(http_get is None))
+    # Luôn kiểm tra DNS, kể cả khi http_get được inject (audit #2c): nhánh
+    # inject cũ bỏ qua DNS (resolve_dns=False) là bẫy cho caller tương lai.
+    _validate_public_url(url, resolve_dns=True)
     if http_get is None:
         res = _safe_story_url_get(url)
     else:

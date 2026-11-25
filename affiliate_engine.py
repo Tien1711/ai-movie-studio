@@ -1941,26 +1941,46 @@ class _LinkResponse:
 
 
 def _default_link_http_get(url: str, **kwargs) -> _LinkResponse:
-    """GET bằng httpx, theo redirect, giới hạn 2MB (hàm riêng để test mock được).
+    """GET bằng IP pinning, tự theo redirect từng hop (mỗi hop đều validate), giới hạn 2MB.
+
+    Chống SSRF (audit #1): TẮT follow_redirects; mỗi hop redirect đều qua
+    _validate_and_resolve_url của story_engine (chặn IP nội bộ/CGNAT + pin
+    IP chống DNS-rebinding) TRƯỚC khi tải body. Dùng chung cơ chế với story.
+    Hàm riêng để test mock được; trust_env=False (xem ghi chú cũ dưới đây
+    về NO_PROXY chứa [::1]).
 
     trust_env=False: KHÔNG đọc proxy từ biến môi trường — NO_PROXY chứa
     IPv6 dạng ngoặc như [::1] làm httpx lỗi 'Invalid port' (gặp thật trên
     máy kiểm chứng 2026-11-24). Studio chạy local, không cần proxy hệ thống.
     """
+    from urllib.parse import urlencode, urljoin
+
+    from story_engine import _pinned_fetch
+
     timeout = kwargs.pop("timeout", AFFILIATE_LINK_TIMEOUT_S)
     headers = dict(kwargs.pop("headers", {}) or {})
     headers.setdefault("User-Agent", _AFFILIATE_LINK_UA)
-    with httpx.stream(
-        "GET", url, timeout=timeout, follow_redirects=True, headers=headers,
-        trust_env=False, **kwargs
-    ) as resp:
-        body = b""
-        for chunk in resp.iter_bytes(chunk_size=65536):
-            body += chunk
-            if len(body) > AFFILIATE_LINK_MAX_BYTES:
-                raise ValueError("Nội dung tải về vượt quá 2MB")
+    params = kwargs.pop("params", None)
+    if kwargs:
+        raise TypeError(f"_default_link_http_get: tham số không hỗ trợ: {sorted(kwargs)}")
+    current = url
+    if params:
+        sep = "&" if "?" in current else "?"
+        current = current + sep + urlencode(params, doseq=True)
+    for _ in range(6):
+        status, resp_headers, body = _pinned_fetch(
+            current, headers, timeout, AFFILIATE_LINK_MAX_BYTES,
+            "Nội dung tải về vượt quá 2MB",
+        )
+        if status in (301, 302, 303, 307, 308):
+            loc = resp_headers.get("location")
+            if not loc:
+                raise ValueError("Link chuyển hướng thiếu header Location")
+            current = urljoin(current, loc)
+            continue
         text = body.decode("utf-8", errors="replace")
-        return _LinkResponse(resp.status_code, str(resp.url), text=text, content=body)
+        return _LinkResponse(status, current, text=text, content=body)
+    raise ValueError("Link chuyển hướng quá nhiều lần (tối đa 5 lần)")
 
 
 def _og_tags(html: str) -> Dict[str, str]:
