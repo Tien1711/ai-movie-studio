@@ -59,7 +59,7 @@
     document.body.classList.remove('sidebar-open'); // dong drawer mobile sau khi chon
   });
 
-  /* ── Wizard Tao phim (3 buoc) — gom card co san vao step, khong doi id ── */
+  /* ── Wizard Tao phim (3 buoc + che do Xem tron 1 trang + Pre-Flight Cockpit) ── */
   const panelCreate = $('#panel-create');
   if (panelCreate) {
     const cards = $$(':scope > .card', panelCreate);
@@ -69,37 +69,101 @@
       nav.className = 'create-wizard-nav';
       nav.id = 'createWizardNav';
       nav.innerHTML =
-        '<button type="button" class="wizard-step-btn is-active" data-wizard-step="1"><span class="wizard-num">1</span>Thông tin phim</button>' +
-        '<button type="button" class="wizard-step-btn" data-wizard-step="2"><span class="wizard-num">2</span>Danh sách cảnh</button>' +
-        '<button type="button" class="wizard-step-btn" data-wizard-step="3"><span class="wizard-num">3</span>Render</button>' +
+        '<button type="button" class="wizard-step-btn is-active" data-wizard-step="1"><span class="wizard-num">1</span>Thiết lập phim</button>' +
+        '<button type="button" class="wizard-step-btn" data-wizard-step="2"><span class="wizard-num">2</span>Kịch bản &amp; Phân cảnh</button>' +
+        '<button type="button" class="wizard-step-btn" data-wizard-step="3"><span class="wizard-num">3</span>Tổng duyệt &amp; Xuất bản</button>' +
         '<span class="fx-f1b"></span>' +
+        '<button type="button" class="wizard-step-btn" data-wizard-all="1" title="Hiển thị toàn bộ Thiết lập + Phân cảnh + Xuất bản trên cùng một trang">⊞ Xem trọn 1 trang</button>' +
         '<button type="button" class="wizard-step-btn" data-wizard-nav="prev">← Trước</button>' +
-        '<button type="button" class="wizard-step-btn" data-wizard-nav="next">Sau →</button>';
+        '<button type="button" class="wizard-step-btn" data-wizard-nav="next">Tiếp theo →</button>';
+      const preset = panelCreate.querySelector(':scope > .preset-bar');
       const head = panelCreate.querySelector(':scope > .panel-head');
-      panelCreate.insertBefore(nav, head ? head.nextSibling : panelCreate.firstChild);
+      const anchor = preset ? preset.nextSibling : (head ? head.nextSibling : panelCreate.firstChild);
+      panelCreate.insertBefore(nav, anchor);
       const steps = [document.createElement('div'), document.createElement('div'), document.createElement('div')];
       steps.forEach((el, i) => { el.className = 'wizard-step' + (i === 0 ? ' is-active' : ''); el.dataset.step = String(i + 1); });
       steps[0].appendChild(cards[0]);            // 1: Thong tin du an & Cai dat
       cards.slice(1).forEach((c) => steps[1].appendChild(c)); // 2: Beat + Sample + Danh sach canh
+
+      // Step 3: Live Pre-Flight Summary Cockpit + Sticky Launch Bar
+      const cockpit = document.createElement('div');
+      cockpit.className = 'preflight-cockpit';
+      cockpit.id = 'preflightCockpit';
+      cockpit.innerHTML =
+        '<div class="preflight-cockpit-head">' +
+          '<div><h3>🎬 Bàn Tổng Duyệt Trước Sản Xuất (Pre-Flight Cockpit)</h3>' +
+          '<div class="u-fs125 u-c-muted u-mt2">Kiểm tra nhanh cấu hình tổng thể trước khi khởi chạy hệ thống render hàng loạt.</div></div>' +
+          '<button type="button" class="btn btn-outline btn-sm" onclick="checkConsistencyFromForm()">🔍 Chạy kiểm tra đồng nhất</button>' +
+        '</div>' +
+        '<div class="preflight-kpi-grid">' +
+          '<div class="preflight-kpi"><small>Dự án</small><strong id="pfTitle">—</strong></div>' +
+          '<div class="preflight-kpi"><small>Số phân cảnh</small><strong id="pfScenes">0 cảnh</strong></div>' +
+          '<div class="preflight-kpi"><small>Khung hình &amp; Xuất</small><strong id="pfFormat">16:9 · 720p</strong></div>' +
+          '<div class="preflight-kpi"><small>Chế độ đồng nhất</small><strong id="pfChain">Đồng nhất tối đa</strong></div>' +
+        '</div>';
+      steps[2].appendChild(cockpit);
       steps[2].appendChild(launch);              // 3: Nut San xuat (sticky)
+      const estBox = $('#estimateBox', panelCreate);
+      const qHint = $('#queueHint', panelCreate);
+      if (estBox) steps[2].appendChild(estBox);
+      if (qHint) steps[2].appendChild(qHint);
       steps.forEach((el) => panelCreate.appendChild(el));
+
+      const refreshCockpit = () => {
+        const title = ($('#projectTitle')?.value || '').trim() || 'Chưa đặt tên';
+        const sceneCount = $$('#sceneList .scene-item').length;
+        const ratio = $('#globalAspectRatio')?.value || '16:9';
+        const qual = $('#exportQuality')?.value || '720p';
+        const consMax = $('#consistencyMax')?.checked;
+        const chain = consMax ? 'Đồng nhất tối đa (Last Frame)' : ($('#chainMode')?.value === 'sequential' ? 'Nối tiếp tuần tự' : 'Song song đa luồng');
+        if ($('#pfTitle')) $('#pfTitle').textContent = title;
+        if ($('#pfScenes')) $('#pfScenes').textContent = sceneCount + ' phân cảnh';
+        if ($('#pfFormat')) $('#pfFormat').textContent = ratio + ' · ' + qual.toUpperCase();
+        if ($('#pfChain')) $('#pfChain').textContent = chain;
+      };
+
       let wizardStep = 1;
+      let allOpen = store.get('ams-wizard-all', '1') === '1';
+      const syncWizardUI = () => {
+        refreshCockpit();
+        panelCreate.classList.toggle('wizard-all-open', allOpen);
+        const allBtn = $('[data-wizard-all]', nav);
+        if (allBtn) allBtn.classList.toggle('is-active', allOpen);
+        $$('[data-wizard-nav]', nav).forEach((b) => { b.style.display = allOpen ? 'none' : ''; });
+        $$('.wizard-step', panelCreate).forEach((el) => el.classList.toggle('is-active', !allOpen && +el.dataset.step === wizardStep));
+        $$('[data-wizard-step]', nav).forEach((b) => b.classList.toggle('is-active', !allOpen && +b.dataset.wizardStep === wizardStep));
+      };
       const showWizardStep = (n) => {
+        allOpen = false;
+        store.set('ams-wizard-all', '0');
         wizardStep = Math.min(3, Math.max(1, n));
-        $$('.wizard-step', panelCreate).forEach((el) => el.classList.toggle('is-active', +el.dataset.step === wizardStep));
-        $$('[data-wizard-step]', nav).forEach((b) => b.classList.toggle('is-active', +b.dataset.wizardStep === wizardStep));
+        syncWizardUI();
+        if (wizardStep === 2) {
+          panelCreate.querySelector('.wizard-step[data-step="2"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
       };
       nav.addEventListener('click', (e) => {
+        const allToggle = e.target.closest('[data-wizard-all]');
+        if (allToggle) {
+          allOpen = !allOpen;
+          store.set('ams-wizard-all', allOpen ? '1' : '0');
+          syncWizardUI();
+          return;
+        }
         const stepBtn = e.target.closest('[data-wizard-step]');
         if (stepBtn) { showWizardStep(+stepBtn.dataset.wizardStep); return; }
         const dir = e.target.closest('[data-wizard-nav]');
         if (dir) showWizardStep(wizardStep + (dir.dataset.wizardNav === 'next' ? 1 : -1));
       });
+      panelCreate.addEventListener('change', refreshCockpit);
+      panelCreate.addEventListener('input', debounce(refreshCockpit, 200));
+      syncWizardUI();
       window.__showWizardStep = showWizardStep;
+      window.__syncWizardOnOpen = () => { if (!allOpen) showWizardStep(1); else syncWizardUI(); };
     }
   }
 
-  /* ── showPanel: danh dau panel da load lan dau (lazy) + mo wizard o buoc 1 ── */
+  /* ── showPanel: danh dau panel da load lan dau (lazy) + dong bo wizard ── */
   if (typeof window.showPanel === 'function') {
     const origShowPanel = window.showPanel;
     window.showPanel = function (name) {
@@ -107,7 +171,7 @@
       document.body.dataset.panel = name; // topbar: nut San xuat chi hien o panel Tao phim
       const p = document.getElementById('panel-' + name);
       if (p) p.classList.add('panel-loaded');
-      if (name === 'create' && typeof window.__showWizardStep === 'function') window.__showWizardStep(1);
+      if (name === 'create' && typeof window.__syncWizardOnOpen === 'function') window.__syncWizardOnOpen();
       return r;
     };
     // panel mac dinh luc load trang
