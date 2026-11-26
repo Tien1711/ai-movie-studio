@@ -1415,6 +1415,11 @@ def favicon():
     )
 
 
+@app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
+def chrome_devtools_well_known():
+    return JSONResponse({}, headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/")
 def index():
     return FileResponse(
@@ -4808,7 +4813,15 @@ async def get_muse_settings():
 
 @app.put("/api/settings/muse")
 async def update_muse_settings(payload: MuseSettingsRequest, request: Request):
+    global MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY, _MUSE_KEY_NAME, _MUSE_MAX_CONCURRENT
     _check_local_form_origin(request)
+    connection = muse_config.muse_connection(payload.provider)
+    if payload.provider != MUSE_PROVIDER and (
+        RENDER_QUEUE or any(_is_job_running(job) or job.get("is_retrying") for job in JOBS.values())
+        or any(ACTIVE_SHOT_TASKS.values())
+        or BATCH_MANAGER.list_queue(status="running")["counts"]["running"]
+    ):
+        raise HTTPException(409, "Studio đang dựng. Hãy đợi tác vụ hoàn tất rồi đổi kết nối Muse.")
     path = muse_config.MUSE_SETTINGS_FILE
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -4816,6 +4829,10 @@ async def update_muse_settings(payload: MuseSettingsRequest, request: Request):
     except OSError as error:
         logger.warning("Không lưu được cấu hình Muse: %s", error)
         raise HTTPException(status_code=500, detail="Không lưu được cấu hình Muse.") from error
+    MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY = connection
+    _MUSE_KEY_NAME = "MUSE_BROWSER_KEY" if MUSE_PROVIDER == "browser" else "MUSE2API_KEY"
+    _MUSE_MAX_CONCURRENT = 1 if MUSE_PROVIDER == "browser" else 12
+    muse_config.active_muse_provider.cache_clear()
     return _muse_settings()
 
 
@@ -5232,6 +5249,10 @@ async def api_quick_video_enhance_prompt(req: EnhancePromptReq):
     return {"original": req.prompt, "enhanced": enhanced}
 
 
+# Provider ownership keeps polling and playback attached to the original job.
+_quick_video_providers: Dict[str, str] = {}
+
+
 @app.post("/api/quick-video")
 async def api_quick_video(req: QuickVideoRequest):
     """Tạo video ngắn qua kết nối Muse đang hoạt động."""
@@ -5289,17 +5310,23 @@ async def api_quick_video(req: QuickVideoRequest):
             payload["reference_image"] = ref
 
     payload["timeout"] = 600
+    provider, url, key = MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY
 
     try:
         async with _shared_client_ctx() as client:
             r = await client.post(
-                f"{MUSE_API_URL}/v1/videos",
+                f"{url}/v1/videos",
                 json=payload,
-                headers={"Authorization": f"Bearer {MUSE_API_KEY}", "Content-Type": "application/json"},
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                 timeout=30.0,
             )
         if r.status_code in (200, 202):
             data = r.json()
+            task_id = data.get("task_id") or data.get("id")
+            if isinstance(task_id, str):
+                if len(_quick_video_providers) >= 2048:
+                    _quick_video_providers.pop(next(iter(_quick_video_providers)))
+                _quick_video_providers[task_id] = provider
             return {"success": True, **data}
         return JSONResponse(
             {"success": False, "error": f"Muse HTTP {r.status_code}: {r.text[:300]}"},
@@ -5312,12 +5339,15 @@ async def api_quick_video(req: QuickVideoRequest):
 @app.get("/api/quick-video/{task_id}")
 async def api_quick_video_status(task_id: str):
     """Kiểm tra trạng thái task video nhanh từ kết nối Muse đang hoạt động."""
-    require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
+    provider = _quick_video_providers.get(task_id)
+    _, url, key = muse_config.muse_connection(provider) if provider else (MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY)
+    if not key:
+        raise HTTPException(503, "Chưa cấu hình khóa cho kết nối Muse của tác vụ.")
     try:
         async with _shared_client_ctx() as client:
             r = await client.get(
-                f"{MUSE_API_URL}/v1/videos/{task_id}",
-                headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
+                f"{url}/v1/videos/{task_id}",
+                headers={"Authorization": f"Bearer {key}"},
                 timeout=15.0,
             )
         if r.status_code == 200:
@@ -5348,12 +5378,15 @@ async def api_quick_video_status(task_id: str):
 @app.get("/api/quick-video/{task_id}/stream")
 async def api_quick_video_stream(task_id: str, request: Request):
     """Proxy stream video nhanh từ muse2api về browser (tránh CORS)."""
-    require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
+    provider = _quick_video_providers.get(task_id)
+    _, url, key = muse_config.muse_connection(provider) if provider else (MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY)
+    if not key:
+        raise HTTPException(503, "Chưa cấu hình khóa cho kết nối Muse của tác vụ.")
     try:
         async with _shared_client_ctx() as status_client:
             r = await status_client.get(
-                f"{MUSE_API_URL}/v1/videos/{task_id}",
-                headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
+                f"{url}/v1/videos/{task_id}",
+                headers={"Authorization": f"Bearer {key}"},
                 timeout=15.0,
             )
         if r.status_code != 200:
@@ -5368,10 +5401,10 @@ async def api_quick_video_stream(task_id: str, request: Request):
         if not video_url:
             return JSONResponse({"error": "Video chưa sẵn sàng"}, status_code=404)
         if not video_url.startswith("http"):
-            video_url = f"{MUSE_API_URL}{video_url}"
+            video_url = f"{url}{video_url}"
 
 
-        headers = muse_config.browser_media_headers(video_url, MUSE_API_URL, MUSE_API_KEY)
+        headers = muse_config.browser_media_headers(video_url, url, key)
         headers["Accept-Encoding"] = "identity"
         if request.headers.get("range"):
             headers["Range"] = request.headers["range"]
