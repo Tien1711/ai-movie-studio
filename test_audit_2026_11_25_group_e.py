@@ -742,9 +742,11 @@ def test_concat_list_line_escapes_apostrophe(tmp_path):
 
 def test_batch_concat_uses_escaped_concat_line():  # [RED-OLD]
     src = Path(batch_video_engine.__file__).read_text(encoding="utf-8")
-    assert "_concat_list_line" in src, (
-        "batch_video_engine phai dung _concat_list_line (da escape ') "
-        "thay vi f-string tho cho concat.txt")
+    assert "merge_clips_advanced" in src or "_concat_list_line" in src, (
+        "batch_video_engine phai dung merge_clips_advanced hoac _concat_list_line "
+        "(da escape ') thay vi f-string tho cho concat.txt")
+    assert 'f"file \'{' not in src and "f\"file '{" not in src, (
+        "batch_video_engine khong duoc dung f-string tho cho concat.txt")
 
 
 def test_add_batch_extra_cannot_override_id_status(ws):  # [RED-OLD]

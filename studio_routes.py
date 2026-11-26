@@ -238,8 +238,12 @@ async def import_skill(file: Annotated[UploadFile, File()]):
 def list_skills():
     rows = []
     for p in store().glob("skill_*.json"):
-        data = json.loads(p.read_text(encoding="utf-8"))
-        rows.append({"id": data["id"], "name": data["name"]})
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("id") and data.get("name"):
+                rows.append({"id": data["id"], "name": data["name"]})
+        except (OSError, ValueError, TypeError):
+            continue
     return sorted(rows, key=lambda r: r["name"].casefold())
 
 

@@ -119,6 +119,13 @@ export class ChromeProfiles {
       profiles: this.saved.profiles.filter(profile => profile.id !== id),
     });
     this.online.delete(id);
+    const pending = this.pending.get(id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      this.mediaFiles.discard(pending.command.id);
+      pending.complete({ error: 'Profile Chrome đã bị xóa.' });
+    }
     return this.list();
   }
 

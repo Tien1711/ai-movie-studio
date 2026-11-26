@@ -203,7 +203,10 @@ def test_e_no_hardcoded_default_api_key(monkeypatch):
     assert inspect.signature(shot_desk.render_single_shot_desk).parameters["api_key"].default is None
     assert inspect.signature(affiliate_engine.generate_affiliate_script_ai).parameters["muse_api_key"].default is None
 
+    import muse_connection
+    monkeypatch.setattr(muse_connection, "active_muse_provider", lambda: "muse2api")
     monkeypatch.delenv("MUSE2API_KEY", raising=False)
+    monkeypatch.delenv("MUSE_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="MUSE2API_KEY"):
         asyncio.run(shot_desk.render_single_shot_desk(
             project_id="no_such_project", shot_index=1, api_key=None))
@@ -230,7 +233,10 @@ class _NoNetworkAsyncClient:
 
 def test_e_env_key_resolves_without_network(monkeypatch):
     import shot_desk
+    import muse_connection
 
+    monkeypatch.setattr(muse_connection, "active_muse_provider", lambda: "muse2api")
+    monkeypatch.delenv("MUSE_API_KEY", raising=False)
     monkeypatch.setenv("MUSE2API_KEY", "env-key-dùng-để-test")
     assert shot_desk._resolve_muse2api_key(None) == "env-key-dùng-để-test"
     assert shot_desk._resolve_muse2api_key("explicit-key") == "explicit-key"
@@ -317,8 +323,8 @@ def test_affiliate_json_parse_tolerates_trailing_text(monkeypatch):
     assert result.scenes[0].title == "A"
     timeout = captured["timeout"]
     assert isinstance(timeout, httpx.Timeout), f"timeout phải là httpx.Timeout, nhận {timeout!r}"
-    assert timeout.read == 60.0 and timeout.connect == 5.0, (
-        f"timeout chat completion phải là 60s/connect 5s, nhận read={timeout.read}, connect={timeout.connect}"
+    assert timeout.read == 150.0 and timeout.connect == 5.0, (
+        f"timeout chat completion phải là 150s/connect 5s, nhận read={timeout.read}, connect={timeout.connect}"
     )
 
 

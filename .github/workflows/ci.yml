@@ -33,6 +33,14 @@ jobs:
       - run: python -m pip install -r requirements.txt pytest==8.3.4
       - run: node --check static/js/app.js
       - run: node --check static/js/ui.js
+      - run: node --check static/js/muse-studio.js
+      - run: node --check static/js/studio-editor.js
+      - run: node --check chrome-muse-profile/background.js
+      - run: node --check chrome-muse-profile/muse.js
+      - run: node --check chrome-muse-profile/popup.js
+      - run: node --check scripts/muse_browser_gateway.mjs
+      - run: node --check scripts/chrome_profiles.mjs
+      - run: node --check scripts/browser_media_files.mjs
       - run: node --test scripts/test_muse_browser_gateway.mjs
       - run: >-
           python -m pytest -q

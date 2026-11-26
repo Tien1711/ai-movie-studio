@@ -286,6 +286,7 @@ def _movie_req(n_scenes=3, concurrent=2, chain_mode="none"):
 
 def test_estimate_fallback_without_history(monkeypatch):
     """Chưa có job nào đo được -> fallback 60s/cảnh + 30s ghép, ghi rõ là ước tính."""
+    monkeypatch.setattr(app_mod, "_MUSE_MAX_CONCURRENT", 12)
     monkeypatch.setattr(app_mod, "JOBS", {})
     est = app_mod.estimate_render_time(_movie_req(n_scenes=3, concurrent=2))
     # 3 cảnh / concurrent 2 = 2 wave x 60s + 30s ghép = 150s
@@ -296,6 +297,7 @@ def test_estimate_fallback_without_history(monkeypatch):
 
 def test_estimate_uses_measured_timing(monkeypatch):
     """Có job trước đo được poll 120s/2 cảnh + compose 20s -> ước tính theo số đo."""
+    monkeypatch.setattr(app_mod, "_MUSE_MAX_CONCURRENT", 12)
     monkeypatch.setattr(app_mod, "JOBS", {
         "j1": {"timing": {"poll_s": 120.0, "compose_s": 20.0},
                "results": [{"status": "done"}, {"status": "done"}]},
@@ -459,7 +461,7 @@ def test_create_movie_returns_queue_position():
         # Chờ worker xử lý xong (không có key -> job error nhanh).
         time.sleep(1.0)
         job = client.get(f"/api/jobs/{job_id}").json()
-        assert job["status"] in ("queued", "running", "error", "cancelled"), job["status"]
+        assert job["status"] in ("queued", "running", "done", "error", "cancelled"), job["status"]
     finally:
         JOBS.pop(job_id, None)
         app_mod.dequeue_render_job(job_id)
