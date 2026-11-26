@@ -47,7 +47,16 @@ async function handle(message, sender) {
     }
     throw new Error('Thao tác extension không hợp lệ.');
   }
-  const { museTabId } = await chrome.storage.session.get('museTabId');
+  let { museTabId } = await chrome.storage.session.get('museTabId');
+  if (link && sender.tab && sender.frameId === 0 && sender.url?.startsWith(MUSE_ORIGIN + '/')) {
+    const tracked = Number.isInteger(museTabId)
+      ? await chrome.tabs.get(museTabId).catch(() => null)
+      : null;
+    if (!tracked?.url?.startsWith(MUSE_ORIGIN + '/')) {
+      museTabId = sender.tab.id;
+      await chrome.storage.session.set({ museTabId });
+    }
+  }
   if (!link || !sender.tab || sender.frameId !== 0 || sender.tab.id !== museTabId
       || !sender.url?.startsWith(MUSE_ORIGIN + '/')) {
     return { enabled: false };
@@ -68,6 +77,18 @@ async function handle(message, sender) {
   }
   throw new Error('Thao tác tab Muse không hợp lệ.');
 }
+
+chrome.runtime.onInstalled.addListener(async () => {
+  await storageReady;
+  const { link } = await chrome.storage.local.get('link');
+  if (!link) return;
+  const tabs = await chrome.tabs.query({ url: MUSE_ORIGIN + '/*' }).catch(() => []);
+  const target = tabs.find(tab => tab.active) || tabs[0];
+  if (target?.id) {
+    await chrome.storage.session.set({ museTabId: target.id });
+    await chrome.tabs.reload(target.id).catch(() => {});
+  }
+});
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   handle(message, sender).then(data => respond({ ok: true, data }))

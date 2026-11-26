@@ -209,15 +209,28 @@
     if (files.length) await delay(800);
     const target = editor();
     if (!target) throw new Error('Ô chat Muse đã thay đổi. Hãy thử lại.');
+    const lastBeforeSend = all(MESSAGE).at(-1) || null;
     const previousUsers = new Set(all(USER));
     const previousAnswers = all(ASSISTANT);
+    const previousAnswerSet = new Set(previousAnswers);
     const previousSources = new Set(kind ? all(kind === 'video' ? 'video' : 'img').flatMap(mediaSources) : []);
     const previousLinks = new Set(main ? latestMedia(previousAnswers) : []);
     const previousNotices = new Set(main ? all(ERR).filter(visible) : []);
     const normalizeText = text => text.normalize('NFC').replace(/\s+/g, ' ').trim();
-    const promptStart = normalizeText(prompt).slice(0, 60);
-    const findUserTurn = () => all(USER).find(node => !previousUsers.has(node)
-      && normalizeText(node.innerText || '').includes(promptStart));
+    const fullPromptNorm = normalizeText(prompt);
+    const promptStart = fullPromptNorm.slice(0, 50);
+    const promptBody = fullPromptNorm.slice(
+      Math.min(95, Math.max(0, fullPromptNorm.length - 60)),
+      Math.min(210, fullPromptNorm.length),
+    );
+    const matchesPrompt = node => {
+      const text = normalizeText(node.innerText || '');
+      return text.includes(promptStart) && (!promptBody || text.includes(promptBody));
+    };
+    const findUserTurn = () => all(USER).filter(node => !previousUsers.has(node)
+      && matchesPrompt(node)
+      && (!lastBeforeSend?.isConnected
+        || Boolean(lastBeforeSend.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING))).at(-1) || null;
     fill(target, prompt);
     const send = await waitFor(sendButton, prepareBy);
     if (!send) throw new Error('Không tìm thấy nút gửi trong tab Muse.');
@@ -229,19 +242,57 @@
     );
     if (!sent) throw new Error('Muse chưa xác nhận đã gửi yêu cầu.');
 
+    let activeSent = main ? sent : null;
+    let trackedAnswers = [];
     let previous = '';
     let changed = Date.now();
     let playerSource = null;
     let playerChanged = Date.now();
     while (Date.now() < deadline) {
       if (main && location.pathname !== '/') throw new Error('Tab Muse đã rời chat chính trong lúc xử lý.');
-      if (main && !sent.isConnected) throw new Error('Muse đã tải lại lượt chat. Kiểm tra kết quả trong tab Muse.');
-      if (main && all(USER).some(node => sent.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)) {
-        throw new Error('Có lượt gửi khác trong chat chính. Kiểm tra kết quả trong tab Muse.');
+      if (main && !activeSent?.isConnected) {
+        const remounted = findUserTurn();
+        if (remounted) {
+          activeSent = remounted;
+        } else {
+          if (all(USER).some(node => !previousUsers.has(node) && !matchesPrompt(node))) {
+            throw new Error('Có lượt gửi khác trong chat chính. Kiểm tra kết quả trong tab Muse.');
+          }
+          const stillActive = trackedAnswers.some(node => node.isConnected)
+            || all(ASSISTANT).some(node => !previousAnswerSet.has(node))
+            || visible(document.querySelector(STOP));
+          if (!stillActive) {
+            throw new Error('Muse đã tải lại lượt chat. Kiểm tra kết quả trong tab Muse.');
+          }
+        }
       }
-      const inCurrentTurn = node => !main
-        || Boolean(sent.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+      if (main && activeSent?.isConnected) {
+        const followingUsers = all(USER).filter(
+          node => activeSent.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+        if (followingUsers.some(node => !matchesPrompt(node))) {
+          throw new Error('Có lượt gửi khác trong chat chính. Kiểm tra kết quả trong tab Muse.');
+        }
+        if (followingUsers.length) activeSent = followingUsers.at(-1);
+      }
+      const inCurrentTurn = node => {
+        if (!main) return true;
+        if (activeSent?.isConnected) {
+          return Boolean(activeSent.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+        }
+        if (lastBeforeSend?.isConnected) {
+          return Boolean(lastBeforeSend.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+        }
+        const firstTracked = trackedAnswers.find(item => item.isConnected);
+        if (firstTracked) {
+          return node === firstTracked || firstTracked.contains(node)
+            || Boolean(firstTracked.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING);
+        }
+        const owner = node.closest(ASSISTANT);
+        return owner ? !previousAnswerSet.has(owner) : true;
+      };
       const answers = main ? all(ASSISTANT).filter(inCurrentTurn) : all(ASSISTANT).slice(previousAnswers.length);
+      if (answers.length) trackedAnswers = answers;
       const reply = answers.at(-1)?.innerText?.trim() || '';
       const media = latestMedia(answers).filter(url => !previousLinks.has(url));
       const hasAttachmentSlot = kind && all(ATTACHMENT).some(node => node.isConnected && !node.closest(USER) && inCurrentTurn(node));

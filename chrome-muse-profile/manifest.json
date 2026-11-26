@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Movie Studio – Muse Profile",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Connect a Muse tab from this Chrome profile to AI Movie Studio.",
   "minimum_chrome_version": "120",
   "permissions": ["storage"],

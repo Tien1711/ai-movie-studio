@@ -717,15 +717,26 @@ async def draw_cast(v, progress):
                 await media.generate_keyframe_image(
                     primary_prompt, base, key, str(source), "1:1"
                 )
-            except (RuntimeError, TimeoutError, ValueError, OSError):
+            except (RuntimeError, TimeoutError, ValueError, OSError) as first_err:
                 if not batch.BATCH_MANAGER.get_video(v["id"]):
                     raise asyncio.CancelledError()
+                err_text = str(first_err).lower()
+                transient_dom = any(
+                    k in err_text
+                    for k in ("tải lại lượt chat", "ô chat muse", "chưa xác nhận đã gửi")
+                )
+                retry_prompt = primary_prompt if transient_dom else fallback_prompt
                 progress(
                     index,
-                    "Đổi góc cảnh điện ảnh cho nhân vật " + character["name"],
+                    (
+                        "Thử gửi lại tạo hình nhân vật "
+                        if transient_dom
+                        else "Đổi góc cảnh điện ảnh cho nhân vật "
+                    )
+                    + character["name"],
                 )
                 await media.generate_keyframe_image(
-                    fallback_prompt, base, key, str(source), "1:1"
+                    retry_prompt, base, key, str(source), "1:1"
                 )
             await asyncio.to_thread(image_to_webp, source, dest)
         character["avatar"] = "/api/uploads/" + dest.name
