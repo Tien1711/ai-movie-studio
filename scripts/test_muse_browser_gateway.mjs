@@ -137,7 +137,9 @@ test('a reply without new media fails without reusing an old attachment', async 
   await withGateway(driver, async request => {
     const response = await request('/v1/videos', { prompt: 'A new film.' });
     const job = await response.json();
-    assert.equal((await waitTask(request, '/v1/videos/' + job.id)).status, 'failed');
+    const failed = await waitTask(request, '/v1/videos/' + job.id);
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error, /Muse chưa tạo được tệp media \(Media generated\.\)/);
   });
 });
 

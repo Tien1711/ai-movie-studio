@@ -186,7 +186,10 @@ async function generate(driver, prompt, files, kind, mediaFiles, { chatTimeoutMs
     await new Promise(resolve => setTimeout(resolve, 1000));
   } while (Date.now() < waitUntil);
   if (result.timedOut) throw new RequestError(504, 'Muse phản hồi quá thời gian chờ.');
-  throw new RequestError(502, 'Muse chưa trả về tệp media của yêu cầu này.');
+  const detail = reply.replace(/\s+/g, ' ').trim().slice(0, 220);
+  throw new RequestError(502, detail
+    ? 'Muse chưa tạo được tệp media (' + detail + ')'
+    : 'Muse chưa trả về tệp media của yêu cầu này.');
 }
 
 export function createGateway(driver, key, { profiles = new ChromeProfiles(), openSeparate = () => {} } = {}) {

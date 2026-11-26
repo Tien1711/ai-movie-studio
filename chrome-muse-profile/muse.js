@@ -244,7 +244,8 @@
       const answers = main ? all(ASSISTANT).filter(inCurrentTurn) : all(ASSISTANT).slice(previousAnswers.length);
       const reply = answers.at(-1)?.innerText?.trim() || '';
       const media = latestMedia(answers).filter(url => !previousLinks.has(url));
-      const signature = reply + '\n' + media.join('\n');
+      const hasAttachmentSlot = kind && all(ATTACHMENT).some(node => node.isConnected && !node.closest(USER) && inCurrentTurn(node));
+      const signature = reply + '\n' + media.join('\n') + '\n' + (hasAttachmentSlot ? 'att' : '');
       if (signature !== previous) {
         previous = signature;
         changed = Date.now();
@@ -272,6 +273,11 @@
         }
       }
       if (!isGenerating && (kind ? hasFile : reply) && Date.now() - changed >= 2000) {
+        return { reply, media };
+      }
+      // If Muse declined to generate media and finished a text-only reply with no attachment slot,
+      // return immediately after 5s of DOM silence instead of hanging until the 120s/525s timeout.
+      if (kind && !isGenerating && reply && !hasFile && !playerSource && !hasAttachmentSlot && Date.now() - changed >= 5000) {
         return { reply, media };
       }
       await delay(400);

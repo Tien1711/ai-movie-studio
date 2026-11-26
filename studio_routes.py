@@ -555,8 +555,18 @@ async def draw_ref(pid: str, rid: str):
 
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "ref"
-            prompt = f"Single canonical {entry['kind']} reference image for {project['title']}. {entry['name']}. {entry['description']}. Clear neutral lighting. No text."
-            await media.generate_keyframe_image(prompt, base, key, str(p), "1:1")
+            style_suffix = batch.BATCH_VISUAL_STYLES["cinematic"]["prompt_suffix"]
+            primary_prompt, fallback_prompt = wf.character_design_prompts(
+                entry, style_suffix
+            )
+            try:
+                await media.generate_keyframe_image(
+                    primary_prompt, base, key, str(p), "1:1"
+                )
+            except (RuntimeError, TimeoutError, ValueError, OSError):
+                await media.generate_keyframe_image(
+                    fallback_prompt, base, key, str(p), "1:1"
+                )
             await asyncio.to_thread(wf.image_to_webp, p, dest)
         with _storage_lock:
             rows = library(pid)

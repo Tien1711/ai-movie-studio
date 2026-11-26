@@ -461,3 +461,59 @@ def test_ask_json_parses_browser_dom_prose_and_favicon_not_404(monkeypatch):
     assert video["cast"][0]["name"] == "Trưng Trắc"
     assert video["scenes"][0]["characters"] == ["Trưng Trắc"]
     assert video["scenes"][0]["title"] == "Mê Linh rực lửa"
+
+
+def test_draw_cast_avoids_portrait_filter_and_retries_scenic_fallback(
+    tmp_path, monkeypatch
+):
+    import studio_workflow as workflow
+
+    store = tmp_path / "_batch_videos"
+    store.mkdir()
+    monkeypatch.setattr(batch, "BATCH_DIR", store)
+    monkeypatch.setattr(batch, "QUEUE_FILE", store / "queue.json")
+    monkeypatch.setattr(batch, "QUEUE_BAK_FILE", store / "backup.json")
+    monkeypatch.setattr(
+        batch, "muse_connection", lambda _: ("browser", "https://muse.test", "test-key")
+    )
+
+    items = batch.BATCH_MANAGER.add_batch(
+        ["Tạo video cuộc khởi nghĩa Hai Bà Trưng"],
+        visual_style="3d_pixar",
+        auto_run=False,
+        extra={
+            "guided": True,
+            "cast": [
+                {
+                    "id": "trung_trac",
+                    "kind": "character",
+                    "name": "Trưng Trắc",
+                    "description": (
+                        "Chị cả, nữ tướng oai phong. Gương mặt trái xoan, tóc đen búi cao "
+                        "cài trâm vàng hình phượng. Mặc áo giáp đỏ thẫm viền vàng, cầm thanh kiếm dài."
+                    ),
+                    "auto_cast": True,
+                }
+            ],
+        },
+    )
+    video = items[0]
+    attempts = []
+
+    async def fake_generate(prompt, base, key, target, size):
+        attempts.append(prompt)
+        assert "Single canonical character portrait" not in prompt
+        assert "One clearly visible face" not in prompt
+        assert "Trưng Trắc" not in prompt
+        assert "thanh kiếm dài" not in prompt
+        assert "Gương mặt trái xoan" in prompt
+        assert "áo giáp đỏ thẫm viền vàng" in prompt
+        if len(attempts) == 1:
+            raise RuntimeError("Muse chưa tạo được tệp media (I couldn't generate that portrait)")
+        Image.new("RGB", (48, 48), "crimson").save(target, "PNG")
+
+    monkeypatch.setattr(batch_engine, "generate_keyframe_image", fake_generate)
+    asyncio.run(workflow.draw_cast(video, lambda *_: None))
+    assert len(attempts) == 2
+    assert "misty river" in attempts[1]
+    assert video["cast"][0]["avatar"].startswith("/api/uploads/")
