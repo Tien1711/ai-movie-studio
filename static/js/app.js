@@ -10367,7 +10367,9 @@ function renderFactoryItemHtml(v) {
   const steps = factoryStepsDone(v);
   const durSec = (v.scenes_count || 5) * 6;
   const durLabel = `${Math.floor(durSec / 60)}:${String(durSec % 60).padStart(2, '0')}`;
-  const thumb = `<img src="/api/factory/thumbnail/${encodeURIComponent(v.id)}" alt="" loading="lazy" onerror="this.remove()">`;
+  const thumb = v.status === 'completed'
+    ? `<img src="/api/factory/thumbnail/${encodeURIComponent(v.id)}" alt="" loading="lazy" onerror="this.remove()">`
+    : '';
   const progressHtml = v.status === 'running' ? `
       <div class="factory-job-progress"><div style="width: ${v.progress || 10}%"></div></div>
       <div class="factory-job-meta">⏳ ${escapeHtml(v.current_step || 'Đang xử lý...')} (${v.progress || 10}%)</div>` : '';

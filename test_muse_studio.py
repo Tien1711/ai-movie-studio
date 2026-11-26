@@ -396,3 +396,68 @@ def test_workshop_resumes_script_and_locks_cast(tmp_path, monkeypatch):
         endpoint,
         json={"action": "image", "indexes": [1], "version": current["updated_at"]},
     ).is_success
+
+
+def test_ask_json_parses_browser_dom_prose_and_favicon_not_404(monkeypatch):
+    import studio_workflow as workflow
+
+    client = TestClient(app.app)
+    fav = client.get("/favicon.ico")
+    assert fav.status_code == 200
+    assert "image/svg+xml" in fav.headers["content-type"]
+
+    # 1. Muse Browser DOM innerText with code-block toolbar ("json\nCopy\n") + NBSP + prose
+    browser_dom_reply = (
+        "Dưới đây là kịch bản phân cảnh [1, 2]:\n"
+        "json\nCopy\n"
+        "{\u00a0\"characters\": [{\"name\": \"Trưng Trắc\", \"description\": \"Áo giáp đồng, tóc búi cao\"}],\n"
+        "  \"scenes\": [\n"
+        "    {\"index\": \"1\", \"title\": \"Mê Linh rực lửa\", \"prompt\": \"Wide shot\", \"voiceover\": \"Mùa xuân năm 40.\", \"characters\": [\"Trưng Trắc\", \"Nghĩa quân quần chúng\"],},\n"
+        "  ]\n"
+        "}\n"
+        "Bạn có muốn viết tiếp cảnh sau không?"
+    )
+    parsed = workflow.parse_llm_json(browser_dom_reply)
+    assert isinstance(parsed, dict)
+    assert parsed["characters"][0]["name"] == "Trưng Trắc"
+    assert parsed["scenes"][0]["title"] == "Mê Linh rực lửa"
+
+    # 2. Empty or pure-prose reply raises clear Vietnamese ValueError instead of JSONDecodeError
+    with pytest.raises(ValueError, match="phản hồi rỗng"):
+        workflow.parse_llm_json("   \u200b ")
+    with pytest.raises(ValueError, match="định dạng JSON kịch bản"):
+        workflow.parse_llm_json("Xin lỗi, hệ thống đang bận không thể tạo kịch bản.")
+
+    # 3. End-to-end ask_json + write_beats with noisy Browser reply & unregistered crowd extra
+    monkeypatch.setattr(
+        batch, "muse_connection", lambda _: ("browser", "https://muse.test", "test-key")
+    )
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: client_class(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {"message": {"role": "assistant", "content": browser_dom_reply}}
+                        ]
+                    },
+                )
+            ),
+            **kw,
+        ),
+    )
+    video = {
+        "id": "bv_test01",
+        "visual_style": "cinematic",
+        "workshop": {"topic": "Khởi nghĩa Hai Bà Trưng"},
+        "cast": [],
+        "scenes": [{"index": 1, "duration": 8, "prompt": "", "voiceover": ""}],
+    }
+    asyncio.run(workflow.write_beats(video, [1]))
+    assert video["cast"][0]["name"] == "Trưng Trắc"
+    assert video["scenes"][0]["characters"] == ["Trưng Trắc"]
+    assert video["scenes"][0]["title"] == "Mê Linh rực lửa"

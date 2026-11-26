@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -1393,6 +1393,27 @@ async def film_pipeline(job: Dict, req: MovieRequest):
 
 
 # ── API Routes ─────────────────────────────────────────────────────────────
+
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+    '<stop offset="0%" stop-color="#7c5cfc"/><stop offset="100%" stop-color="#22d3ee"/>'
+    "</linearGradient></defs>"
+    '<rect width="64" height="64" rx="16" fill="#0b0d14"/>'
+    '<rect x="4" y="4" width="56" height="56" rx="13" fill="none" stroke="url(#g)" stroke-width="3"/>'
+    '<polygon points="26,20 26,44 46,32" fill="url(#g)"/>'
+    "</svg>"
+)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(
+        content=_FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
 
 @app.get("/")
 def index():

@@ -384,27 +384,123 @@ def skill_text(data, filename):
     return result
 
 
+def parse_llm_json(raw: str):
+    """Extract a balanced JSON object or array from noisy LLM / Browser DOM replies."""
+    cleaned = (
+        (raw or "")
+        .replace("\ufeff", "")
+        .replace("\u200b", "")
+        .replace("\u00a0", " ")
+        .strip()
+    )
+    if not cleaned:
+        raise ValueError(
+            "Muse trả về phản hồi rỗng. Hãy bấm 'Viết tiếp kịch bản' để thử lại."
+        )
+
+    stripped = re.sub(
+        r"^`{3}(?:json)?\s*|\s*`{3}$", "", cleaned, flags=re.IGNORECASE
+    ).strip()
+    try:
+        direct = json.loads(stripped)
+        if isinstance(direct, (dict, list)):
+            return direct
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    best = None
+    best_span = -1
+
+    for match in re.finditer(r"`{3}(?:json)?\s*([\s\S]*?)`{3}", cleaned, re.IGNORECASE):
+        block = match.group(1).strip()
+        for candidate in (block, re.sub(r",\s*([}\]])", r"\1", block)):
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, (dict, list)) and len(candidate) > best_span:
+                    best = parsed
+                    best_span = len(candidate)
+            except json.JSONDecodeError:
+                continue
+
+    if best is not None:
+        return best
+
+    def _scan_text(text: str):
+        nonlocal best, best_span
+        pos = 0
+        length = len(text)
+        while pos < length:
+            starts = [i for i in (text.find("{", pos), text.find("[", pos)) if i != -1]
+            if not starts:
+                break
+            start = min(starts)
+            try:
+                parsed, end = decoder.raw_decode(text, start)
+                span = end - start
+                if isinstance(parsed, (dict, list)) and span > best_span:
+                    best = parsed
+                    best_span = span
+                pos = max(start + 1, end)
+                continue
+            except json.JSONDecodeError:
+                pass
+            pos = start + 1
+
+    _scan_text(cleaned)
+    relaxed = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    if relaxed != cleaned:
+        _scan_text(relaxed)
+    if best is not None:
+        return best
+
+    snippet = re.sub(r"\s+", " ", cleaned)[:120]
+    raise ValueError(
+        "Muse chưa trả đúng định dạng JSON kịch bản "
+        f"(nhận được: {snippet!r}). Hãy bấm 'Viết tiếp kịch bản' để thử lại."
+    )
+
+
 async def ask_json(system, user):
     import httpx
 
     _, base, key = batch.muse_connection(batch.active_muse_provider())
+    if not key:
+        raise ValueError("Chưa cấu hình khóa kết nối Muse. Kiểm tra mục Cài đặt Muse.")
     async with httpx.AsyncClient(timeout=150) as client:
-        res = await client.post(
-            f"{base}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": "muse-spark",
-                "timeout": 120,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            },
-        )
-        res.raise_for_status()
-        raw = res.json()["choices"][0]["message"]["content"].strip()
-        raw = re.sub(r"^`{3}(?:json)?\s*|\s*`{3}$", "", raw, flags=re.IGNORECASE)
-        return json.loads(raw)
+        try:
+            res = await client.post(
+                f"{base}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": "muse-spark",
+                    "timeout": 120,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                },
+            )
+            res.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise ValueError(
+                "Muse phản hồi quá thời gian chờ. Hãy bấm 'Viết tiếp kịch bản' để thử lại."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            detail = ""
+            try:
+                body = exc.response.json()
+                if isinstance(body, dict):
+                    detail = str(body.get("error") or body.get("detail") or "").strip()
+            except ValueError:
+                detail = ""
+            raise ValueError(
+                detail
+                or f"Muse trả lỗi HTTP {exc.response.status_code}. Hãy kiểm tra tab Muse và thử lại."
+            ) from exc
+        payload = res.json()
+        raw = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        return parse_llm_json(raw)
 
 
 async def write_beats(v, indexes):
@@ -438,10 +534,12 @@ async def write_beats(v, indexes):
     }
     infer_cast = indexes[0] == 1 and not v.get("cast")
     response = (
+        "Output ONLY raw valid JSON with no markdown code fences, no intro text, and no explanation. "
         "Return a JSON object with characters (up to six recurring characters with name and description "
         "of face, hair, costume and stable identifying features) and scenes (array of requested scenes). "
         if infer_cast
-        else "Return only a JSON array of requested scenes. "
+        else "Output ONLY raw valid JSON with no markdown code fences, no intro text, and no explanation. "
+        "Return only a JSON array of requested scenes. "
     )
     rows = await ask_json(
         response
@@ -455,10 +553,14 @@ async def write_beats(v, indexes):
     )
     cast = []
     if infer_cast:
+        if not isinstance(rows, dict):
+            raise ValueError("Muse trả kịch bản mở đầu không đúng cấu trúc JSON object.")
         characters = rows.get("characters")
-        if not isinstance(characters, list) or len(characters) > 6:
+        if not isinstance(characters, list):
             raise ValueError("Muse trả hồ sơ nhân vật không hợp lệ.")
-        for character in characters:
+        for character in characters[:6]:
+            if not isinstance(character, dict):
+                raise ValueError("Muse trả hồ sơ nhân vật không hợp lệ.")
             name, description = character.get("name"), character.get("description")
             if (
                 not isinstance(name, str)
@@ -477,7 +579,22 @@ async def write_beats(v, indexes):
                 }
             )
         rows = rows.get("scenes")
-    if not isinstance(rows, list) or [r.get("index") for r in rows] != indexes:
+    elif isinstance(rows, dict) and isinstance(rows.get("scenes"), list):
+        rows = rows["scenes"]
+    if not isinstance(rows, list) or len(rows) != len(indexes):
+        raise ValueError(
+            "Muse trả sai số cảnh. Có thể viết tiếp từ nhóm chưa hoàn thành."
+        )
+    normalized_indexes = []
+    for pos, r in enumerate(rows):
+        if not isinstance(r, dict):
+            raise ValueError("Dữ liệu phân cảnh không hợp lệ.")
+        raw_idx = r.get("index")
+        if isinstance(raw_idx, str) and raw_idx.strip().isdigit():
+            raw_idx = int(raw_idx.strip())
+            r["index"] = raw_idx
+        normalized_indexes.append(raw_idx)
+    if normalized_indexes != indexes:
         raise ValueError(
             "Muse trả sai số cảnh. Có thể viết tiếp từ nhóm chưa hoàn thành."
         )
@@ -487,11 +604,23 @@ async def write_beats(v, indexes):
                 raise ValueError("Kịch bản trả về thiếu tiêu đề, prompt hoặc lời kể.")
     if infer_cast:
         v["cast"] = cast
+    registered_aliases = {
+        str(alias).strip().casefold()
+        for c in v.get("cast", [])
+        if c.get("kind", "character") == "character"
+        for alias in (c.get("id"), c.get("name"), *(c.get("aliases") or []))
+        if alias
+    }
     for r in rows:
         target = selected_scene(v, r["index"])
         names = r.get("characters", [])
         if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
             raise ValueError("Danh sách nhân vật của cảnh không hợp lệ.")
+        names = [
+            n.strip()
+            for n in names
+            if n.strip() and n.strip().casefold() in registered_aliases
+        ]
         resolve_scene_cast({"characters": names}, v.get("cast", []))
         target.update(
             characters=names,
