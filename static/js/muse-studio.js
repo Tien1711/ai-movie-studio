@@ -277,7 +277,10 @@ studioElement('storyVideosList').addEventListener('click', e => {
   studioState.filter = 'all';
   showPanel('muse-studio');
 });
-setInterval(() => {
-  if (!document.hidden && studioElement('panel-muse-studio').classList.contains('active') &&
-      studioState.videos.some(v => ['running', 'queued'].includes(v.status))) refreshMuseBoard();
+let _musePollInFlight = false;
+setInterval(async () => {
+  if (_musePollInFlight || document.hidden || !studioElement('panel-muse-studio').classList.contains('active')) return;
+  if (!studioState.videos.some(v => ['running', 'queued'].includes(v.status))) return;
+  _musePollInFlight = true;
+  try { await refreshMuseBoard(); } finally { _musePollInFlight = false; }
 }, 5000);

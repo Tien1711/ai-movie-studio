@@ -159,20 +159,23 @@ export class ChromeProfiles {
     return job;
   }
 
-  appendMedia(id, data) {
+  async appendMedia(id, data) {
     const job = this.leasedJob(id, data);
-    if (!job.command.kind || data.offset !== job.mediaSize) {
+    if (!job.command.kind || data.offset !== job.mediaSize || job.writing) {
       throw new RequestError(409, 'Dữ liệu media gửi sai thứ tự.');
     }
+    job.writing = true;
     try {
-      job.mediaSize = this.mediaFiles.append(job.command.id, job.mediaSize, data.data, job.command.kind);
+      job.mediaSize = await this.mediaFiles.append(job.command.id, job.mediaSize, data.data, job.command.kind);
     } catch (error) {
       throw new RequestError(422, error.message);
+    } finally {
+      job.writing = false;
     }
     return { size: job.mediaSize };
   }
 
-  finish(id, data) {
+  async finish(id, data) {
     const pending = this.leasedJob(id, data);
     clearTimeout(pending.timer);
     this.pending.delete(id);
@@ -180,12 +183,12 @@ export class ChromeProfiles {
     let mediaError;
     try {
       if (pending.command.kind && (data.mediaUploaded === true || (pending.command.kind === 'video' && data.videoUploaded === true)) && !data.error) {
-        mediaUrl = this.mediaFiles.finish(pending.command.id, pending.mediaSize, pending.command.kind);
+        mediaUrl = await this.mediaFiles.finish(pending.command.id, pending.mediaSize, pending.command.kind);
       }
     } catch (error) {
       mediaError = error.message;
     } finally {
-      this.mediaFiles.discard(pending.command.id);
+      await this.mediaFiles.discardAsync(pending.command.id);
     }
     const reply = typeof data.reply === 'string' ? data.reply.slice(0, 512000) : '';
     const media = Array.isArray(data.media)

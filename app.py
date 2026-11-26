@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -398,8 +399,34 @@ def resolve_safe_music_path(filename: str) -> Path:
         raise HTTPException(status_code=400, detail="Đường dẫn file nhạc nằm ngoài thư mục nhạc")
     return target
 
+class _SelectiveGZipMiddleware:
+    """Nén GZip cho HTML/CSS/JS/JSON >= 1KB, nhưng bỏ qua SSE (/sse) và các
+    luồng media đã nén sẵn (.mp4/.webp/.mp3/.zip) để không buffer SSE hay tốn CPU vô ích."""
+
+    _SKIP_SUFFIXES = (".mp4", ".webm", ".webp", ".png", ".jpg", ".jpeg", ".gif", ".mp3", ".wav", ".ogg", ".m4a", ".zip")
+
+    def __init__(self, app):
+        self.raw_app = app
+        self.gzip_app = GZipMiddleware(app, minimum_size=1000, compresslevel=5)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = (scope.get("path") or "").lower()
+            if (
+                path.endswith("/sse")
+                or "/video/" in path
+                or "/clips/" in path
+                or "/download/" in path
+                or path.endswith(self._SKIP_SUFFIXES)
+            ):
+                await self.raw_app(scope, receive, send)
+                return
+        await self.gzip_app(scope, receive, send)
+
+
 # ── FastAPI App ────────────────────────────────────────────────────────────
 app = FastAPI(title="AI Movie Studio", version="1.0.0", lifespan=lifespan)
+app.add_middleware(_SelectiveGZipMiddleware)
 app.add_middleware(_ApiKeyAuthMiddleware)
 app.add_middleware(_RateLimitMiddleware)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -653,13 +680,36 @@ def save_job(job: Dict):
         raise
 
 
+_LAST_PROGRESS_SAVE: Dict[str, float] = {}
+_PROGRESS_SAVE_LOCK = threading.Lock()
+
+
 def _save_job_best_effort(job: Dict) -> None:
     """Save dùng trong progress callback / except-handler của pipeline:
     log warning khi lỗi, không raise (pipeline đang render không được chết vì đĩa)."""
     try:
         save_job(job)
+        jid = job.get("id")
+        if jid:
+            with _PROGRESS_SAVE_LOCK:
+                _LAST_PROGRESS_SAVE[jid] = time.monotonic()
     except Exception as exc:
         logger.warning("save_job (best-effort) thất bại cho job %s: %s", job.get("id"), exc)
+
+
+def _save_job_progress_throttled(job: Dict, *, force: bool = False, min_interval: float = 1.5) -> None:
+    """Giảm tải fsync đĩa trong vòng lặp poll tiến độ đa luồng: các tick trung gian
+    ('running') chỉ flush tối đa 1 lần / 1.5s mỗi job; mốc chuyển trạng thái
+    ('done' / 'error' / force=True) luôn ghi ngay lập tức."""
+    jid = job.get("id") or ""
+    now = time.monotonic()
+    if not force and jid:
+        with _PROGRESS_SAVE_LOCK:
+            last = _LAST_PROGRESS_SAVE.get(jid, 0.0)
+            if now - last < min_interval:
+                return
+            _LAST_PROGRESS_SAVE[jid] = now
+    _save_job_best_effort(job)
 
 
 def _save_job_or_http500(job: Dict) -> None:
@@ -1091,7 +1141,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             _set_scene(job, idx, sc)
             done = sum(1 for v in job["scenes"].values() if v.get("status") == "done")
             job["progress"] = min(74, 5 + int(done / max(total, 1) * 70))
-            _save_job_best_effort(job)
+            _save_job_progress_throttled(job, force=(st != "running"))
 
         scenes_dicts = [req.render_scene(s) for s in req.scenes]
 
@@ -1987,7 +2037,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
         if extra:
             sc.update(extra)
         _set_scene(job, idx, sc)
-        _save_job_best_effort(job)
+        _save_job_progress_throttled(job, force=(st != "running"))
 
     try:
         from batch_engine import process_scene

@@ -1,4 +1,5 @@
-import { copyFileSync, createReadStream, appendFileSync, closeSync, mkdirSync, mkdtempSync, openSync, readSync, readdirSync, renameSync, rmSync, rmdirSync, statSync } from 'node:fs';
+import { createReadStream, rmSync, statSync } from 'node:fs';
+import { appendFile, copyFile, mkdir, mkdtemp, open, readdir, rename, rm, rmdir, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -34,7 +35,11 @@ export class BrowserMediaFiles {
     if (this.dir) rmSync(join(this.dir, id + '.partial'), { force: true });
   }
 
-  append(id, offset, data, kind) {
+  async discardAsync(id) {
+    if (this.dir) await rm(join(this.dir, id + '.partial'), { force: true });
+  }
+
+  async append(id, offset, data, kind) {
     if (!this.dir) throw new Error('Gateway chưa có thư mục lưu media Browser.');
     if (!Number.isSafeInteger(offset) || offset < 0 || typeof data !== 'string'
         || data.length > Math.ceil(CHUNK_LIMIT / 3) * 4) {
@@ -44,26 +49,26 @@ export class BrowserMediaFiles {
     if (!chunk.length || chunk.length > CHUNK_LIMIT || offset + chunk.length > MEDIA_LIMIT[kind]) {
       throw new Error('Tệp media vượt giới hạn hoặc gói dữ liệu không hợp lệ.');
     }
-    mkdirSync(this.dir, { recursive: true });
-    appendFileSync(join(this.dir, id + '.partial'), chunk, { mode: 0o600 });
+    await mkdir(this.dir, { recursive: true });
+    await appendFile(join(this.dir, id + '.partial'), chunk, { mode: 0o600 });
     return offset + chunk.length;
   }
 
-  finish(id, size, kind) {
+  async finish(id, size, kind) {
     if (!this.dir || size < 100) throw new Error('Tệp media Muse rỗng hoặc không đầy đủ.');
     const path = join(this.dir, id + '.partial');
-    const descriptor = openSync(path, 'r');
+    const handle = await open(path, 'r');
     const head = Buffer.alloc(16);
     try {
-      readSync(descriptor, head, 0, head.length, 0);
+      await handle.read(head, 0, head.length, 0);
     } finally {
-      closeSync(descriptor);
+      await handle.close();
     }
     const ext = mediaExtension(head, kind);
     if (!ext) throw new Error('Muse không trả về tệp ' + (kind === 'video' ? 'video' : 'ảnh') + ' hợp lệ.');
     const file = randomUUID() + '.' + ext;
-    renameSync(path, join(this.dir, file));
-    this.prune(file);
+    await rename(path, join(this.dir, file));
+    await this.prune(file);
     return MEDIA_PATH + file;
   }
 
@@ -71,55 +76,59 @@ export class BrowserMediaFiles {
     if (!this.dir || typeof driver.downloadMedia !== 'function') return null;
     const blobs = [...new Set(sources)].filter(url => /^blob:https:\/\/muse\.ai\/[a-f0-9-]{36}$/i.test(url)).slice(0, 4);
     if (!blobs.length) return null;
-    mkdirSync(this.dir, { recursive: true });
-    const staging = mkdtempSync(join(resolve(this.dir), 'driver-'));
+    await mkdir(this.dir, { recursive: true });
+    const staging = await mkdtemp(join(resolve(this.dir), 'driver-'));
     try {
       for (const blob of blobs) {
-        // Muse-Chat-MCP fetches the blob within its currently logged-in tab.
         const { saved } = await driver.downloadMedia([blob], staging);
         const file = saved.find(item => item.file && dirname(resolve(item.file)) === staging);
         if (!file) continue;
         const input = join(staging, basename(file.file));
-        const size = statSync(input).size;
+        const size = (await stat(input)).size;
         if (size < 100 || size > MEDIA_LIMIT[kind]) continue;
         const id = randomUUID();
         try {
-          copyFileSync(input, join(this.dir, id + '.partial'));
-          return this.finish(id, size, kind);
+          await copyFile(input, join(this.dir, id + '.partial'));
+          return await this.finish(id, size, kind);
         } catch {
           // A new assistant reply can contain both an image blob and a video blob.
         } finally {
-          this.discard(id);
+          await this.discardAsync(id);
         }
       }
       return null;
     } finally {
-      for (const entry of readdirSync(staging, { withFileTypes: true })) {
-        if (entry.isFile()) rmSync(join(staging, entry.name), { force: true });
+      for (const entry of await readdir(staging, { withFileTypes: true })) {
+        if (entry.isFile()) await rm(join(staging, entry.name), { force: true });
       }
-      rmdirSync(staging);
+      await rmdir(staging);
     }
   }
 
-  prune(currentFile) {
+  async prune(currentFile) {
     const now = Date.now();
     let total = 0;
     const files = [];
-    for (const entry of readdirSync(this.dir, { withFileTypes: true })) {
+    for (const entry of await readdir(this.dir, { withFileTypes: true })) {
       if (!entry.isFile() || !MEDIA_FILES.test(entry.name)) continue;
       const path = join(this.dir, entry.name);
-      const stat = statSync(path);
-      if (now - stat.mtimeMs >= MEDIA_TTL) {
-        rmSync(path, { force: true });
+      let info;
+      try {
+        info = await stat(path);
+      } catch {
+        continue;
+      }
+      if (now - info.mtimeMs >= MEDIA_TTL) {
+        await rm(path, { force: true });
       } else if (!entry.name.endsWith('.partial')) {
-        total += stat.size;
-        if (entry.name !== currentFile) files.push({ path, stat });
+        total += info.size;
+        if (entry.name !== currentFile) files.push({ path, stat: info });
       }
     }
-    for (const { path, stat } of files.sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs)) {
+    for (const { path, stat: info } of files.sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs)) {
       if (total <= 1024 * 1024 * 1024) break;
-      rmSync(path, { force: true });
-      total -= stat.size;
+      await rm(path, { force: true });
+      total -= info.size;
     }
   }
 

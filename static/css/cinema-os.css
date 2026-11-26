@@ -41,7 +41,22 @@
     linear-gradient(to right, var(--os-grid-line) 1px, transparent 1px),
     linear-gradient(to bottom, var(--os-grid-line) 1px, transparent 1px);
   background-size: 100% 100%, 100% 100%, 100% 100%, 28px 28px, 28px 28px;
-  background-attachment: local;
+}
+
+/* 60fps Scroll Performance: remove per-card GPU blur & skip offscreen layout */
+.sd-shot-card,
+.sd-sb-card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: var(--os-card-sheen), var(--bg1);
+}
+.sd-shot-card,
+.sd-sb-card,
+.ms-shot,
+.batch-item-card,
+.factory-job {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
 }
 
 [data-theme="light"] .main {

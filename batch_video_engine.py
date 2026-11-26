@@ -733,17 +733,23 @@ def is_safe_video_id(vid: str) -> bool:
 
 # ── 4. Quản Lý Hàng Đợi Tạo Video Hàng Loạt (Batch Video Queue Manager) ───────
 class BatchVideoManager:
-    """Quản trị danh sách hàng đợi các video hàng loạt trên đĩa."""
+    """Quản trị danh sách hàng đợi các video hàng loạt trên đĩa (có RAM cache theo mtime_ns)."""
 
     def __init__(self):
+        self._cache_sig: Optional[Tuple[str, int, int]] = None
+        self._cache_videos: List[Dict[str, Any]] = []
         self._ensure_storage()
         self.recovered_on_init = self._recover_interrupted_jobs()
 
     def _ensure_storage(self):
         with _QUEUE_LOCK:
             if not QUEUE_FILE.exists():
+                QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
                 initial_data = {"videos": [], "updated_at": time.time()}
-                QUEUE_FILE.write_text(json.dumps(initial_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                QUEUE_FILE.write_text(json.dumps(initial_data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+                st = QUEUE_FILE.stat()
+                self._cache_sig = (str(QUEUE_FILE), st.st_mtime_ns, st.st_size)
+                self._cache_videos = []
 
     def _recover_interrupted_jobs(self) -> int:
         """Khôi phục các job đang dở dang 'running' thành 'queued' khi khởi động server (Point 1)."""
@@ -763,12 +769,19 @@ class BatchVideoManager:
             return recovered
 
     def _read_queue(self) -> List[Dict[str, Any]]:
+        import copy
         with _QUEUE_LOCK:
             self._ensure_storage()
-            # Thử đọc file chính
             try:
+                st = QUEUE_FILE.stat()
+                sig = (str(QUEUE_FILE), st.st_mtime_ns, st.st_size)
+                if sig == self._cache_sig:
+                    return copy.deepcopy(self._cache_videos)
                 data = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
-                return data.get("videos", [])
+                videos = data.get("videos", [])
+                self._cache_sig = sig
+                self._cache_videos = copy.deepcopy(videos)
+                return videos
             except Exception as e:
                 logger.error("Lỗi đọc file chính batch_queue.json: %s. Thử khôi phục từ .bak...", e)
 
@@ -784,18 +797,23 @@ class BatchVideoManager:
             return []
 
     def _write_queue(self, videos: List[Dict[str, Any]]):
-        """Ghi file hàng đợi nguyên tử (atomic write) thông qua file tạm và sao lưu .bak."""
+        """Ghi file hàng đợi nguyên tử (atomic write) thông qua file tạm, sao lưu .bak và cập nhật RAM cache."""
+        import copy
         with _QUEUE_LOCK:
+            QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
             payload = {"videos": videos, "updated_at": time.time()}
-            content = json.dumps(payload, ensure_ascii=False, indent=2)
+            content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             # 1. Ghi ra file tạm trước
             tmp_file = QUEUE_FILE.with_suffix(".tmp")
             tmp_file.write_text(content, encoding="utf-8")
             # 2. Thay thế nguyên tử file chính
             os.replace(tmp_file, QUEUE_FILE)
-            # 3. Cập nhật bản sao lưu an toàn .bak
+            st = QUEUE_FILE.stat()
+            self._cache_sig = (str(QUEUE_FILE), st.st_mtime_ns, st.st_size)
+            self._cache_videos = copy.deepcopy(videos)
+            # 3. Cập nhật bản sao lưu an toàn .bak bằng copy mức hệ điều hành
             try:
-                QUEUE_BAK_FILE.write_text(content, encoding="utf-8")
+                shutil.copyfile(QUEUE_FILE, QUEUE_BAK_FILE)
             except Exception as e:
                 logger.warning("Không thể ghi file sao lưu .bak: %s", e)
 

@@ -254,8 +254,8 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
         const data = await jsonBody(request);
         let result;
         if (path === '/extension/poll') result = profiles.poll(id, data);
-        else if (path.endsWith('-chunk')) result = profiles.appendMedia(id, data);
-        else result = profiles.finish(id, data);
+        else if (path.endsWith('-chunk')) result = await profiles.appendMedia(id, data);
+        else result = await profiles.finish(id, data);
         return send(response, 200, result);
       }
       if (!authenticated(request, key)) return send(response, 401, { error: 'Khóa Browser không hợp lệ.' });
