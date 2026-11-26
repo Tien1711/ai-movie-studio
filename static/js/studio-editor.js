@@ -994,6 +994,17 @@ function drawGuidedBoard(board, v) {
     "</div>";
   const shot = (s) => {
     const index = Number(s.index),
+      state = s.error
+        ? "error"
+        : s.approved
+          ? "approved"
+          : s.clip
+            ? "clip"
+            : s.frame_approved
+              ? "image-approved"
+              : s.frame
+                ? "image"
+                : "empty",
       st = s.error
         ? "Có lỗi"
         : s.approved
@@ -1006,17 +1017,19 @@ function drawGuidedBoard(board, v) {
                 ? "Chờ duyệt ảnh"
                 : "Chưa có ảnh";
     return (
-      '<article class="ms-shot" data-index="' +
+      '<article class="ms-shot" data-state="' +
+      state +
+      '" data-index="' +
       index +
       '"><header><span class="ms-index">' +
       index +
       "</span><div><strong>" +
       esc(s.title || "Cảnh " + index) +
       "</strong><small>" +
-      st +
-      " · " +
       Number(s.duration) +
-      " giây</small></div></header>" +
+      ' giây</small></div><span class="ms-badge">' +
+      st +
+      "</span></header>" +
       '<div class="ms-pair"><div><div class="ms-media">' +
       (s.frame
         ? '<img loading="lazy" src="' +

@@ -9618,7 +9618,7 @@ async function loadBatchQueue() {
     const queueSig = videos.map(v => `${v.id}:${v.status}:${v.progress}:${v.current_step || ''}`).join('|');
     if (container.getAttribute('data-queue-sig') !== queueSig) {
       container.setAttribute('data-queue-sig', queueSig);
-      container.innerHTML = videos.map(v => renderBatchItemHtml(v)).join('');
+      container.innerHTML = videos.map((v, idx) => renderBatchItemHtml(v, idx)).join('');
     }
 
     // Nếu đang chọn 1 video, cập nhật chi tiết của nó
@@ -9633,7 +9633,7 @@ async function loadBatchQueue() {
   }
 }
 
-function renderBatchItemHtml(v) {
+function renderBatchItemHtml(v, idx = 0) {
   const isSelected = v.id === window.batchVideoState.selectedId;
   const isChecked = window.batchVideoState.selectedSet.has(v.id);
 
@@ -9674,7 +9674,7 @@ function renderBatchItemHtml(v) {
       <div class="batch-item-head">
         <div class="batch-item-title-row">
           <input type="checkbox" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation(); toggleBatchItemCheck('${v.id}', this.checked)">
-          <span class="batch-order-badge">#${v.order_num}</span>
+          <span class="batch-order-badge">#${v.order_num ?? (idx + 1)}</span>
           <span>${escapeHtml(v.title || v.prompt)}</span>
         </div>
         <div class="fx fx-ac fx-g6">
