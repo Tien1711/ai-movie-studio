@@ -67,6 +67,7 @@ from composer import (
     QUALITY_PROFILES,
     _resolve_ffmpeg,
 )
+from muse_connection import browser_media_headers
 from batch_engine import generate_tts_with_status, poll_video_task, sanitize_prompt_heuristics, extract_last_frame
 
 
@@ -112,8 +113,8 @@ def _resolve_muse2api_key(api_key: Optional[str]) -> str:
     """
     key = (api_key or "").strip() if isinstance(api_key, str) else ""
     if not key:
-        from muse_connection import muse_connection
-        provider, _, configured_key = muse_connection()
+        from muse_connection import active_muse_provider, muse_connection
+        provider, _, configured_key = muse_connection(active_muse_provider())
         key = (configured_key or "").strip()
         if not key:
             setting = "MUSE_BROWSER_KEY" if provider == "browser" else "MUSE2API_KEY"
@@ -404,6 +405,7 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
                     "last_frame_url": last_url,
                     "transition_in": s.get("transition_in"),
                     "transition_out": s.get("transition_out"),
+                    "dialogue":s.get("dialogue",""), "setting":s.get("setting",""), "new_segment":bool(s.get("new_segment")),
                     "transition_note": s.get("transition_note", ""),
                     "characters": s.get("characters", []),
                     # Vòng đời trạng thái
@@ -434,7 +436,7 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
                 "default_voice_mode": manifest.get("default_voice_mode", "narration"),
                 "total_duration": _parse_shot_duration(manifest.get("total_duration", len(shots_data) * 10), default=len(shots_data) * 10),
                 "shot_duration": _parse_shot_duration(manifest.get("shot_duration", 10), default=10),
-                "characters": characters,
+                "characters": characters, "style_locks":manifest.get("style_locks") or {},
                 "shots": shots_data,
                 "created_at": int(time.time()),
                 "updated_at": int(time.time()),
@@ -687,6 +689,7 @@ async def render_single_shot_desk(
     use_compliance: bool = False,
     custom_prompt: Optional[str] = None,
     progress_cb: Optional[Any] = None,
+    chain: bool = True,
 ) -> Dict[str, Any]:
     """
     Quy trình render chuyên nghiệp theo chuẩn Shot Desk:
@@ -705,8 +708,8 @@ async def render_single_shot_desk(
     # Resolve key NGAY ĐẦU, trước mọi công việc render/TTS/API.
     api_key = _resolve_muse2api_key(api_key)
     if not base_url:
-        from muse_connection import muse_connection
-        _, base_url, _ = muse_connection()
+        from muse_connection import active_muse_provider, muse_connection
+        _, base_url, _ = muse_connection(active_muse_provider())
     proj = get_shot_desk_project(project_id)
     if not proj:
         raise ValueError(f"Không tìm thấy dự án Shot Desk '{project_id}'")
@@ -721,6 +724,16 @@ async def render_single_shot_desk(
 
     # Chuẩn bị Prompt
     active_prompt = custom_prompt or (shot.get("compliance_prompt") if use_compliance and shot.get("compliance_prompt") else shot.get("prompt", ""))
+    from batch_engine import apply_style_locks, character_block_of
+    from consistency import opening_reference, resolve_scene_cast
+    cast, _ = resolve_scene_cast(shot, proj.get("characters") or [])
+    for ch in cast:
+        block = character_block_of(ch)
+        if block not in active_prompt:
+            active_prompt += "\n" + block
+    active_prompt = apply_style_locks(active_prompt, proj.get("style_locks"))
+    if shot.get("setting"):
+        active_prompt += "\nSetting: " + shot["setting"]
     shot["used_prompt"] = active_prompt
     shot["used_compliance"] = bool(use_compliance or (custom_prompt == shot.get("compliance_prompt")))
 
@@ -748,6 +761,15 @@ async def render_single_shot_desk(
     voiceover = shot.get("voiceover", "").strip()
     voice_mode = shot.get("voice_mode", proj.get("default_voice_mode", "narration"))
     speaker = (shot.get("speaker") or "").strip()
+    segments = []
+    if shot.get("dialogue"):
+        _, segments = resolve_scene_cast(shot,proj.get("characters") or [])
+        voiceover = " ".join(item["text"] for item in segments)
+    elif voice_mode == "dialogue" and voiceover and (speaker or shot.get("characters")):
+        _, lines = resolve_scene_cast({"characters":shot.get("characters") or [],
+            "dialogue": (speaker+": " if speaker else "")+voiceover},proj.get("characters") or [])
+        voice = lines[0]["voice"]
+        speaker = lines[0]["character"]
     lip_sync = bool(shot.get("lip_sync", False) or (voice_mode == "dialogue"))
     is_ai_voice = (voice_mode in ("ai_voice", "native", "none", "no_dub"))
 
@@ -763,9 +785,12 @@ async def render_single_shot_desk(
         # luon (theo chinh sach 4d8a563: khong tao video cam/sai tieng) —
         # xoa file audio cu/partial/silent con sot de buoc compose khong
         # bao gio long nham tieng cu.
-        actual_audio_dur, tts_failed, tts_error = await generate_tts_with_status(
-            voiceover, voice, audio_out_path
-        )
+        if segments:
+            from batch_engine import generate_multi_voice_tts_with_status
+            actual_audio_dur, tts_failed, tts_error = await generate_multi_voice_tts_with_status(
+                segments,audio_out_path,str(proj_dir/"audio"/f"segs_{shot_index:03d}"))
+        else:
+            actual_audio_dur, tts_failed, tts_error = await generate_tts_with_status(voiceover, voice, audio_out_path)
         if tts_failed:
             try:
                 os.remove(audio_out_path)
@@ -849,6 +874,7 @@ async def render_single_shot_desk(
             if not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation"]):
                 spk_clause = f"character {speaker}" if speaker and speaker.lower() not in ("narrator", "thuyết minh", "người kể chuyện", "none", "") else "character"
                 clean_p = f"{clean_p}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue"
+            clean_p += "\nVerbatim dialogue: " + (shot.get("dialogue") or voiceover)
         elif voice_mode == "narration" and not lip_sync:
             if not any(k in p_lower for k in ["no mouth movement", "calm acting", "no lip movement"]):
                 clean_p = f"{clean_p}, cinematic calm acting expression, natural subtle breathing, no extraneous mouth flapping"
@@ -902,6 +928,10 @@ async def render_single_shot_desk(
             # Khởi đầu từ First Frame (hoặc Middle Frame nếu không có First Frame) và định hướng về Last Frame
             # Loại bỏ hoàn toàn việc chia tách sub-clip gây lặp lại hành động, lặp lời thoại TTS/AI và sinh vết cắt jump-cut.
             start_frame_path = first_frame_path if (first_frame_path and first_frame_path.exists()) else (middle_frame_path if (middle_frame_path and middle_frame_path.exists()) else None)
+            prev = next((s for s in proj.get("shots", []) if s["index"]==shot_index-1), None)
+            previous_frame = resolve_safe_frame_path(proj_dir, prev.get("rendered_last_frame")) if prev and chain and not prev.get("error") and (prev.get("qc") or {}).get("passed", True) else None
+            retry = Path(final_clip_out).is_file()
+            start_frame_path, source = opening_reference(shot, prev, previous_frame, start_frame_path, retry=retry or not chain)
             end_frame_anchor = last_frame_path if (last_frame_path and last_frame_path.exists()) else None
 
             if progress_cb:
@@ -913,7 +943,8 @@ async def render_single_shot_desk(
             raw_video_path = str(proj_dir / "clips" / f"shot_{shot_index:03d}_raw.mp4")
             # Tải video theo chunk (stream) + giới hạn size, không nạp hết vào RAM.
             downloaded = 0
-            async with client.stream("GET", v_url, timeout=120.0) as r_vid:
+            media_headers = browser_media_headers(v_url, base_url, api_key)
+            async with client.stream("GET", v_url, timeout=120.0, **({"headers": media_headers} if media_headers else {})) as r_vid:
                 if r_vid.status_code != 200:
                     raise RuntimeError(f"Tải video clip thất bại (HTTP {r_vid.status_code})")
                 declared = r_vid.headers.get("content-length")
@@ -1023,15 +1054,22 @@ async def render_single_shot_desk(
                 print(f"[ShotDesk] Warning extracting native AI audio: {e}")
 
         has_audio = os.path.exists(audio_out_path) and os.path.getsize(audio_out_path) > 500
+        from qc import qc_clip, expected_resolution_for_size
+        width,height = expected_resolution_for_size(aspect_ratio)
+        report = await asyncio.to_thread(qc_clip,final_clip_out,max(float(total_shot_dur),float(actual_audio_dur)),width,height,30)
+        frame = proj_dir / "clips" / f"shot_{shot_index:03d}_end.jpg"
+        extracted = await asyncio.to_thread(extract_last_frame, final_clip_out, str(frame))
         shot_updates = {
+            "rendered_last_frame":frame.relative_to(proj_dir).as_posix() if extracted else None,
+            "reference_source":source, "qc":report,
             "status": "review",
             "error": None,
             "video_url": f"/api/shot-desk/projects/{project_id}/shots/{shot_index}/video",
             "audio_url": f"/api/shot-desk/projects/{project_id}/shots/{shot_index}/audio" if has_audio else None,
             "audit": {
-                "character_check": "Khớp Character Block",
+                "character_check": "Chờ người xem duyệt",
                 "aspect_ratio_check": aspect_ratio,
-                "watermark_clean": True,
+                "watermark_clean": None,
                 "continuity_note": shot.get("transition_note", "Sẵn sàng cho timeline")
             }
         }
@@ -1091,6 +1129,8 @@ def approve_all_shot_desk_shots(project_id: str, only_with_video: bool = True) -
         approved_shots = []
 
         for s in proj.get("shots", []):
+            if (s.get("qc") or {}).get("passed") is False:
+                continue
             if s.get("status") in ("approved", "done"):
                 continue
 

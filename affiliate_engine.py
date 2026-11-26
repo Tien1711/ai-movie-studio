@@ -570,7 +570,9 @@ def build_product_dna_lock(
     return (
         f"[{PRODUCT_LOCK_MARKER} — identical in EVERY scene, do not change anything: "
         f"the EXACT SAME {p_name_en}{feat_part}; {anchor}; "
-        f"{cat_cfg['style_tag']}]"
+        f"{cat_cfg['style_tag']}. Match white balance, light direction, lens perspective "
+        "and product scale across cuts. Keep the label readable in the hero shot. "
+        "Frame only details visible in the reference when supplied.]"
     )
 
 
@@ -1049,7 +1051,7 @@ def _image_url_matches_product(url: str, keywords: List[str]) -> bool:
 
 
 def _normalize_affiliate_script(
-    scenes: List[AffiliateScene], req: "ProductAffiliateRequest"
+    scenes: List[AffiliateScene], req: "ProductAffiliateRequest", *, keep_muse_durations: bool = False
 ) -> tuple[List[AffiliateScene], List[str]]:
     """Chuẩn hóa hậu xử lý cho kịch bản affiliate (dùng chung local + AI).
 
@@ -1058,11 +1060,8 @@ def _normalize_affiliate_script(
       VIẾT LẠI sang cách nói tuân thủ + warning nêu rõ đã sửa gì; vi phạm NHẸ
       (từ tuyệt đối, khan hiếm/giảm giá chưa kiểm chứng) thì giữ nguyên câu +
       warning bắt người dùng xác nhận trước khi đăng.
-    - Thời lượng mỗi cảnh = mốc clip API nhỏ nhất phủ được thoại của cảnh đó
-      (5/6/8/10s) — KHÔNG ép mọi cảnh về 10s nữa (fix 2026-11-23: thoại 6s mà
-      clip 10s thì thừa 4s hình đứng yên; thoại 13s mà clip 10s thì video
-      phải loop). Thoại dài hơn 10s vẫn lấy clip 10s, video loop để đọc kịp.
-      Duration tính từ thoại ĐÃ viết lại (tuân thủ) để không lệch mốc clip.
+    - Giữ thời lượng hợp lệ do Muse chọn. Kịch bản mẫu và cảnh thiếu thời
+      lượng hợp lệ dùng độ dài thoại sau khi viết lại để chọn mốc clip.
     - Prompt nào thiếu lock thì APPEND lock + fidelity block (không viết lại
       prompt của LLM). Prompt chứa cụm cho phép đổi sản phẩm thì warning.
     - Thoại dài hơn AFFILIATE_VOICEOVER_MAX_WORDS từ thì chỉ ghi warning,
@@ -1152,8 +1151,8 @@ def _normalize_affiliate_script(
                 f"Cảnh {s.index}: prompt chứa cụm có thể làm AI đổi sản phẩm: "
                 f"'{risky}' — kiểm tra lại hình sản phẩm trước khi render."
             )
-        # 2. Duration từ thoại đã viết lại.
-        s.duration = snap_clip_duration(estimate_voiceover_seconds(s.voiceover))
+        if not keep_muse_durations or "duration" not in s.model_fields_set:
+            s.duration = snap_clip_duration(estimate_voiceover_seconds(s.voiceover))
         if PRODUCT_LOCK_MARKER not in (s.prompt or ""):
             s.prompt = f"{(s.prompt or '').strip()} {lock}".strip()
         # Kiểm nội dung khối thật (fix audit #15): chỉ có marker, hoặc block
@@ -1857,8 +1856,8 @@ async def generate_affiliate_script_ai(
     sai rồi mới fallback).
     """
     if not muse_api_url or not muse_api_key:
-        from muse_connection import muse_connection
-        _, configured_url, configured_key = muse_connection()
+        from muse_connection import active_muse_provider, muse_connection
+        _, configured_url, configured_key = muse_connection(active_muse_provider())
         muse_api_url = muse_api_url or configured_url
         muse_api_key = muse_api_key or configured_key
     if not muse_api_key:
@@ -1936,9 +1935,8 @@ async def generate_affiliate_script_ai(
     )
 
     try:
-        # Timeout 60s cho chat completion (LLM thường cần >8s; timeout 8s cũ
-        # khiến đường AI gần như luôn rớt sang fallback). Connect riêng 5s.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
+        # Allow the browser to finish a long storyboard and return its JSON.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(150.0, connect=5.0)) as client:
             resp = await client.post(
                 f"{muse_api_url.rstrip('/')}/v1/chat/completions",
                 headers={
@@ -1947,6 +1945,7 @@ async def generate_affiliate_script_ai(
                 },
                 json={
                     "model": "muse-spark",
+                    "timeout": 120,
                     "messages": [
                         {"role": "system", "content": sys_instruction},
                         {"role": "user", "content": user_prompt}
@@ -1965,11 +1964,14 @@ async def generate_affiliate_script_ai(
                     _shoot = getattr(req, "shooting_style", "faceless") or "faceless"
                     for item in parsed.get("scenes", []):
                         _role = item.get("role", "demo")
+                        duration = item.get("duration")
+                        if isinstance(duration, str):
+                            duration = next((d for d in AFFILIATE_CLIP_DURATIONS if duration.strip() == str(d)), None)
                         scenes_list.append(AffiliateScene(
                             index=int(item.get("index", len(scenes_list) + 1)),
                             title=item.get("title", f"Cảnh {len(scenes_list) + 1}"),
                             role=_role,
-                            duration=int(item.get("duration", AFFILIATE_SCENE_DURATION)),
+                            **({"duration": duration} if duration in AFFILIATE_CLIP_DURATIONS else {}),
                             prompt=item.get(
                                 "prompt",
                                 build_commercial_prompt(
@@ -1988,9 +1990,8 @@ async def generate_affiliate_script_ai(
                             reference_image=_base_ref,
                         ))
                     if len(scenes_list) >= 3:
-                        # Chuẩn hóa hậu xử lý: ép duration 10, append lock nếu
-                        # LLM quên (không viết lại prompt), cảnh báo thoại dài.
-                        scenes_list, _vo_warnings = _normalize_affiliate_script(scenes_list, req)
+                        scenes_list, _vo_warnings = _normalize_affiliate_script(
+                            scenes_list, req, keep_muse_durations=True)
                         return AffiliateScriptResponse(
                             title=parsed.get("title", f"🔥 Video Tiếp Thị {req.product_name}"),
                             framework=req.framework,
@@ -2000,7 +2001,7 @@ async def generate_affiliate_script_ai(
                             hook_strength="99/100",
                             marketing_notes=[
                                 "Được tạo bởi AI Muse Chat Model với tối ưu chuyển đổi trực tuyến.",
-                                "Mỗi cảnh dài theo thoại (clip 5/6/8/10s — thoại ngắn clip ngắn, thoại dài clip dài, tối đa 10s); thoại dài hơn 10s thì video loop để đọc kịp.",
+                                "Thời lượng clip theo kịch bản Muse (5/6/8/10s). Cảnh thiếu thời lượng hợp lệ được ước tính theo lời thoại.",
                                 "Render nối tiếp (sequential chain): cảnh sau dùng last frame cảnh trước để giữ tay/sản phẩm/bối cảnh đồng nhất.",
                             ] + _vo_warnings,
                             scenes=scenes_list,
@@ -2012,8 +2013,9 @@ async def generate_affiliate_script_ai(
     except Exception as e:
         print(f"[Affiliate AI] Muse chat unavailable or returned parse error ({e}), activating local generator fallback...")
 
-    # Fallback ngoại tuyến đảm bảo 100% không bao giờ gián đoạn
-    return generate_affiliate_script_local(req)
+    fallback = generate_affiliate_script_local(req)
+    fallback.warnings.insert(0, "Studio đang hiển thị kịch bản mẫu vì chưa nhận được kịch bản Muse hợp lệ.")
+    return fallback
 
 
 # ── 6. Nhập link sản phẩm (Shopee / TikTok) ──────────────────────────────────

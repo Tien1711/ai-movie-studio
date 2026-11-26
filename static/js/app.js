@@ -4,8 +4,6 @@
 // ── Config & State ──────────────────────────────────────────────────────
 const CFG_KEY = 'aiMovieStudio_cfg';
 let cfg = {
-  apiUrl: 'http://localhost:18610',
-  apiKey: 'm2a_your_secret_key',
   concurrent: 12,
   aspectRatio: '16:9',
   // G3: mở trang với form trống (mặc định BẬT — không nạp 5 cảnh mẫu Kiếm
@@ -193,7 +191,10 @@ function updateConcurrent(val) {
 function loadCfg() {
   try {
     const saved = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
-    Object.assign(cfg, saved);
+    for (const key of Object.keys(cfg)) {
+      if (Object.hasOwn(saved, key)) cfg[key] = saved[key];
+    }
+    if (Object.hasOwn(saved, 'apiKey') || Object.hasOwn(saved, 'apiUrl')) persistCfg();
   } catch {}
   if (!cfg.concurrent || cfg.concurrent < 1) cfg.concurrent = 6;
   // localStorage cũ có thể còn giá trị 13–30 (trước audit #6) -> kẹp về ≤ 12.
@@ -203,8 +204,6 @@ function loadCfg() {
   // (startEmpty=true, notifyRender=false), không ghi đè.
   if (cfg.startEmpty === undefined || cfg.startEmpty === null) cfg.startEmpty = true;
   if (cfg.notifyRender === undefined || cfg.notifyRender === null) cfg.notifyRender = false;
-  document.getElementById('cfgApiUrl').value = cfg.apiUrl;
-  document.getElementById('cfgApiKey').value = cfg.apiKey;
   document.getElementById('cfgConcurrent').value = cfg.concurrent;
   document.getElementById('maxConcurrent').value = cfg.concurrent;
   document.getElementById('sidebarConcurrent').textContent = `Concurrent: ${cfg.concurrent}`;
@@ -256,14 +255,201 @@ function showBrowserNotification(title, body) {
   } catch {}
 }
 
-function saveConfig() {
-  cfg.apiUrl = document.getElementById('cfgApiUrl').value.trim();
-  cfg.apiKey = document.getElementById('cfgApiKey').value.trim();
-  const c = parseInt(document.getElementById('cfgConcurrent').value) || 12;
-  updateConcurrent(c);
-  persistCfg();
-  document.getElementById('cfgTestResult').textContent = '✅ Đã lưu cấu hình!';
-  setTimeout(() => { document.getElementById('cfgTestResult').textContent = ''; }, 2000);
+const MUSE_PROVIDER_LABELS = { muse2api: 'Muse2API', browser: 'Muse Browser' };
+let museSettings = null;
+
+const MUSE_PROFILES_API = '/api/settings/muse/chrome-profiles';
+let museChromeProfiles = null;
+let museProfileRequestPending = false;
+
+async function museProfileRequest(path = '', options = {}) {
+  const response = await apiFetch(MUSE_PROFILES_API + path, options);
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(typeof data.detail === 'string' ? data.detail : 'Không kết nối được gateway Browser.');
+  }
+  return data;
+}
+
+function displayMuseChromeProfiles(data) {
+  museChromeProfiles = data;
+  const select = document.getElementById('museChromeProfile');
+  const status = document.getElementById('museChromeProfileStatus');
+  select.replaceChildren(new Option('Cửa sổ riêng của gateway', ''));
+  for (const profile of data.profiles) {
+    const mode = profile.ready ? ' · Sẵn sàng' : profile.reload ? ' · Cần tải lại tiện ích'
+      : profile.online ? ' · Chưa sẵn sàng' : ' · Tab chưa mở';
+    select.add(new Option(profile.name + mode, profile.id));
+  }
+  select.value = data.selected || '';
+  select.disabled = false;
+  const chatMode = document.getElementById('museBrowserChatMode');
+  chatMode.value = data.chat_mode || 'side';
+  chatMode.disabled = !data.chat_mode;
+  document.getElementById('removeMuseChromeProfileBtn').disabled = !data.selected;
+  const active = data.profiles.find(profile => profile.id === data.selected);
+  if (active?.ready) status.textContent = 'Đang dùng phiên Muse của ' + active.name + '.';
+  else if (active?.reload) status.textContent = 'Tải lại tiện ích trong chrome://extensions rồi mở lại tab Muse cho Studio.';
+  else if (active) status.textContent = 'Mở tab Muse cho Studio trong profile đã chọn rồi tải lại danh sách.';
+  else status.textContent = 'Ghép nối một profile Chrome để chọn phiên Muse đã đăng nhập.';
+}
+
+async function loadMuseChromeProfiles() {
+  if (museProfileRequestPending) return;
+  museProfileRequestPending = true;
+  try {
+    displayMuseChromeProfiles(await museProfileRequest());
+  } catch (error) {
+    document.getElementById('museChromeProfileStatus').textContent = error.message;
+  } finally {
+    museProfileRequestPending = false;
+  }
+}
+
+async function createMuseProfilePairing() {
+  try {
+    const data = await museProfileRequest('/pair', { method: 'POST' });
+    document.getElementById('museProfilePairCode').value = data.code;
+    document.getElementById('museProfilePairing').hidden = false;
+  } catch (error) {
+    document.getElementById('museChromeProfileStatus').textContent = error.message;
+  }
+}
+
+async function copyMuseProfilePairCode() {
+  const code = document.getElementById('museProfilePairCode');
+  try {
+    await navigator.clipboard.writeText(code.value);
+    showToast('Đã sao chép mã ghép nối.', 'success');
+  } catch {
+    code.select();
+  }
+}
+
+async function updateMuseChromeProfiles(path, options) {
+  const select = document.getElementById('museChromeProfile');
+  const chatMode = document.getElementById('museBrowserChatMode');
+  const remove = document.getElementById('removeMuseChromeProfileBtn');
+  if (museProfileRequestPending) {
+    if (museChromeProfiles) displayMuseChromeProfiles(museChromeProfiles);
+    return;
+  }
+  museProfileRequestPending = true;
+  select.disabled = chatMode.disabled = remove.disabled = true;
+  try {
+    displayMuseChromeProfiles(await museProfileRequest(path, options));
+    checkApiHealth();
+  } catch (error) {
+    if (museChromeProfiles) displayMuseChromeProfiles(museChromeProfiles);
+    document.getElementById('museChromeProfileStatus').textContent = error.message;
+  } finally {
+    museProfileRequestPending = false;
+  }
+}
+
+function selectMuseChromeProfile() {
+  const id = document.getElementById('museChromeProfile').value || null;
+  return updateMuseChromeProfiles('/selection', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+}
+
+function selectMuseBrowserChatMode() {
+  const mode = document.getElementById('museBrowserChatMode').value;
+  return updateMuseChromeProfiles('/chat-mode', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+}
+
+function removeMuseChromeProfile() {
+  const id = museChromeProfiles?.selected;
+  if (id) return updateMuseChromeProfiles('/' + encodeURIComponent(id), { method: 'DELETE' });
+}
+
+function onMuseProviderChange() {
+  const provider = document.getElementById('museProviderSelect').value;
+  document.getElementById('muse2apiConfig').hidden = provider !== 'muse2api';
+  document.getElementById('museBrowserConfig').hidden = provider !== 'browser';
+  if (provider === 'browser') loadMuseChromeProfiles();
+  document.getElementById('museConcurrencyConfig').style.display = provider === 'browser' ? 'none' : '';
+  document.getElementById('cfgTestResult').textContent = '';
+  document.getElementById('saveMuseProviderBtn').disabled = !museSettings || provider === museSettings.provider;
+  const status = document.getElementById('museSettingsMessage');
+  if (!museSettings) return;
+  if (provider !== museSettings.provider) {
+    status.textContent = 'Chế độ mới sẽ áp dụng sau khi lưu và khởi động lại Studio.';
+  } else if (museSettings.restart_required) {
+    status.textContent = `Đã lưu ${MUSE_PROVIDER_LABELS[provider]}. Khởi động lại Studio để áp dụng.`;
+  } else {
+    status.textContent = '';
+  }
+}
+
+function displayMuseSettings(data) {
+  museSettings = data;
+  document.getElementById('museProviderSelect').value = data.provider;
+  document.getElementById('museProviderText').textContent = MUSE_PROVIDER_LABELS[data.active_provider];
+  onMuseProviderChange();
+}
+
+async function loadMuseSettings() {
+  try {
+    const response = await apiFetch('/api/settings/muse');
+    if (!response.ok) throw new Error();
+    displayMuseSettings(await response.json());
+  } catch {
+    document.getElementById('museSettingsMessage').textContent = 'Không tải được cài đặt Muse.';
+  }
+}
+
+async function saveMuseSettings() {
+  if (!museSettings) return;
+  const selector = document.getElementById('museProviderSelect');
+  const button = document.getElementById('saveMuseProviderBtn');
+  selector.disabled = true;
+  button.disabled = true;
+  const provider = selector.value;
+  try {
+    const response = await apiFetch('/api/settings/muse', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Không lưu được chế độ Muse.');
+    displayMuseSettings(data);
+    window.showToast('Đã lưu chế độ Muse.', 'success');
+  } catch (error) {
+    button.disabled = false;
+    document.getElementById('museSettingsMessage').textContent = error.message || 'Không lưu được chế độ Muse.';
+  } finally {
+    selector.disabled = false;
+  }
+}
+
+async function checkSelectedMuseProvider() {
+  const selector = document.getElementById('museProviderSelect');
+  const provider = selector.value;
+  const button = document.getElementById('checkMuseProviderBtn');
+  const status = document.getElementById('cfgTestResult');
+  status.textContent = `Đang kiểm tra ${MUSE_PROVIDER_LABELS[provider]}…`;
+  button.disabled = true;
+  try {
+    const response = await apiFetch(`/api/settings/muse/health?provider=${encodeURIComponent(provider)}`);
+    const data = await response.json();
+    if (selector.value !== provider) return;
+    status.textContent = response.ok && data.ready
+      ? `${MUSE_PROVIDER_LABELS[provider]} đã sẵn sàng.`
+      : (data.error || data.detail || 'Gateway chưa sẵn sàng.');
+  } catch {
+    if (selector.value === provider) status.textContent = 'Không kiểm tra được kết nối Muse.';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ── Navigation ──────────────────────────────────────────────────────────
@@ -274,10 +460,14 @@ function showPanel(name) {
   document.getElementById(`nav-${name}`)?.classList.add('active');
   if (name === 'library') loadLibrary();
   if (name === 'characters') loadCharacters();
+  if (name === 'settings') loadMuseSettings();
   if (name === 'shot-desk') initShotDeskStudio();
   if (name === 'affiliate') initAffiliateStudio();
+  if (name === 'muse-studio') openMuseStudio();
+  if (name === 'story') loadStudioCast('story');
   if (name === 'batch-create') initBatchCreateStudio();
   if (name === 'factory') initFactoryPanel();
+  if (name === 'quick-video') {loadStudioCast('quick');loadStudioCatalog();}
   if (name === 'story') initStoryPanel();
   if (name === 'create') refreshQueueHint(); // Nhóm 1: trạng thái hàng đợi trước khi bấm Sản xuất
 }
@@ -287,7 +477,6 @@ async function checkApiHealth() {
   const bar = document.getElementById('museStatusBar');
   const txt = document.getElementById('museStatusText');
   const badge = document.getElementById('museAccountsBadge');
-  const resEl = document.getElementById('cfgTestResult');
 
   txt.textContent = 'Muse: Đang kiểm tra…';
   bar.className = 'muse-status-bar warn';
@@ -297,11 +486,10 @@ async function checkApiHealth() {
     const r = await apiFetch('/api/health');
     const data = await r.json();
     const isBrowser = data.muse_provider === 'browser';
-    const label = isBrowser ? 'Muse Browser' : 'Muse2API';
+    const label = MUSE_PROVIDER_LABELS[data.muse_provider] || 'Muse2API';
     const providerText = document.getElementById('museProviderText');
     if (providerText) providerText.textContent = label;
-    const apiConfig = document.getElementById('muse2apiConfig');
-    if (apiConfig) apiConfig.style.display = isBrowser ? 'none' : '';
+    document.getElementById('qvProviderText').textContent = label;
 
     if (data.muse2api) {
       window.currentAccountsCount = data.accounts || 1;
@@ -309,7 +497,6 @@ async function checkApiHealth() {
       txt.textContent = label + ': Đã kết nối';
       badge.textContent = isBrowser ? 'Chrome' : data.accounts + ' tài khoản';
       badge.style.display = 'inline';
-      if (resEl) resEl.textContent = isBrowser ? 'Phiên Chrome đã sẵn sàng' : 'Đã kết nối - ' + data.accounts + ' tài khoản hoạt động';
       const hint = document.getElementById('concurrentHint');
       if (hint) {
         hint.textContent = `Tối đa ${data.accounts} luồng song song (đặt ở ô Concurrent)`;
@@ -348,7 +535,6 @@ async function checkApiHealth() {
       bar.className = 'muse-status-bar fail';
       txt.textContent = label + ': Chưa sẵn sàng';
       badge.style.display = 'none';
-      if (resEl) resEl.textContent = 'LOI: ' + (data.muse_error || 'Khong ket noi duoc');
       // Hiển thị hướng dẫn khởi động
       const settingsNote = document.getElementById('museNotRunningNote');
       if (settingsNote) settingsNote.style.display = 'block';
@@ -1026,14 +1212,14 @@ function resetFilmState() {
   if ($('voiceModeSelect')) $('voiceModeSelect').value = 'tts';
   if ($('exportMode')) $('exportMode').value = 'full';
   if ($('chainMode')) $('chainMode').value = 'none';
-  if ($('chainFallbackMode')) $('chainFallbackMode').value = 'independent';
+  if ($('chainFallbackMode')) $('chainFallbackMode').value = 'fallback_image';
   if ($('subtitleMode')) $('subtitleMode').value = 'burn_in';
   if ($('exportQuality')) $('exportQuality').value = '720p';
   if ($('sceneTransition')) $('sceneTransition').value = 'none';
   if ($('bgMusicSelect')) $('bgMusicSelect').value = '';
   if ($('musicVolume')) { $('musicVolume').value = 0.25; if ($('lblMusicVol')) $('lblMusicVol').textContent = formatVolumeLabel(0.25); }
   if ($('voiceVolume')) { $('voiceVolume').value = 1.0; if ($('lblVoiceVol')) $('lblVoiceVol').textContent = formatVolumeLabel(1.0); }
-  if ($('consistencyMax')) $('consistencyMax').checked = false;
+  if ($('consistencyMax')) $('consistencyMax').checked = true;
   if ($('globalAspectRatio')) applyGlobalAspectRatio('16:9', false);
   renderScenes();
   renderFilmCharacters();
@@ -2031,7 +2217,7 @@ function updateMonitor(data, jobId) {
         srtBtn.style.display = 'none';
       }
     }
-    showAffiliateFinishedVideo(data.final_video, data.title || (data.req && data.req.title) || "Video Tiếp Thị", data.srt_file ? `/api/jobs/${jobId}/subtitles` : null);
+    if (data.source === 'affiliate') showAffiliateFinishedVideo(data.final_video, data.title || (data.req && data.req.title) || "Video Tiếp Thị", data.srt_file ? `/api/jobs/${jobId}/subtitles` : null);
     if (wasHidden) {
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
@@ -3739,9 +3925,9 @@ async function generateQuickVideo() {
   document.getElementById('qvError').textContent = '';
   document.getElementById('qvGenerateBtn').disabled = true;
   _qvSetStatus('⏳ Đang gửi yêu cầu…');
-  _qvSetProgress(5, 'Đang gửi tới muse2api…');
+  _qvSetProgress(5, 'Đang gửi tới Muse…');
 
-  const body = { prompt, size, duration };
+  const body = { prompt, size, duration, cast_ids:selectedStudioCast('quick'), visual_style:document.getElementById('qvStyle').value };
   if (_qvRefDataUrl) body.reference_image = _qvRefDataUrl;
 
   try {
@@ -3761,14 +3947,16 @@ async function generateQuickVideo() {
 
     // Start polling
     if (_qvPollTimer) clearInterval(_qvPollTimer);
-    let elapsed = 0;
+    const started = Date.now();
+    let polling = false;
     _qvPollTimer = setInterval(async () => {
-      if (document.hidden) return; // tab an: tam dung poll Quick Video, mo lai se tiep tuc
-      elapsed += 3;
-      // fake progress: tăng dần lên tối đa 90% cho tới khi done
-      const fakePct = Math.min(15 + Math.floor(elapsed / 120 * 75), 90);
-      _qvSetProgress(fakePct, `Đang render… (~${elapsed}s)`);
-      await _qvPollTask(_qvTaskId);
+      if (document.hidden || polling) return;
+      polling = true;
+      try {
+        await _qvPollTask(_qvTaskId, Math.floor((Date.now() - started) / 1000));
+      } finally {
+        polling = false;
+      }
     }, 3000);
 
   } catch (err) {
@@ -3776,7 +3964,7 @@ async function generateQuickVideo() {
   }
 }
 
-async function _qvPollTask(taskId) {
+async function _qvPollTask(taskId, elapsed) {
   try {
     const r = await apiFetch(`/api/quick-video/${taskId}`);
     const d = await r.json();
@@ -3808,17 +3996,19 @@ async function _qvPollTask(taskId) {
     } else if (d.status === 'error' || d.error) {
       clearInterval(_qvPollTimer);
       _qvPollTimer = null;
-      _qvShowError(d.error || d.message || 'Lỗi không xác định');
+      _qvShowError(d.error || d.message || 'Lỗi không xác định', taskId);
+    } else {
+      const percent = Math.min(15 + Math.floor(elapsed / 120 * 75), 90);
+      _qvSetProgress(percent, d.message || (d.status === 'queued' ? 'Đang chờ đến lượt…' : `Đang render… (~${elapsed}s)`));
     }
-    // 'pending' / 'running' → tiếp tục poll
   } catch (err) {
     // Lỗi mạng tạm thời → bỏ qua, tiếp tục poll
     console.warn('[QV poll error]', err);
   }
 }
 
-function _qvShowError(msg) {
-  document.getElementById('qvError').textContent = '❌ ' + msg;
+function _qvShowError(msg, taskId) {
+  document.getElementById('qvError').textContent = '❌ ' + msg + (taskId ? ' · Mã lượt tạo: ' + taskId : '');
   document.getElementById('qvError').style.display = '';
   document.getElementById('qvProgressWrap').style.display = 'none';
   _qvSetStatus('❌ Lỗi', '#ef4444');
@@ -4094,7 +4284,12 @@ function renderSceneAuditCard(audit, data, jobId) {
   const tbody = document.getElementById('auditTableBody');
 
   if (audit) {
-    if (audit.is_complete) {
+    const flagged = data?.qc_failed_scenes || [];
+    if (audit.is_complete && flagged.length) {
+      badge.className = 'pill error';
+      badge.textContent = flagged.length + ' cảnh cần xem lại';
+      noticeBox.textContent = 'Đã đủ '+audit.total+' tệp. Kiểm tra cảnh '+flagged.map(i=>'#'+i).join(', ')+' trước khi xác nhận xuất.';
+    } else if (audit.is_complete) {
       badge.className = 'pill done';
       badge.textContent = `✅ 100% Hoàn tất (${audit.done_count}/${audit.total})`;
       noticeBox.innerHTML = `
@@ -4114,8 +4309,10 @@ function renderSceneAuditCard(audit, data, jobId) {
       `;
     }
 
-    if (audit.details && audit.details.length) {
-      tbody.innerHTML = audit.details.map(d => {
+    const details = audit.details?.length ? audit.details
+      : (audit.failed_details || []).map(d => ({ ...d, status: 'error' }));
+    if (details.length) {
+      tbody.innerHTML = details.map(d => {
         let stBadge = '<span class="audit-badge pending">⌛ Chờ</span>';
         if (d.status === 'done') stBadge = '<span class="audit-badge done">✅ Xong</span>';
         else if (d.status === 'error') stBadge = '<span class="audit-badge error">❌ Lỗi</span>';
@@ -4148,6 +4345,8 @@ function renderSceneAuditCard(audit, data, jobId) {
           </tr>
         `;
       }).join('');
+    } else {
+      tbody.replaceChildren();
     }
   }
 }
@@ -6852,13 +7051,15 @@ async function renderSingleShotDeskShot(shotIndex, useCompliance = false) {
 async function renderAllShotDeskShots() {
   if (!currentShotDeskProject) return;
   const concurrentVal = parseInt(document.getElementById('sdConcurrentSelect')?.value) || window.currentAccountsCount || 6;
-  if (!confirm(`Bạn có muốn bắt đầu render toàn bộ các shot chưa hoàn thành của "${currentShotDeskProject.title}"?\n⚡ Hệ thống sẽ chia tải chạy song song qua ${concurrentVal} luồng (toàn bộ tài khoản Muse).`)) return;
+  const chain=document.getElementById('sdChainFrames').checked;
+  const mode=chain?'Dựng tuần tự, dùng khung cuối của cảnh trước.':('Dựng độc lập trên '+concurrentVal+' luồng.');
+  if (!confirm('Dựng các cảnh chưa hoàn thành của '+currentShotDeskProject.title+'? '+mode)) return;
 
   try {
     const res = await apiFetch(`/api/shot-desk/projects/${encodeURIComponent(currentShotDeskProject.id)}/render-all`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ concurrent: concurrentVal })
+      body: JSON.stringify({ concurrent: concurrentVal, chain })
     });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || 'Lỗi bắt đầu hàng đợi');
@@ -8281,21 +8482,12 @@ async function initAffiliateStudio() {
   // 6. Cập nhật ghi chú framework
   onAffiliateFrameworkChange();
 
-  // 7. Nếu chưa có kịch bản và chưa nhập tên sản phẩm, hiển thị gợi ý
-  if (!window.affiliateCurrentScript) {
-    const prodInput = document.getElementById('affiliateProdName');
-    if (!prodInput.value) {
-      prodInput.value = "Giá đỡ điện thoại xoay 360 hợp kim nhôm";
-      onAffiliateCategoryChange();
-    }
-  }
-
   // Tự động phát hiện và hiển thị video tiếp thị đã sản xuất gần nhất
   try {
     const jobsResp = await apiFetch('/api/jobs');
     if (jobsResp.ok) {
       const jobs = await jobsResp.json();
-      const lastDone = jobs.find(j => j.status === 'done' && j.final_video);
+      const lastDone = jobs.find(j => j.source === 'affiliate' && j.status === 'done' && j.final_video);
       if (lastDone) {
         showAffiliateFinishedVideo(lastDone.final_video, lastDone.title, lastDone.srt_file ? `/api/jobs/${lastDone.id}/subtitles` : null);
       }
@@ -8353,6 +8545,7 @@ function onAffiliateCategoryChange() {
 function selectAffiliateSampleProduct(pName) {
   const input = document.getElementById('affiliateProdName');
   if (input) {
+    if (input.value !== pName && window.affiliateProductImage) clearAffiliateImage();
     input.value = pName;
     input.focus();
   }
@@ -8642,6 +8835,7 @@ async function importAffiliateLink() {
     if (data.product_name) {
       const nameEl = document.getElementById('affiliateProdName');
       const prevName = nameEl?.value.trim() || '';
+      if (prevName !== data.product_name && window.affiliateProductImage) clearAffiliateImage();
       if (nameEl) nameEl.value = data.product_name;
       // Sản phẩm đổi -> nội dung của sản phẩm cũ (nỗi đau, tính năng, giá,
       // khuyến mãi) không còn đúng; xóa để onAffiliateCategoryChange bên
@@ -8742,7 +8936,7 @@ async function generateAffiliateScriptAction() {
   const oldText = btn ? btn.innerHTML : '';
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = '⏳ AI Đang Sáng Tạo Kịch Bản Bán Hàng Triệu View...';
+    btn.textContent = 'Đang viết kịch bản…';
   }
 
   const payload = {
@@ -8774,9 +8968,11 @@ async function generateAffiliateScriptAction() {
 
     const data = await r.json();
     window.affiliateCurrentScript = data;
+    data.productName = pName;
 
     // Render scenes
     renderAffiliateScenes(data.scenes);
+    setAffiliateStep('review');
 
     // Hộp cảnh báo tuân thủ (fix PR #26 d): warnings + câu khuyến cáo.
     renderAffiliateComplianceWarnings(data);
@@ -8805,21 +9001,16 @@ function renderAffiliateScenes(scenes) {
   if (!container) return;
 
   if (!scenes || scenes.length === 0) {
+    container.querySelectorAll('[id^=affSceneCard_]').forEach(el => el.remove());
+    if (!emptyState) container.textContent = 'Chưa có cảnh. Chọn Thêm cảnh để viết lời thoại.';
+    updateAffiliateTotalDuration();
     if (emptyState) emptyState.style.display = 'block';
     return;
   }
   if (emptyState) emptyState.style.display = 'none';
 
-  const roleStyles = {
-    'hook': { bg: 'linear-gradient(135deg, rgba(236,72,153,0.2) 0%, rgba(244,63,94,0.1) 100%)', border: 'rgba(236,72,153,0.4)', text: '#f43f5e', label: '🔥 CẢNH 1: HOOK 3S CHẶN LƯỚT' },
-    'pain': { bg: 'linear-gradient(135deg, rgba(245,158,11,0.2) 0%, rgba(217,119,6,0.1) 100%)', border: 'rgba(245,158,11,0.4)', text: '#fbbf24', label: '😫 CẢNH 2: NỖI ĐAU KHÁCH HÀNG' },
-    'demo': { bg: 'linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(139,92,246,0.1) 100%)', border: 'rgba(99,102,241,0.4)', text: '#a5b4fc', label: '✨ CẢNH 3: TRÌNH DIỄN & GIẢI PHÁP' },
-    'proof': { bg: 'linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(5,150,105,0.1) 100%)', border: 'rgba(16,185,129,0.4)', text: '#34d399', label: '⭐ CẢNH 4: DEAL HỜI & ĐÁNH GIÁ' },
-    'cta': { bg: 'linear-gradient(135deg, rgba(59,130,246,0.2) 0%, rgba(37,99,235,0.1) 100%)', border: 'rgba(59,130,246,0.4)', text: '#60a5fa', label: '👇 CẢNH 5: KÊU GỌI BẤM GIỎ HÀNG' },
-  };
-
+  const roles = { hook: 'Mở đầu', pain: 'Nhu cầu', demo: 'Trình diễn', proof: 'Trải nghiệm', cta: 'Kêu gọi hành động' };
   container.innerHTML = scenes.map((s, idx) => {
-    const roleCfg = roleStyles[s.role] || roleStyles['demo'];
     // Thời lượng theo thoại: API video chỉ nhận mốc 5/6/8/10s — giá trị lạ
     // (script cũ) thì hiển thị 10, user chỉnh lại được bằng select.
     const durVal = [5, 6, 8, 10].includes(Number(s.duration)) ? Number(s.duration) : 10;
@@ -8827,16 +9018,9 @@ function renderAffiliateScenes(scenes) {
     const imgBadge = s.reference_image ? `<span class="badge" style="background:rgba(34,197,94,0.2);color:#4ade80;font-size:10px;">🔒 Product Lock</span>` : '';
 
     return `
-      <div class="card" id="affSceneCard_${idx}" style="background:var(--bg2);border:1px solid ${roleCfg.border};padding:12px;border-radius:var(--radius);margin-bottom:8px;">
-        <!-- Card Header -->
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,0.06);">
-          <div class="fx fx-ac fx-g8">
-            <span style="font-weight:700;font-size:12px;color:${roleCfg.text};background:${roleCfg.bg};padding:3px 8px;border-radius:6px;border:1px solid ${roleCfg.border};">
-              ${roleCfg.label}
-            </span>
+      <div class="card aff-scene" id="affSceneCard_${idx}">
+        <div class="studio-actions"><strong>Cảnh ${idx + 1} · ${roles[s.role] || 'Tùy chỉnh'}</strong>
             ${imgBadge}
-            ${s.badge ? `<span class="badge" style="background:rgba(255,255,255,0.08);color:var(--text);font-size:10px;">🏷️ ${esc(s.badge)}</span>` : ''}
-          </div>
           <div class="fx fx-ac fx-g8">
             <label class="u-fs11 u-c-muted u-m0">Thời lượng:</label>
             <select id="affSceneDur_${idx}" onchange="if(window.affiliateCurrentScript?.scenes?.[${idx}]) window.affiliateCurrentScript.scenes[${idx}].duration=parseInt(this.value,10)||10; updateAffiliateTotalDuration();" title="Thời lượng clip theo thoại (API video chỉ nhận 5/6/8/10s)" style="width:56px;padding:2px 4px;text-align:center;font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);">
@@ -8860,21 +9044,22 @@ function renderAffiliateScenes(scenes) {
           <textarea id="affSceneVo_${idx}" rows="2" class="form-control" oninput="onAffiliateVoiceoverInput(${idx}, this.value)" style="width:100%;font-size:13px;line-height:1.45;background:var(--bg3);border-color:rgba(255,255,255,0.1);">${esc(s.voiceover || '')}</textarea>
         </div>
 
-        <!-- Prompt Video (English) -->
+        <details class="studio-details"><summary>Prompt quay và giọng đọc</summary>
         <div class="u-mb6">
           <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px;">
             🎥 Prompt Quay Video (Tiếng Anh thương mại ${esc(document.getElementById('affiliateAspectRatio')?.value || '9:16')}):
           </label>
-          <textarea id="affScenePrompt_${idx}" rows="2" class="form-control" style="width:100%;font-size:11px;font-family:'JetBrains Mono',monospace;color:#94a3b8;background:rgba(0,0,0,0.2);">${esc(s.prompt || '')}</textarea>
+          <textarea id="affScenePrompt_${idx}" oninput="window.affiliateCurrentScript.scenes[${idx}].prompt=this.value" rows="2" class="form-control" style="width:100%;font-size:11px;font-family:'JetBrains Mono',monospace;color:#94a3b8;background:rgba(0,0,0,0.2);">${esc(s.prompt || '')}</textarea>
         </div>
 
         <!-- Scene Voice Override -->
         <div class="fx fx-ac fx-g10 u-mt6">
           <label class="u-fs11 u-c-muted u-m0">Giọng cảnh này:</label>
-          <select id="affSceneVoice_${idx}" class="form-control" style="font-size:11px;padding:3px 6px;width:240px;">
+          <select id="affSceneVoice_${idx}" onchange="window.affiliateCurrentScript.scenes[${idx}].voice=this.value" class="form-control" style="font-size:11px;padding:3px 6px;width:240px;">
             ${voiceOpts}
           </select>
         </div>
+        </details>
       </div>
     `;
   }).join('');
@@ -8989,6 +9174,13 @@ async function startAffiliateRenderJob() {
     return;
   }
 
+  if (window.affiliateCurrentScript.productName && window.affiliateCurrentScript.productName !== document.getElementById('affiliateProdName').value.trim()) {
+    setAffiliateStep('product');
+    showToast('Sản phẩm đã đổi. Hãy tạo lại kịch bản cho sản phẩm này.', 'error');
+    return;
+  }
+  if (!window.affiliateProductImage && !confirm('Chưa có ảnh sản phẩm gốc. Tiếp tục dựng theo mô tả?')) return;
+
   // Thu thập dữ liệu từ các input trên màn hình
   // Thời lượng theo thoại từng cảnh: lấy từ select trong renderAffiliateScenes
   // (mốc clip API 5/6/8/10s), kẹp 1–60s; fallback 10 nếu chưa render script.
@@ -9003,7 +9195,7 @@ async function startAffiliateRenderJob() {
       voiceover: vo,
       duration: dur,
       voice: vc,
-      reference_image: s.reference_image || window.affiliateProductImage || null
+      reference_image: window.affiliateProductImage || s.reference_image || null
     };
   });
 
@@ -9015,7 +9207,8 @@ async function startAffiliateRenderJob() {
     bg_music_path: document.getElementById('affiliateBgmSelect')?.value || null,
     music_volume: 0.20,
     voice_volume: 1.0,
-    quality: "720p",
+    quality: "1080p",
+    ...captionSettings("affiliate"),
     transition: "dissolve",
     font_size: 24
   };
@@ -9053,7 +9246,7 @@ async function startAffiliateRenderJob() {
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.innerHTML = '🚀 Bắt Đầu Tạo & Xuất Video Tiếp Thị 9:16';
+      btn.textContent = 'Xuất video';
     }
   }
 }
@@ -9344,6 +9537,7 @@ async function submitBatchCreate(autoRun) {
 
   const payload = {
     prompts: rawPrompts,
+    render_mode: document.getElementById('batchRenderMode').value,
     aspect_ratio: window.batchVideoState.ratio,
     scenes_count: window.batchVideoState.scenesCount,
     visual_style: document.getElementById('batchVisualStyle')?.value || 'anime',
@@ -10072,6 +10266,7 @@ async function submitFactoryOrder() {
     visual_style: document.getElementById('factoryStyleSelect')?.value || 'cinematic',
     voice: document.getElementById('factoryVoiceSelect')?.value || 'vi-VN-HoaiMyNeural',
     aspect_ratio: state.aspectRatio,
+    render_mode: document.getElementById('factoryRenderMode').value,
     image_source: document.getElementById('factoryImageSourceSelect')?.value || 'muse',
     mode: 'free',
   };
@@ -10278,7 +10473,9 @@ window.storyState = {
 };
 
 function initStoryPanel() {
+  loadStudioCatalog();
   if (window.storyState.initialized) {
+    loadSavedStories();
     loadStoryVideos();
     startStoryVideosPolling();
     return;
@@ -10289,6 +10486,7 @@ function initStoryPanel() {
     vSel.innerHTML = voiceSelectHtml('vi-VN-HoaiMyNeural', false);
   }
   updateStoryScenesLabel();
+  loadSavedStories();
   loadStoryLibrary();
   loadStoryAdaptModes();
   loadStoryVideos();
@@ -10556,9 +10754,34 @@ async function openStoryProject(projectId) {
     const res = await apiFetch(`/api/story/projects/${encodeURIComponent(projectId)}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Không mở được truyện');
+    const previousId = window.storyState.projectId;
     window.storyState.projectId = data.id;
     window.storyState.project = data;
+    if (data.render_settings || (previousId && previousId !== data.id)) {
+      const prefs = data.render_settings || {};
+      await loadStudioCatalog();
+      if (window.storyState.projectId !== data.id) return;
+      const select = document.getElementById('storyStyleSelect');
+      select.value = prefs.visual_style || 'cinematic';
+      select.dispatchEvent(new Event('change'));
+      document.getElementById('storyVoiceSelect').value = prefs.voice || 'vi-VN-HoaiMyNeural';
+      document.getElementById('storyScenesRange').value = prefs.scenes_count || 5;
+      updateStoryScenesLabel();
+      setStoryRatio(prefs.aspect_ratio || '9:16');
+      document.getElementById('storyRenderMode').value = prefs.render_mode || 'ai_video';
+      const captions = document.querySelector('[data-caption-picker="story"]');
+      captions.querySelector('[name=style]').value = prefs.subtitle_style || 'cinema';
+      captions.querySelector('[name=position]').value = prefs.subtitle_position || 'bottom';
+      captions.dispatchEvent(new Event('change'));
+      await loadStudioCast('story');
+      if (window.storyState.projectId !== data.id) return;
+      const cast = new Set(prefs.cast_ids || []);
+      document.querySelectorAll('[data-cast-picker="story"] input').forEach(el => { el.checked = cast.has(el.value); });
+    }
     renderStoryProject(data);
+    setupBook(data);
+    loadStoryReferences(data.id);
+    loadSavedStories();
     loadStoryVideos();
   } catch (e) {
     showToast(`❌ ${e.message}`, 'error');
@@ -10738,12 +10961,20 @@ async function createStoryVideos(chapterIndex, projectId) {
         chapter_indexes: indexes, visual_style: cfg.visual_style,
         voice: cfg.voice, aspect_ratio: cfg.aspect_ratio,
         scenes_count: cfg.scenes_count, mode: cfg.mode, extra_req: cfg.extra_req,
+        guided: true, render_mode: document.getElementById('storyRenderMode').value,
+        cast_ids: selectedStudioCast('story'), ...captionSettings('story'),
       }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Tạo video lỗi');
     showToast(`🎬 ${data.message}`, 'success');
     loadStoryVideos();
+    if (data.created?.[0]?.guided) {
+      switchEditorView('films');
+      studioState.selected = data.created[0].id;
+      studioState.filter = 'all';
+      showPanel('muse-studio');
+    }
   } catch (e) {
     showToast(`❌ ${e.message}`, 'error');
   }
@@ -10763,7 +10994,9 @@ async function loadStoryVideos() {
     const res = await apiFetch('/api/batch-videos/queue?status=all&sort=newest');
     const data = await res.json();
     if (!res.ok) return;
+    if (window.storyState.projectId !== pid) return;
     const videos = (data.videos || []).filter(v => v.story_project_id === pid);
+    updateBookChapters(window.storyState.project, videos);
     if (videos.length === 0) {
       listEl.style.display = 'none';
       if (emptyEl) emptyEl.style.display = 'block';
@@ -10774,7 +11007,7 @@ async function loadStoryVideos() {
     const sig = videos.map(v => `${v.id}:${v.status}:${v.progress}`).join('|');
     if (listEl.getAttribute('data-queue-sig') !== sig) {
       listEl.setAttribute('data-queue-sig', sig);
-      listEl.innerHTML = videos.map(v => renderFactoryItemHtml(v)).join('');
+      listEl.innerHTML = videos.map(v => `<li class="studio-story-row"><div><strong>${esc(v.title)}</strong><small>${esc(v.current_step || factoryStatusMeta(v).label)}</small></div><button type="button" class="btn btn-ghost btn-sm" data-open-studio="${esc(v.id)}">Xem phân cảnh</button></li>`).join('');
     }
   } catch (e) {
     console.warn('Lỗi đọc video của truyện:', e);

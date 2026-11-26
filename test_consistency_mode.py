@@ -261,3 +261,32 @@ def test_create_movie_invalid_mode_422():
                    consistency_mode="ultra")
     resp = client.post("/api/movies", json=payload)
     assert resp.status_code == 422
+
+
+def test_opening_frame_handles_cuts_retries_and_missing_links():
+    from consistency import opening_reference
+    previous = {"setting":"sân trường — chiều"}
+    shot = {"index": 2, **previous}
+    assert opening_reference(shot, previous, "last.jpg", "face.jpg") == ("last.jpg","last_frame")
+    for changes in ({"index":8},{"new_segment":True},{"setting":"bếp — tối"},{"keep_reference":True}):
+        assert opening_reference({**shot,**changes}, previous,"last.jpg","face.jpg")[0] == "face.jpg"
+    assert opening_reference(shot, previous,"last.jpg","face.jpg",retry=True)[0] == "face.jpg"
+    assert opening_reference(shot, previous,None,"face.jpg","fallback_image")[0] == "face.jpg"
+    assert opening_reference(shot, previous,None,"face.jpg","independent")[0] is None
+    import pytest
+    with pytest.raises(ValueError):
+        opening_reference(shot,previous,None,"face.jpg","stop")
+
+
+def test_registered_dialogue_preserves_words_and_voice():
+    import pytest
+    from consistency import resolve_scene_cast
+    registry = [{"name":"Mai","aliases":["Mây"],"description":"Tóc đen","voice":"mai"},
+                {"name":"An","description":"Áo xanh","voice":"an"}]
+    cast, segments = resolve_scene_cast({"characters":["Mây","An"],"dialogue":"Mây: Về nhé!\nAn: Đợi đã.\nỪ."},registry)
+    assert cast == registry
+    assert [(r["voice"],r["text"]) for r in segments] == [("mai","Về nhé!"),("an","Đợi đã."),("mai","Ừ.")]
+    with pytest.raises(ValueError):
+        resolve_scene_cast({"dialogue":"Khách: Xin chào"},registry)
+    with pytest.raises(ValueError):
+        resolve_scene_cast({"dialogue":"Mai: Xin chào"},[{**registry[0],"voice":""}])

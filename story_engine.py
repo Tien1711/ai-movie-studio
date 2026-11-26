@@ -492,7 +492,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def connect(self):
         self.sock = socket.create_connection(
             (self._pinned_ip, self.port), self.timeout, self.source_address)
-        self.sock = self.context.wrap_socket(self.sock, server_hostname=self.host)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 
 def _pinned_fetch(url: str, headers: Optional[Dict[str, str]], timeout: float,
@@ -848,10 +848,10 @@ def _scene_prompt(scene_text: str, visual_style: str, aspect_ratio: str,
         kws = [MAGIC_BIRD_BLOCK if k == "bird" else k for k in kws]
         if MAGIC_BIRD_BLOCK not in kws:
             kws.append(MAGIC_BIRD_BLOCK)
-    subject = ", ".join(kws) if kws else "Vietnamese folk tale scene"
+    subject = ", ".join(kws) if kws else "the setting described in the passage"
     mood_part = f", {mood}" if mood else ""
     return (f"Cinematic scene, {subject}, {_NO_EXTRA_SUBJECTS}, "
-            f"Vietnamese folk tale atmosphere{mood_part}, {ratio}, {suffix}")
+            f"period and location faithful to the story{mood_part}, {ratio}, {suffix}")
 
 
 def _group_sentences(sentences: List[str], scenes_count: int) -> List[List[str]]:
@@ -930,7 +930,7 @@ def adapt_chapter(chapter_text: str, mode: str, scenes_count: int,
         scenes.append({
             "index": i + 1,
             "role": role,
-            "prompt": _scene_prompt(" ".join(group), visual_style, aspect_ratio, mood),
+            "prompt": f'{" ".join(group)}\n{_scene_prompt(" ".join(group), visual_style, aspect_ratio, mood)}',
             "voiceover": voiceover,
             "duration": max(5, min(10, round(len(voiceover) / 11) or 6)),
         })
@@ -1099,7 +1099,9 @@ def create_project_from_library(story_id: str) -> Dict[str, Any]:
 def create_story_videos(project_id: str, chapter_indexes: List[int],
                         visual_style: str, voice: str, aspect_ratio: str,
                         scenes_count: int, mode: str = "short",
-                        extra_req: str = "") -> List[Dict[str, Any]]:
+                        extra_req: str = "", *, render_mode: str = "ai_video", guided: bool = False,
+                        cast: Optional[List[Dict[str, Any]]] = None,
+                        subtitle_style: str = "cinema", subtitle_position: str = "bottom") -> List[Dict[str, Any]]:
     """Tạo 1 video cho mỗi chương đã chọn.
 
     Dùng kịch bản đã adapt lưu trong project nếu khớp tham số, không thì
@@ -1157,12 +1159,21 @@ def create_story_videos(project_id: str, chapter_indexes: List[int],
         prompts.append(title)
         scripts.append({
             "title": title,
+            "chapter_index": ci,
             "viral_title": title,
             "caption": f"Truyện: {project['title']} — {ch['title']}. "
                        f"Nghe truyện mỗi ngày, đăng ký kênh để không bỏ lỡ chương sau.",
             "hashtags": ["#truyen", "#kechuyen", "#truyenngan", "#xuhuong"],
             "scenes": script["scenes"],
         })
+    render_settings = {
+        "visual_style": visual_style, "voice": voice, "aspect_ratio": aspect_ratio, "scenes_count": scenes_count,
+        "render_mode": render_mode, "cast_ids": [c["id"] for c in cast or [] if not c.get("kind")],
+        "subtitle_style": subtitle_style, "subtitle_position": subtitle_position,
+    }
+    if project.get("render_settings") != render_settings:
+        project["render_settings"] = render_settings
+        changed = True
     if changed:
         save_project(project)
     created = BATCH_MANAGER.add_batch(
@@ -1171,8 +1182,9 @@ def create_story_videos(project_id: str, chapter_indexes: List[int],
         scenes_count=scenes_count,
         visual_style=visual_style,
         voice=voice,
-        auto_run=True,
+        auto_run=not guided,
         scripts=scripts,
-        extra={"story_source": "story", "story_project_id": project_id},
+        extra={**({"guided": True} if guided else {}), "story_source": "story", "story_project_id": project_id, "render_mode": render_mode,
+               "cast": cast or [], "subtitle_style": subtitle_style, "subtitle_position": subtitle_position},
     )
     return created

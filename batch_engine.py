@@ -28,8 +28,11 @@ import edge_tts
 import aiofiles
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Optional, Tuple
+from urllib.parse import urljoin
 
 # ── Giới hạn / timeout (audit §1.11, §1.12, §3.6-3.8) ─────────────────────────
+from muse_connection import browser_media_headers
+
 MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024          # video tải về tối đa 500 MB
 MAX_KEYFRAME_BYTES = 50 * 1024 * 1024           # ảnh keyframe tối đa 50 MB
 MAX_REFERENCE_IMAGE_BYTES = 20 * 1024 * 1024   # ảnh tham chiếu đọc vào RAM tối đa 20 MB
@@ -40,7 +43,7 @@ TRANSIENT_HTTP_STATUSES = {408, 429, 502, 503, 504}
 # Neo lại nhân vật trong chuỗi sequential: lỗi nhỏ tích lũy theo chuỗi nên
 # cứ mỗi N scene thì dùng ảnh nhân vật/keyframe thay cho prev_last_frame
 # để reset drift (consistency.py — chế độ Đồng nhất tối đa).
-from consistency import CONSISTENCY_ANCHOR_EVERY, consistency_anchor_reference  # noqa: E402
+from consistency import CONSISTENCY_ANCHOR_EVERY, consistency_anchor_reference, opening_reference, resolve_scene_cast  # noqa: E402
 
 # Cache duration theo (path, mtime, size) — tránh spawn ffmpeg lặp lại (§3.5).
 _DURATION_CACHE: Dict[Tuple[str, float, int], float] = {}
@@ -82,6 +85,28 @@ def _sniff_media_kind(data: bytes) -> Optional[str]:
     return None
 
 
+def _browser_image_from_url(url: str) -> str:
+    """Fetch a public reference image with validated redirects and a size limit."""
+    from story_engine import _pinned_fetch
+
+    for _ in range(6):
+        status, headers, content = _pinned_fetch(
+            url, {"Accept": "image/*"}, 12.0, MAX_REFERENCE_IMAGE_BYTES,
+            "Ảnh tham chiếu vượt quá 20 MB.",
+        )
+        if status in (301, 302, 303, 307, 308) and headers.get("location"):
+            url = urljoin(url, headers["location"])
+            continue
+        if status != 200:
+            raise ValueError(f"Không tải được ảnh tham chiếu (HTTP {status}).")
+        kind = _sniff_media_kind(content)
+        if kind not in ("png", "jpg", "gif", "webp"):
+            raise ValueError("Link tham chiếu phải trả về ảnh PNG, JPEG, GIF hoặc WebP.")
+        mime = "jpeg" if kind == "jpg" else kind
+        return f"data:image/{mime};base64,{base64.b64encode(content).decode('ascii')}"
+    raise ValueError("Link ảnh tham chiếu chuyển hướng quá nhiều lần.")
+
+
 def _is_valid_media_file(path: str, kinds: Tuple[str, ...]) -> bool:
     """File đã tải về có tồn tại, đủ lớn và đúng magic bytes hay không."""
     try:
@@ -105,6 +130,7 @@ async def _download_validated(
     expected: str,  # "video" | "image"
     max_bytes: int,
     timeout: float = 120.0,
+    headers: Optional[Dict[str, str]] = None,
 ) -> str:
     """Tải file theo chunk (không nạp hết RAM), kiểm tra Content-Type + magic
     bytes + giới hạn kích thước. Trả về output_path, raise nếu không hợp lệ."""
@@ -114,7 +140,7 @@ async def _download_validated(
     total = 0
     first_chunk = b""
     try:
-        async with client.stream("GET", url, timeout=timeout) as resp:
+        async with client.stream("GET", url, timeout=timeout, **({"headers": headers} if headers else {})) as resp:
             resp.raise_for_status()
             ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
             if ctype and not ctype.startswith(expected_ct) and ctype not in ("application/octet-stream", "binary/octet-stream"):
@@ -654,6 +680,8 @@ def clean_script_prompt(raw_prompt: str) -> tuple[str, Optional[str]]:
 
     # Xóa mốc thời gian và các thẻ cấu trúc [...]
     p = re.sub(r"^\s*\d+\s*[-–—]\s*\d+\s*s?\s*:\s*", "", p, flags=re.IGNORECASE)
+    # Keep identity instructions when stripping screenplay annotations.
+    product_blocks = re.findall(r"\[PRODUCT (?:CONTINUITY|FIDELITY) LOCK\b[^\]]*\]", p, re.I)
     without_tags = re.sub(r"\[[^\]]+\]", " ", p)
     without_tags = re.sub(r"\s+", " ", without_tags).strip()
 
@@ -689,7 +717,7 @@ def clean_script_prompt(raw_prompt: str) -> tuple[str, Optional[str]]:
     if color_note and color_note.lower() not in clean_prompt.lower():
         clean_prompt = f"{clean_prompt}, {color_note}" if clean_prompt else color_note
 
-    return clean_prompt, extracted_voice
+    return " ".join(part for part in (clean_prompt, *product_blocks) if part), extracted_voice
 
 
 def sanitize_prompt_heuristics(prompt: str, error_msg: str = "", aggressive: bool = False) -> str:
@@ -817,11 +845,13 @@ async def poll_video_task(
                 ) from json_err
             status = data.get("status", "unknown")
 
-            if status == "completed":
+            if status in ("completed", "succeeded", "success", "done"):
                 url = data.get("video_url") or data.get("url") or ""
+                if not url:
+                    raise RuntimeError(f"[Cảnh {scene_idx}] Muse đã hoàn tất nhưng chưa trả URL video.")
                 return f"{base_url}{url}" if url.startswith("/") else url
 
-            if status == "failed":
+            if status in ("failed", "error", "cancelled"):
                 err_msg = data.get("error", "N/A")
                 raise RuntimeError(
                     f"[Cảnh {scene_idx}] Muse2API báo thất bại: {err_msg}"
@@ -835,7 +865,7 @@ async def poll_video_task(
             if acc:
                 parts.append(f"acc:{acc[:6]}")
             if progress_cb:
-                progress_cb(scene_idx, " • ".join(parts))
+                progress_cb(scene_idx, data.get("message") or " • ".join(parts))
 
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError,
                 httpx.HTTPStatusError) as net_err:
@@ -1020,7 +1050,7 @@ def apply_film_characters(prompt: str, scene: Dict[str, Any],
     prompt (vd user tự dán) thì không dán trùng lần nữa."""
     if not characters:
         return prompt
-    parts = [str(scene.get("prompt") or ""), str(scene.get("voiceover") or "")]
+    parts = [str(scene.get("prompt") or ""), str(scene.get("voiceover") or ""), *scene.get("characters", [])]
     for seg in scene.get("voice_segments") or []:
         if isinstance(seg, dict):
             parts.append(str(seg.get("character") or seg.get("speaker") or ""))
@@ -1029,7 +1059,7 @@ def apply_film_characters(prompt: str, scene: Dict[str, Any],
         parts.append(str(scene.get("character") or ""))
     parts.append(prompt)
     scene_text = " ".join(p for p in parts if p)
-    matched = match_film_characters(scene_text, characters)
+    matched = resolve_scene_cast(scene, characters)[0] if scene.get("characters") else match_film_characters(scene_text, characters)
     if not matched:
         return prompt
     out = prompt.rstrip()
@@ -1102,9 +1132,11 @@ async def generate_keyframe_image(
                         img_url = pdata.get("url") or (pdata.get("data", [{}])[0].get("url") if pdata.get("data") else None)
                         if img_url:
                             download_url = f"{base_url}{img_url}" if img_url.startswith("/") else img_url
+                            media_headers = browser_media_headers(download_url, base_url, api_key)
                             await _download_validated(
                                 client, download_url, output_path,
                                 expected="image", max_bytes=MAX_KEYFRAME_BYTES, timeout=60.0,
+                                **({"headers": media_headers} if media_headers else {}),
                             )
                             return {"url": download_url, "local_path": output_path}
                     elif st == "failed":
@@ -1115,9 +1147,11 @@ async def generate_keyframe_image(
                 img_url = data["data"][0].get("url")
                 if img_url:
                     download_url = f"{base_url}{img_url}" if img_url.startswith("/") else img_url
+                    media_headers = browser_media_headers(download_url, base_url, api_key)
                     await _download_validated(
                         client, download_url, output_path,
                         expected="image", max_bytes=MAX_KEYFRAME_BYTES, timeout=60.0,
+                        **({"headers": media_headers} if media_headers else {}),
                     )
                     return {"url": download_url, "local_path": output_path}
 
@@ -1196,7 +1230,9 @@ def build_scene_prompt(
             prompt = f"{prompt}, realistic synchronized sound design, clear natural ambient audio and Foley sound effects"
     else:
         # 🎙️ CHẾ ĐỘ LỒNG TIẾNG TTS: Bổ sung chỉ thị khẩu hình (Lip-sync Articulation)
-        if has_dialogue and not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation", "talking with"]):
+        if scene.get("offscreen_narration"):
+            prompt += ", narration is off camera. Preserve the requested framing and natural action."
+        elif has_dialogue and not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation", "talking with"]):
             spk_clause = f"the character {', '.join(spk_names)}" if spk_names else "the character"
             prompt = f"{prompt}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue"
 
@@ -1318,6 +1354,8 @@ async def process_scene(
     cancel_event: Optional[asyncio.Event] = None,
     prefetch_task: Optional[asyncio.Task] = None,
     characters: Optional[List[Dict[str, Any]]] = None,
+    muse_provider: str = "muse2api",
+    raw_only: bool = False,
 ) -> Dict[str, Any]:
     """
     Pipeline xử lý 1 cảnh độc lập với cơ chế kiểm soát retry thông minh (Non-Spamming):
@@ -1337,6 +1375,10 @@ async def process_scene(
             idx = scene["index"]
             duration = int(scene.get("duration", 5))
             size = scene.get("size", "16:9")
+            current_ref = scene.get("reference_image") or scene.get("image")
+            ref_str = str(current_ref).strip() if current_ref else ""
+            if muse_provider == "browser" and ref_str.startswith(("http://", "https://")):
+                ref_str = await asyncio.to_thread(_browser_image_from_url, ref_str)
 
             # Prompt + thoại: dùng bản prefetch đã chuẩn bị sẵn (nếu có),
             # nếu không thì tính bằng cùng 1 hàm build_scene_prompt —
@@ -1345,6 +1387,10 @@ async def process_scene(
             if _prefetched is not None:
                 built = _prefetched
             else:
+                if scene.get("characters") or scene.get("dialogue"):
+                    _, segments = resolve_scene_cast(scene, characters or [])
+                    if segments:
+                        scene = {**scene, "voice_segments": segments, "voiceover": " ".join(seg["text"] for seg in segments)}
                 built = build_scene_prompt(scene, style_locks, voice, voice_mode)
             raw_prompt = built["raw_prompt"]
             voiceover = built["voiceover"]
@@ -1399,6 +1445,12 @@ async def process_scene(
             # build_scene_prompt) để bộ làm sạch không sửa block
             # (verbatim là yêu cầu khóa nhân vật của Tiến).
             prompt = apply_film_characters(prompt, scene, characters)
+            if scene.get("setting"):
+                prompt += "\nSetting: " + scene["setting"]
+            if scene.get("world_description") and scene["world_description"] not in prompt:
+                prompt += "\n" + scene["world_description"]
+            if scene.get("dialogue"):
+                prompt += "\nSpoken dialogue, match lip movement verbatim:\n" + scene["dialogue"]
 
             if prompt != raw_prompt:
                 scene["prompt"] = prompt
@@ -1469,7 +1521,7 @@ async def process_scene(
                 tts_failed = False
                 tts_error = ""
                 tts_task_is_prefetch = False
-                if is_ai_voice:
+                if is_ai_voice or raw_only:
                     tts_task = None
                 elif prefetch_task is not None and attempt == 1:
                     tts_task = prefetch_task
@@ -1490,9 +1542,7 @@ async def process_scene(
                     tts_started = time.monotonic()
 
                 payload = {"prompt": prompt, "duration": duration, "size": size, "timeout": 600}
-                ref_img = scene.get("reference_image") or scene.get("image")
-                if ref_img:
-                    ref_str = str(ref_img).strip()
+                if ref_str:
                     if ref_str.startswith(("http://", "https://", "data:")):
                         # URL/data: passthrough, không fetch ở đây (§2.3).
                         payload["reference_image"] = ref_str
@@ -1514,6 +1564,8 @@ async def process_scene(
                         else:
                             print(f"[batch_engine] Bỏ qua đường dẫn reference_image không tồn tại hoặc không hợp lệ: {ref_str[:80]}")
 
+                if scene.get("keep_reference") and not payload.get("reference_image"):
+                    raise RuntimeError("Không đọc được ảnh tham chiếu đã chọn.")
                 res = await client.post(
                     f"{base_url}/v1/videos",
                     json=payload,
@@ -1637,10 +1689,15 @@ async def process_scene(
                     progress_cb(idx, "📥 Đang tải video về...")
 
                 raw_video_path = os.path.join(output_dir, "scenes", f"scene_{idx:03d}_raw.mp4")
+                media_headers = browser_media_headers(video_url, base_url, api_key)
                 await _download_validated(
                     client, video_url, raw_video_path,
                     expected="video", max_bytes=MAX_DOWNLOAD_BYTES, timeout=300.0,
+                    **({"headers": media_headers} if media_headers else {}),
                 )
+                if raw_only:
+                    # Reviewed productions synthesize speech independently and compose after approval.
+                    return {"index": idx, "status": "done", "video_path": raw_video_path, "used_prompt": prompt}
 
                 # Bảo vệ chống video tích lũy/kéo dài: tự động cắt phần đuôi mới sinh nếu video bị dài hơn thời lượng
                 expected_dur = max(float(duration), float(audio_duration or 0.0))
@@ -1692,6 +1749,8 @@ async def process_scene(
                     import shutil
                     shutil.copy2(video_path, clip_path)
                 except Exception as comp_err:
+                    if scene.get("require_narration"):
+                        raise RuntimeError(f"Ghép lời kể vào cảnh {idx} thất bại: {comp_err}") from comp_err
                     print(f"[batch_engine Warning] Ghép âm thanh ngay cho scene {idx} thất bại: {comp_err}")
                     import shutil
                     # Fallback chỉ được copy file ĐÃ validate hợp lệ (§1.12) —
@@ -1979,6 +2038,7 @@ async def run_batch(
     timing: Optional[Dict[str, float]] = None,
     cancel_event: Optional[asyncio.Event] = None,
     characters: Optional[List[Dict[str, Any]]] = None,
+    muse_provider: str = "muse2api",
 ) -> List[Dict[str, Any]]:
     """
     Chạy hàng loạt tất cả các cảnh với hỗ trợ kỹ thuật First/Last Frame Chaining & Fallback:
@@ -2029,6 +2089,12 @@ async def run_batch(
         scenes, key=lambda x: x.get("index", 0) if isinstance(x, dict) else 0
     )
 
+    for scene in sorted_scenes:
+        if scene.get("characters") or scene.get("dialogue"):
+            _, segments = resolve_scene_cast(scene, characters or [])
+            if segments:
+                scene["voice_segments"] = segments
+                scene["voiceover"] = " ".join(item["text"] for item in segments)
     async with httpx.AsyncClient(follow_redirects=True) as client:
         # Pre-check health của base_url trước khi bắn batch (§1.11):
         # healthz trả non-200 thì DỪNG batch với lỗi rõ ràng thay vì chạy tiếp.
@@ -2046,14 +2112,23 @@ async def run_batch(
                 for s in scenes
             ]
 
+        browser_mode = muse_provider == "browser"
+        provider_name = "Muse Browser" if browser_mode else "Muse2API"
         health_ok = False
-        health_err = f"Không thể kết nối tới Muse2API tại {base_url}. Vui lòng kiểm tra server."
-        for health_path in ("/healthz", "/admin/status"):
+        health_err = f"Không thể kết nối tới {provider_name} tại {base_url}. Vui lòng kiểm tra server."
+        health_paths = ("/admin/accounts",) if browser_mode else ("/healthz", "/admin/status")
+        health_kwargs = {"headers": {"Authorization": f"Bearer {api_key}"}} if browser_mode else {}
+        for health_path in health_paths:
             try:
-                r = await client.get(f"{base_url}{health_path}", timeout=5.0)
+                r = await client.get(f"{base_url}{health_path}", timeout=5.0, **health_kwargs)
+                if browser_mode and r.status_code == 200:
+                    state = r.json()
+                    health_ok = state.get("ready") is True
+                    health_err = state.get("error") or "Muse Browser chưa sẵn sàng. Kiểm tra tab Muse trong Chrome."
+                    break
             except Exception as exc:
                 health_err = (
-                    f"Không thể kết nối tới Muse2API tại {base_url} ({exc}). "
+                    f"Không thể kết nối tới {provider_name} tại {base_url} ({exc}). "
                     "Vui lòng kiểm tra server."
                 )
                 continue
@@ -2061,7 +2136,7 @@ async def run_batch(
                 health_ok = True
                 break
             health_err = (
-                f"Muse2API health-check trả về HTTP {r.status_code} ({health_path}) "
+                f"{provider_name} health-check trả về HTTP {r.status_code} ({health_path}) "
                 "— dừng batch, không render tiếp."
             )
         if not health_ok:
@@ -2124,26 +2199,21 @@ async def run_batch(
                 # keyframe của chính scene đó thay cho prev_last_frame để
                 # reset drift tích lũy. Không có ảnh neo thì giữ nguyên
                 # Last Frame (không crash, không đổi hành vi).
-                anchor_ref = None
-                if idx > 1 and idx % CONSISTENCY_ANCHOR_EVERY == 0:
-                    anchor_ref = consistency_anchor_reference(s)
-                if anchor_ref:
-                    s["reference_image"] = anchor_ref
-                    if progress_cb:
-                        progress_cb(idx, f"🎯 Neo lại nhân vật Cảnh {idx} "
-                                         f"(anchor mỗi {CONSISTENCY_ANCHOR_EVERY} cảnh) "
-                                         f"➔ Dùng ảnh nhân vật/keyframe thay Last Frame...")
-                elif prev_last_frame:
-                    s["reference_image"] = prev_last_frame
-                    if progress_cb:
-                        progress_cb(idx, f"🔗 Khóa Last Frame Cảnh {idx-1} ➔ Đang đặt làm First Frame...")
-                elif idx > 1:
-                    if chain_fallback_mode == "fallback_image" and (s.get("keyframe_path") or s.get("character_reference")):
-                        s["reference_image"] = s.get("keyframe_path") or s.get("character_reference")
-                        if progress_cb:
-                            progress_cb(idx, f"🖼️ Cảnh {idx-1} không có frame ➔ Sử dụng ảnh Keyframe dự phòng")
-                    else:
-                        s["reference_image"] = None
+                previous = next((p for p in sorted_scenes if p["index"] == idx - 1), None)
+                try:
+                    ref, source = opening_reference(s, previous, prev_last_frame, consistency_anchor_reference(s), chain_fallback_mode)
+                except ValueError as failure:
+                    if pf_task is not None:
+                        pf_task.cancel()
+                        await asyncio.gather(pf_task, return_exceptions=True)
+                    await _cancel_pending_prefetch()
+                    for pending in sorted_scenes:
+                        if pending["index"] >= idx:
+                            results.append({"index":pending["index"], "status":"error", "error":str(failure), "video_path":None})
+                    break
+                s["reference_image"] = ref
+                if progress_cb:
+                    progress_cb(idx, f"Ảnh nối cảnh {idx}: {source}")
 
                 try:
                     res = await process_scene(
@@ -2152,6 +2222,7 @@ async def run_batch(
                         voice_mode=voice_mode, cancel_event=cancel_event,
                         prefetch_task=pf_task,
                         characters=characters,
+                        muse_provider=muse_provider,
                     )
                 except asyncio.CancelledError:
                     # Hủy là hủy thật (audit #8): dọn luôn task prefetch
@@ -2168,8 +2239,10 @@ async def run_batch(
                         "audio_path": None,
                         "voiceover": s.get("voiceover", ""),
                     }
+                res["reference_source"] = source
+                res["transition_out"] = s.get("transition_out")
                 results.append(res)
-                if res.get("status") == "done" and res.get("last_frame_path"):
+                if res.get("status") == "done" and res.get("last_frame_path") and not res.get("qc_failed"):
                     prev_last_frame = res["last_frame_path"]
                 else:
                     prev_last_frame = None
@@ -2245,37 +2318,19 @@ async def run_batch(
                     done_events[idx].set()
                     return res
                 prev_res = results_map.get(idx - 1)
-                if prev_res and prev_res.get("last_frame_path"):
-                    s["reference_image"] = prev_res["last_frame_path"]
+                previous = sorted_scenes[order_idx - 1] if order_idx else None
+                last = prev_res.get("last_frame_path") if prev_res and not prev_res.get("qc_failed") else None
+                try:
+                    ref, source = opening_reference(s, previous, last, consistency_anchor_reference(s), chain_fallback_mode)
+                    s["reference_image"] = ref
                     if progress_cb:
-                        progress_cb(idx, f"🔗 Đã nhận Last Frame Cảnh {idx-1} ➔ Bắt đầu render First Frame")
-                else:
-                    # Xử lý khi cảnh trước bị lỗi
-                    if chain_fallback_mode == "stop":
-                        err_msg = f"Cảnh {idx-1} bị lỗi, tạm dừng Cảnh {idx} theo cấu hình chờ."
-                        if progress_cb:
-                            progress_cb(idx, f"⛔ {err_msg}")
-                        res = {
-                            "index": idx,
-                            "status": "error",
-                            "error": err_msg,
-                            "prompt": s.get("prompt"),
-                            "video_path": None,
-                            "audio_path": None,
-                            "voiceover": s.get("voiceover", ""),
-                        }
-                        results_map[idx] = res
-                        done_events[idx].set()
-                        return res
-                    elif chain_fallback_mode == "fallback_image" and (s.get("keyframe_path") or s.get("character_reference")):
-                        fallback_ref = s.get("keyframe_path") or s.get("character_reference")
-                        s["reference_image"] = fallback_ref
-                        if progress_cb:
-                            progress_cb(idx, f"🖼️ Cảnh {idx-1} lỗi ➔ Dùng ảnh Keyframe/Character dự phòng cho Cảnh {idx}")
-                    else:
-                        s["reference_image"] = None
-                        if progress_cb:
-                            progress_cb(idx, f"⚡ Cảnh {idx-1} lỗi ➔ Tự động chuyển Cảnh {idx} sang render Text-to-Video độc lập")
+                        progress_cb(idx, f"Ảnh nối cảnh {idx}: {source}")
+                except ValueError as failure:
+                    res = {"index":idx, "status":"error", "error":str(failure), "video_path":None,
+                           "audio_path":None, "voiceover":s.get("voiceover","")}
+                    results_map[idx] = res
+                    done_events[idx].set()
+                    return res
 
             try:
                 # Audit #8: không bắt đầu render cảnh mới khi job đã bị hủy
@@ -2291,6 +2346,7 @@ async def run_batch(
                     voice_mode=voice_mode, cancel_event=cancel_event,
                     prefetch_task=pf_task,
                     characters=characters,
+                    muse_provider=muse_provider,
                 )
             except asyncio.CancelledError:
                 raise
@@ -2308,6 +2364,7 @@ async def run_batch(
             finally:
                 # Luôn set event để cảnh chain sau không treo (§1.9).
                 done_events[idx].set()
+            res["transition_out"] = s.get("transition_out")
             results_map[idx] = res
             return res
 

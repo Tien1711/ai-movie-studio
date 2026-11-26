@@ -1,0 +1,398 @@
+"""Exercise the studio's motion, review and subtitle paths without using a Muse account."""
+
+import asyncio
+import base64
+import io
+import json
+import shutil
+import subprocess
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
+import affiliate_engine
+import app
+import batch_engine
+import batch_video_engine as batch
+import composer
+
+
+def test_product_instructions_in_outgoing_prompt():
+    lock = affiliate_engine.build_product_dna_lock("Test product")
+    prompt = (
+        "Slow dolly toward the label. " + lock + " " + affiliate_engine.FIDELITY_BLOCK
+    )
+    shot = batch_engine.build_scene_prompt(
+        {
+            "prompt": prompt,
+            "voiceover": "Lời kể ngoài hình.",
+            "offscreen_narration": True,
+        }
+    )
+    assert lock in shot["prompt"] and affiliate_engine.FIDELITY_BLOCK in shot["prompt"]
+    assert "talking with expressive" not in shot["prompt"]
+
+
+def test_every_affiliate_shot_receives_product_photo(tmp_path, monkeypatch):
+    async def prefetch(*args, **kwargs):
+        return {}
+
+    references = []
+
+    async def render(client, scene, *args, **kwargs):
+        references.append(scene["reference_image"])
+        return {
+            "index": scene["index"],
+            "status": "done",
+            "last_frame_path": "generated-frame.jpg",
+        }
+
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json={"status": "ok"})
+    )
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: client_class(transport=transport, **kw)
+    )
+    monkeypatch.setattr(batch_engine, "prefetch_scene", prefetch)
+    monkeypatch.setattr(batch_engine, "process_scene", render)
+    scenes = [
+        {"index": i, "reference_image": "original-product.jpg", "keep_reference": True}
+        for i in range(1, 5)
+    ]
+    asyncio.run(
+        batch_engine.run_batch(
+            scenes,
+            "https://muse.test",
+            "fixture",
+            str(tmp_path),
+            chain_mode="sequential",
+        )
+    )
+    assert references == ["original-product.jpg"] * 4
+
+
+def test_ensemble_reference_contains_both_portraits_in_named_order():
+    portraits = []
+    for name, color in [("Mai", "red"), ("An", "blue")]:
+        img = io.BytesIO()
+        Image.new("RGB", (64, 64), color).save(img, "PNG")
+        portraits.append(
+            {
+                "name": name,
+                "avatar": "data:image/png;base64,"
+                + base64.b64encode(img.getvalue()).decode(),
+            }
+        )
+    uri, prompt = batch._cast_reference(portraits)
+    with Image.open(io.BytesIO(base64.b64decode(uri.split(",")[1]))) as sheet:
+        assert sheet.getpixel((160, 160))[0] > 220
+        assert sheet.getpixel((480, 160))[2] > 220
+    assert "Mai, An" in prompt
+
+
+@pytest.mark.parametrize("guided", [False, True])
+def test_muse_draft_motion_and_review(tmp_path, monkeypatch, guided):
+    root = tmp_path / "workspace"
+    store = root / "_batch_videos"
+    store.mkdir(parents=True)
+    monkeypatch.setattr(batch, "BATCH_DIR", store)
+    monkeypatch.setattr(app, "BATCH_DIR", store)
+    monkeypatch.setattr(batch, "QUEUE_FILE", store / "queue.json")
+    monkeypatch.setattr(batch, "QUEUE_BAK_FILE", store / "backup.json")
+    monkeypatch.setattr(batch_engine, "_WORKSPACE_ROOT", root)
+    monkeypatch.setattr(batch, "start_batch_worker", lambda: None)
+    monkeypatch.setattr(
+        batch, "muse_connection", lambda _: ("browser", "https://muse.test", "test-key")
+    )
+    reference = "data:image/png;base64,iVBORw0KGgo="
+    monkeypatch.setattr(
+        app,
+        "load_characters",
+        lambda: [
+            {
+                "id": "mai",
+                "name": "Mai",
+                "description": "A green coat and a black braid",
+                "avatar": reference,
+            }
+        ],
+    )
+    flags = ["-hide_banner", "-loglevel", "error", "-y"]
+    src = tmp_path / "source.mp4"
+    sound = tmp_path / "speech.mp3"
+    subprocess.run(
+        [
+            composer.FFMPEG,
+            *flags,
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=s=320x240:r=30:d=5",
+            "-c:v",
+            "libx264",
+            str(src),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [composer.FFMPEG, *flags, "-f", "lavfi", "-i", "sine=duration=1", str(sound)],
+        check=True,
+    )
+    sent = []
+
+    png = io.BytesIO()
+    Image.new("RGB", (100, 100), "gold").save(png, "PNG")
+
+    def provider(request):
+        if request.url.path == "/v1/images/tasks":
+            return httpx.Response(200, json={"data": [{"url": "/frame.png"}]})
+        if request.url.path == "/frame.png":
+            return httpx.Response(
+                200, content=png.getvalue(), headers={"content-type": "image/png"}
+            )
+        if request.url.path == "/v1/videos" and request.method == "POST":
+            sent.append(json.loads(request.content))
+            return httpx.Response(202, json={"id": "fixture"})
+        if request.url.path == "/v1/videos/fixture":
+            return httpx.Response(
+                200, json={"status": "done", "video_url": "https://muse.test/media.mp4"}
+            )
+        assert request.url.path == "/media.mp4"
+        return httpx.Response(
+            200, content=src.read_bytes(), headers={"content-type": "video/mp4"}
+        )
+
+    async def tts(text, voice, path):
+        shutil.copy2(sound, path)
+        return 1.0, False, ""
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: client_class(transport=httpx.MockTransport(provider), **kw),
+    )
+    monkeypatch.setattr(batch_engine, "generate_tts_with_status", tts)
+    monkeypatch.setattr(
+        batch,
+        "_generate_scene_image",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("slideshow")),
+    )
+    client = TestClient(app.app)
+    draft = {
+        "guided": guided,
+        "title": "Test studio",
+        "aspect_ratio": "16:9",
+        "cast_ids": ["mai"],
+        "subtitle_style": "karaoke",
+        "subtitle_position": "top",
+        "scenes": [
+            {"prompt": "Mai opens the door", "voiceover": "Mai mở cửa.", "duration": 5},
+            {
+                "prompt": "Camera follows the footsteps",
+                "voiceover": "Bước chân tiến gần.",
+                "duration": 5,
+            },
+        ],
+    }
+    result = client.post("/api/muse-studio/drafts", json=draft)
+    assert result.status_code == 200, result.text
+    vid = result.json()["id"]
+    assert not sent and batch.BATCH_MANAGER.get_video(vid)["status"] == "draft"
+    draft["title"] = "Phim đã biên tập"
+    assert client.put(f"/api/muse-studio/drafts/{vid}", json=draft).is_success
+    if guided:
+
+        def act(action, indexes, **extra):
+            item = batch.BATCH_MANAGER.get_video(vid)
+            return client.post(
+                f"/api/muse-studio/{vid}/actions",
+                json={
+                    "action": action,
+                    "indexes": indexes,
+                    "version": item["updated_at"],
+                    **extra,
+                },
+            )
+
+        assert act("clip", [1]).status_code == 409
+        assert act("image", [1, 2]).is_success
+        batch._process_single_video(vid)
+        assert act("approve_image", [1, 2]).is_success
+        assert act("clip", [1, 2]).is_success
+        batch._process_single_video(vid)
+        assert len(sent) == 2
+        for idx, sent_shot in enumerate(sent, 1):
+            source = "1/media/frame" if idx == 1 else "1/media/last_frame"
+            photo = client.get(f"/api/muse-studio/{vid}/scenes/{source}").content
+            assert base64.b64decode(sent_shot["reference_image"].split(",")[1]) == photo
+        import zipfile
+
+        bundle = client.get(f"/api/muse-studio/{vid}/scenes/2/handoff")
+        assert bundle.is_success
+        with zipfile.ZipFile(io.BytesIO(bundle.content)) as z:
+            handoff = json.loads(z.read("shot.json"))
+            assert (
+                handoff["reference_source"] == "last_frame"
+                and z.read(handoff["first_frame"]) == photo
+            )
+        assert act("narrated", []).status_code == 409
+        assert act("approve_clip", [1, 2]).is_success
+        assert act("narrated", []).is_success
+        batch._process_single_video(vid)
+        item = batch.BATCH_MANAGER.get_video(vid)
+        assert item["status"] == "completed", item["error"]
+        assert (
+            item["inspection"]["width"] == 1920
+            and item["inspection"]["lufs"] is not None
+        )
+        assert client.get(f"/api/batch-videos/{vid}/video").content[4:8] == b"ftyp"
+        assert "Bước chân" in client.get(f"/api/batch-videos/{vid}/subtitles").text
+        assert act("approve_image", [1], approved=False).is_success
+        assert not batch.BATCH_MANAGER.get_video(vid)["scenes"][0]["clip"]
+        assert batch.BATCH_MANAGER.get_video(vid)["scenes"][1]["stale_join"]
+        assert not act("approve_clip", [2]).is_success
+        assert client.get(f"/api/batch-videos/{vid}/video").status_code == 409
+        assert client.get(
+            f"/api/muse-studio/{vid}/scenes/1/media/previous_clip"
+        ).is_success
+        assert act("restore", [1]).is_success
+        restored = batch.BATCH_MANAGER.get_video(vid)["scenes"][0]
+        assert (
+            restored["clip"] and restored["frame_approved"] and not restored["approved"]
+        )
+        return
+    assert client.post(f"/api/batch-videos/{vid}/run").is_success
+    batch._process_single_video(vid)
+    item = batch.BATCH_MANAGER.get_video(vid)
+    assert item["status"] == "completed", item["error"]
+    assert item["title"] == draft["title"]
+    assert client.put(f"/api/muse-studio/drafts/{vid}", json=draft).status_code == 409
+    assert len(sent) == 2 and sent[0]["reference_image"] == reference
+    assert sent[1]["reference_image"].startswith("data:image/jpeg;")
+    assert "A green coat and a black braid" in sent[0]["prompt"]
+    assert all(s["video_status"] == "done" for s in item["scenes"])
+    assert client.get(f"/api/muse-studio/{vid}/scenes/1/clip").is_success
+    assert client.get(f"/api/batch-videos/{vid}/video").content[4:8] == b"ftyp"
+    assert "Bước chân" in client.get(f"/api/batch-videos/{vid}/subtitles").text
+    assert client.put(
+        f"/api/muse-studio/{vid}/scenes/2/review", json={"approved": True}
+    ).is_success
+    assert batch.BATCH_MANAGER.get_video(vid)["scenes"][1]["approved"]
+
+
+def test_workshop_resumes_script_and_locks_cast(tmp_path, monkeypatch):
+    import zipfile
+
+    import studio_workflow as workflow
+
+    store = tmp_path / "_batch_videos"
+    store.mkdir()
+    for name, path in (
+        ("BATCH_DIR", store),
+        ("QUEUE_FILE", store / "queue.json"),
+        ("QUEUE_BAK_FILE", store / "backup.json"),
+    ):
+        monkeypatch.setattr(batch, name, path)
+    monkeypatch.setattr(batch, "start_batch_worker", lambda: None)
+    client = TestClient(app.app)
+    catalog = client.get("/api/muse-studio/catalog").json()
+    assert [len(g["styles"]) for g in catalog["groups"]] == [5, 6, 5, 4]
+
+    brief = "Giữ hướng nhìn và trang phục của Mai xuyên suốt mọi cảnh trong phim."
+
+    def archive(name, text):
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, "w") as target:
+            target.writestr(name, text)
+        return data.getvalue()
+
+    for filename, body in [
+        ("brief.txt", brief.encode()),
+        ("brief.md", brief.encode()),
+        (
+            "brief.docx",
+            archive("word/document.xml", "<w:p><w:t>" + brief + "</w:t></w:p>"),
+        ),
+        ("brief.zip", archive("example/SKILL.md", brief)),
+    ]:
+        resp = client.post(
+            "/api/muse-studio/skills/import", files={"file": (filename, body)}
+        )
+        assert resp.is_success, resp.text
+    skill_id = resp.json()["id"]
+
+    groups = []
+
+    async def writer(system, user):
+        payload = json.loads(user)
+        assert payload["skill"] == brief
+        indexes = payload["requested_scene_numbers"]
+        groups.append(indexes)
+        if len(groups) == 2:
+            raise ValueError("Lỗi giữa chừng")
+        rows = [
+            {
+                "index": i,
+                "title": "Cảnh " + str(i),
+                "prompt": "Mai mở cửa.",
+                "voiceover": "Mai trở về.",
+            }
+            for i in indexes
+        ]
+        if indexes[0] == 1:
+            return {
+                "characters": [{"name": "Mai", "description": "Tóc đen, áo nâu"}],
+                "scenes": rows,
+            }
+        assert payload["characters"][0]["name"] == "Mai" and payload["preceding_beats"]
+        return rows
+
+    monkeypatch.setattr(workflow, "ask_json", writer)
+    data = client.post(
+        "/api/muse-studio/workshop",
+        json={"topic": "Đường về", "minutes": 1, "seconds": 6, "skill_id": skill_id},
+    )
+    assert data.is_success, data.text
+    vid = data.json()["id"]
+    assert data.json()["scenes"] == 10
+    batch._process_single_video(vid)
+    first = batch.BATCH_MANAGER.get_video(vid)
+    assert len([s for s in first["scenes"] if s["prompt"]]) == 6 and first["error"]
+    endpoint = f"/api/muse-studio/{vid}/actions"
+    req = {"action": "write", "version": first["updated_at"]}
+    assert client.post(endpoint, json=req).is_success
+    batch._process_single_video(vid)
+    second = batch.BATCH_MANAGER.get_video(vid)
+    assert all(s["prompt"] for s in second["scenes"]) and not second["error"]
+    assert groups[1] == groups[2] == [7, 8, 9, 10]
+    assert client.post(endpoint, json=req).status_code == 409
+    version = second["updated_at"]
+    assert (
+        client.post(
+            endpoint, json={"action": "image", "indexes": [1], "version": version}
+        ).status_code
+        == 409
+    )
+
+    async def draw(prompt, base, key, target, size):
+        assert "Tóc đen, áo nâu" in prompt
+        Image.new("RGB", (32, 32), "blue").save(target, "PNG")
+
+    monkeypatch.setattr(batch_engine, "generate_keyframe_image", draw)
+    assert client.post(
+        endpoint, json={"action": "portraits", "version": version}
+    ).is_success
+    batch._process_single_video(vid)
+    current = batch.BATCH_MANAGER.get_video(vid)
+    assert (
+        current["cast"][0]["avatar"].startswith("/api/uploads/")
+        and not current["error"]
+    )
+    assert client.post(
+        endpoint,
+        json={"action": "image", "indexes": [1], "version": current["updated_at"]},
+    ).is_success

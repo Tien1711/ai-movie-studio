@@ -830,6 +830,8 @@
   border-radius: 12px; padding: 18px; max-height: 85vh; overflow-y: auto;
 }
 </style>
+<link rel="stylesheet" href="static/css/muse-studio.css?v=2">
+<link rel="stylesheet" href="static/css/studio-editor.css?v=1">
 </head>
 <body>
 
@@ -873,6 +875,9 @@
       <span class="icon">🏭</span> Xưởng tự động
       <span class="badge badge-hot">MỚI</span>
       <span class="nav-kbd">Alt+F</span>
+    </div>
+    <div class="nav-item" data-panel="muse-studio" id="nav-muse-studio" title="MuseStudio">
+      <span class="icon">🎞</span> MuseStudio
     </div>
     <div class="nav-item" data-panel="story" id="nav-story" title="Truyện thành video (Alt+T)">
       <span class="icon">📖</span> Truyện thành video
@@ -1221,8 +1226,8 @@
           <div>
             <label class="u-fw600 u-c-yellow">⚠️ Cảnh trước lỗi thì làm gì?</label>
             <select id="chainFallbackMode">
-              <option value="independent" selected>⚡ Render Độc lập (Khuyên dùng)</option>
-              <option value="fallback_image">🖼️ Dùng ảnh Keyframe/Nhân vật</option>
+              <option value="independent">⚡ Render độc lập</option>
+              <option value="fallback_image" selected>🖼️ Dùng ảnh Keyframe/Nhân vật</option>
               <option value="stop">⛔ Dừng chờ người dùng</option>
             </select>
           </div>
@@ -1234,7 +1239,7 @@
         <div class="form-row" style="margin-top:12px;background:rgba(56,189,248,0.05);padding:10px;border-radius:6px;border:1px solid rgba(56,189,248,0.3);">
           <div>
             <label class="cm-toggle" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:700;color:var(--accent);">
-              <input type="checkbox" id="consistencyMax" style="width:16px;height:16px;accent-color:var(--accent);">
+              <input type="checkbox" id="consistencyMax" checked style="width:16px;height:16px;accent-color:var(--accent);">
               🎯 Đồng nhất tối đa (khuyên dùng cho phim dài)
             </label>
             <div style="font-size:11px;color:var(--muted);margin-top:3px;">
@@ -1487,7 +1492,7 @@
                   <option value="cyberpunk">Cyberpunk Viễn tưởng (Sci-Fi Neon)</option>
                   <option value="oil_painting">Tranh sơn dầu cổ điển (Oil Painting)</option>
                   <option value="vintage_retro">Cổ điển Hoài niệm 90s (Vintage Retro)</option>
-                </select>
+                </select><label class="studio-field">Chế độ dựng<select id="batchRenderMode"><option value="illustrated">Ảnh minh họa</option><option value="ai_video">Video AI · nối cảnh đồng nhất</option></select></label>
               </div>
 
               <!-- Giọng đọc -->
@@ -1771,7 +1776,7 @@
                 <option value="photoreal">Ảnh chụp đời thực (Photoreal)</option>
                 <option value="watercolor">Màu nước nghệ thuật (Watercolor)</option>
                 <option value="oil_painting">Tranh sơn dầu cổ điển</option>
-              </select>
+              </select><label class="studio-field">Chế độ dựng<select id="factoryRenderMode"><option value="illustrated">Ảnh minh họa</option><option value="ai_video">Video AI · nối cảnh đồng nhất</option></select></label>
             </div>
 
             <div class="batch-form-block">
@@ -1890,42 +1895,74 @@
 .story-video-row .story-video-title { flex: 1; min-width: 0; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     </style>
 
+    <section class="panel" id="panel-muse-studio">
+      <header class="studio-head"><div><h2>MuseStudio</h2><p>Biên tập phim theo cảnh và xem các bản dựng từ truyện.</p></div>
+        <button class="btn btn-primary" type="button" id="msNew">＋ Phim mới</button></header>
+      <div class="ms-view-tabs"><button type="button" data-ms-view="create">Tạo video &amp; ảnh</button><button type="button" data-ms-view="assistant">Trợ lý kịch bản</button><button type="button" data-ms-view="films" aria-pressed="true">Phim &amp; câu chuyện</button><button type="button" data-ms-view="skill" aria-pressed="false">Xưởng Skill · video dài</button></div>
+      <form id="msAssistant" class="card studio-form" hidden>
+        <h3>Trợ lý kịch bản</h3>
+        <label class="studio-field">Ý tưởng phim<textarea name="topic" rows="4" required maxlength="1500" placeholder="Nhân vật, bối cảnh và câu chuyện bạn muốn kể"></textarea></label>
+        <div class="studio-fields">
+          <label class="studio-field">Số cảnh<input name="count" type="number" min="1" max="12" value="5" required></label>
+          <label class="studio-field">Giây mỗi cảnh<select name="seconds"><option>6</option><option selected>8</option><option>10</option><option>12</option></select></label>
+          <label class="studio-field">Khung hình<select name="ratio"><option>9:16</option><option>16:9</option><option>1:1</option></select></label>
+        </div>
+        <label class="studio-field">Phong cách<select name="style" id="msAssistantStyle"><option value="cinematic">Điện ảnh chân thực</option></select></label>
+        <div data-style-cards="msAssistantStyle"></div><div data-cast-picker="assistant"></div>
+        <div class="studio-actions"><button type="submit" class="btn btn-primary">Viết bản nháp phân cảnh</button><span role="status"></span></div>
+      </form>
+      <section id="msWorkshop" hidden></section>
+      <form id="msDraft" class="card studio-form" hidden>
+        <h3>Phim mới</h3>
+        <label class="studio-field">Tên phim<input id="msTitle" required maxlength="200"></label>
+        <div class="studio-fields"><label class="studio-field">Khung hình<select id="msRatio"><option>9:16</option><option>16:9</option><option>1:1</option></select></label>
+          <label class="studio-field">Phong cách<select id="msStyle"></select></label><label class="studio-field">Giọng kể<select id="msVoice"><option value="vi-VN-HoaiMyNeural">Hoài My</option></select></label></div>
+        <div data-style-cards="msStyle"></div>
+        <div data-cast-picker="studio"></div><div data-caption-picker="studio"></div>
+        <div id="msBeats"></div><div class="studio-actions"><button type="button" class="btn btn-ghost" id="msAdd">＋ Thêm cảnh</button>
+          <button type="submit" class="btn btn-primary">Lưu bản nháp</button><button type="button" class="btn btn-ghost" id="msClose">Đóng</button></div>
+      </form>
+      <div class="studio-toolbar"><label class="studio-field">Phim và chương truyện<select id="msProject"><option value="">Chọn bản dựng</option></select></label>
+        <button class="btn btn-ghost" type="button" id="msRefresh">Làm mới</button></div>
+      <div id="msBoard" aria-live="polite"></div>
+    </section>
     <!-- ─ Panel: Truyện thành video (Story-to-Video) ─────────────────── -->
     <div class="panel" id="panel-story">
       <div class="panel-head batch-head">
         <div>
           <h2><span class="icon-head">📖</span> Truyện thành video</h2>
-          <div class="panel-sub">Biến truyện dài thành video từng chương: chọn nguồn truyện, AI tách chương và phân cảnh, cấu hình hình ảnh và giọng đọc, dựng video từng chương.</div>
+          <div class="panel-sub">Chọn truyện, biên tập lời kể và dựng mỗi chương thành một tập phim.</div>
         </div>
-      </div>
-
-      <div class="story-steps">
-        <div class="story-step"><span class="story-step-num">1</span><b>Chọn nguồn</b><span>Kho tác phẩm, tìm trên web, link, file hoặc dán văn bản.</span></div>
-        <div class="story-step"><span class="story-step-num">2</span><b>Tách chương và phân cảnh</b><span>AI tách chương, xào nấu thành kịch bản từng cảnh, sửa trực tiếp được.</span></div>
-        <div class="story-step"><span class="story-step-num">3</span><b>Hình ảnh và giọng đọc</b><span>Chọn phong cách hình ảnh, giọng đọc, khung hình, số cảnh mỗi video.</span></div>
-        <div class="story-step"><span class="story-step-num">4</span><b>Dựng video</b><span>Mỗi chương thành 1 tập video 9:16, 16:9 hoặc 1:1, kèm phụ đề.</span></div>
       </div>
 
       <div class="factory-layout-grid">
         <!-- CỘT TRÁI: Truyện đang mở + cấu hình -->
         <div class="batch-col factory-col-order">
           <div class="factory-card">
-            <h3>📖 Truyện đang mở</h3>
+            <h3>Truyện đang mở</h3>
+            <label class="studio-field" id="storySavedLabel" hidden>Truyện đã lưu<select id="storySavedProjects" onchange="if(this.value) openStoryProject(this.value)"></select></label>
             <p class="factory-card-sub">Chọn truyện từ các nguồn bên phải để mở tại đây.</p>
             <div id="storyProjectEmpty" class="factory-empty" style="margin-top:12px;">Chưa mở truyện nào. Chọn 1 truyện trong kho, tìm trên web, nhập link, tải file hoặc dán văn bản.</div>
             <div id="storyProjectWrap" style="display:none; margin-top:12px;">
               <h4 id="storyProjectTitle" style="margin:0 0 4px; font-size:15px; color:var(--text);"></h4>
               <p class="factory-card-sub" id="storyProjectMeta"></p>
-              <div class="fx fx-between fx-ac" style="margin: 12px 0 8px;">
+              <nav class="ms-view-tabs" id="msStoryTabs"><button type="button" data-book="chapters">Chương</button><button type="button" data-book="refs">Nhân vật &amp; bối cảnh</button><button type="button" data-book="settings">Cài đặt dự án</button><button type="button" data-book="cost">Chi phí</button><button type="button" data-book="sources">Nguồn truyện</button></nav>
+              <div id="msBookCost" hidden></div>
+              <div id="msChapterTools" class="fx fx-between fx-ac" style="margin: 12px 0 8px;">
                 <label class="batch-block-label" style="margin:0;">Các chương</label>
                 <button type="button" class="btn btn-orange btn-xs" id="storyCreateAllBtn" onclick="createStoryVideos()">🎬 Tạo video tất cả chương</button>
               </div>
               <div id="storyChapterList"></div>
+              <div id="msBookRefs" hidden><div id="storyReferences"></div></div>
             </div>
           </div>
 
-          <div class="factory-card" style="margin-top:14px;">
-            <h3>🎨 Hình ảnh và giọng đọc</h3>
+          <div class="factory-card" id="msStorySettings" style="margin-top:14px;">
+            <header class="ms-settings-head"><h3>Thiết lập bản dựng</h3><button id="msSaveStorySettings" hidden type="button" class="btn btn-orange btn-sm">Lưu cài đặt dự án</button></header>
+            <div data-style-cards="storyStyleSelect"></div>
+            <label class="studio-field">Chế độ dựng<select id="storyRenderMode"><option value="ai_video">Video AI · Muse tạo chuyển động</option><option value="illustrated">Ảnh minh họa · chuyển động zoom</option></select></label>
+            <div data-cast-picker="story"></div>
+            <div data-caption-picker="story"></div>
             <p class="factory-card-sub">Áp dụng khi xào nấu và tạo video.</p>
             <div class="batch-form-block" style="margin-top:12px;">
               <label class="batch-block-label">Phong cách hình ảnh</label>
@@ -2116,39 +2153,20 @@
 
     <!-- ─ Panel: Video Tiếp Thị Liên Kết (Affiliate Marketing) ────── -->
     <div class="panel" id="panel-affiliate">
-      <!-- Header Banner -->
-      <div class="card aff-banner">
-        <div class="fx fx-ac fx-jc-sb fx-wrap fx-g12">
-          <div>
-            <div class="u-flex-10">
-              <span class="u-fs28">🛍️</span>
-              <div>
-                <h2 style="font-size:18px;font-weight:700;margin:0;color:var(--text);">
-                  Xưởng Sản Xuất Video Tiếp Thị Liên Kết (Affiliate Marketing Studio)
-                </h2>
-                <div class="u-fs125 u-c-muted u-mt2">
-                  Tự động hoá sản xuất video chuyển đổi cao cho <b>TikTok Shop · Shopee Affiliate · Facebook Reels · YouTube Shorts</b>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="u-flex-wrap">
-            <span class="badge aff-badge">🔥 TikTok Shop Ready</span>
-            <span class="badge aff-badge">📦 Shopee Video</span>
-            <span class="badge aff-badge">📱 9:16 Vertical HD</span>
-          </div>
-        </div>
+      <header class="studio-head"><div><h2>Video tiếp thị</h2><p>Chuẩn bị sản phẩm, duyệt lời thoại và xuất video bán hàng.</p></div></header>
+      <div class="studio-tabs" aria-label="Các bước tạo video tiếp thị">
+        <button type="button" data-aff-step="product" aria-pressed="true">Sản phẩm &amp; thiết lập</button>
+        <button type="button" data-aff-step="review" aria-pressed="false">Kịch bản &amp; xuất video</button>
       </div>
-
       <!-- Main 2-column layout -->
       <div class="affiliate-grid">
         <!-- LEFT COLUMN: Product & Campaign Inputs -->
-        <div class="aff-col">
+        <div class="aff-col" id="affProductStep">
           
           <!-- Card 1: Thông tin sản phẩm -->
           <div class="card">
             <div class="card-header">
-              <div class="card-title">📦 Thông Tin Sản Phẩm & Chương Trình Khuyến Mãi</div>
+              <div class="card-title">Sản phẩm</div>
             </div>
             
             <div class="u-col-12">
@@ -2202,6 +2220,33 @@
                 </div>
               </div>
 
+              <!-- Product Reference Image (Product Lock) -->
+              <div>
+                <label class="field-label">
+                  Ảnh sản phẩm gốc
+                </label>
+                <div class="fx fx-g10 fx-ac">
+                  <input type="file" id="affiliateImgUpload" accept="image/*" style="display:none;" onchange="onAffiliateImageUpload(event)">
+                  <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('affiliateImgUpload').click()" style="border:1px dashed var(--border);padding:8px 12px;">
+                    📁 Tải ảnh sản phẩm lên
+                  </button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="btnAffiliateFindImages" onclick="findAffiliateProductImages()" title="Tìm ảnh sản phẩm chuẩn trên web — dùng khi ảnh hiện tại chỉ là thùng/vỏ, không thấy bên trong" style="padding:8px 12px;">
+                    🔍 Tìm ảnh sản phẩm chuẩn
+                  </button>
+                  <div id="affiliateImgPreviewWrap" style="display:none;align-items:center;gap:8px;">
+                    <img loading="lazy" decoding="async" id="affiliateImgPreview" src="" style="width:100px;height:100px;object-fit:contain;border-radius:6px;border:1px solid var(--border);">
+                    <button type="button" class="btn btn-ghost btn-xs" onclick="clearAffiliateImage()" style="color:#ef4444;">✕ Xóa</button>
+                  </div>
+                </div>
+                <div class="u-fs11 u-c-muted u-mt4">
+                  Chọn ảnh đúng mẫu và màu bán. Studio gửi ảnh này cho Muse ở từng cảnh.
+                </div>
+                <div id="affiliateFindImagesWrap" style="display:none;margin-top:8px;">
+                  <div id="affiliateFindImagesStatus" class="u-fs11 u-c-muted"></div>
+                  <div id="affiliateFindImagesGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:6px;"></div>
+                </div>
+              </div>
+              <details class="studio-details"><summary>Điểm bán, giá và ưu đãi</summary><div class="u-col-12">
               <!-- Quick Presets Pills -->
               <div>
                 <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px;">
@@ -2242,41 +2287,11 @@
                 </div>
               </div>
 
-              <!-- Product Reference Image (Product Lock) -->
-              <div>
-                <label class="field-label">
-                  🖼️ Ảnh sản phẩm thực tế (Khóa mẫu Product Lock)
-                </label>
-                <div class="fx fx-g10 fx-ac">
-                  <input type="file" id="affiliateImgUpload" accept="image/*" style="display:none;" onchange="onAffiliateImageUpload(event)">
-                  <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('affiliateImgUpload').click()" style="border:1px dashed var(--border);padding:8px 12px;">
-                    📁 Tải ảnh sản phẩm lên
-                  </button>
-                  <button type="button" class="btn btn-ghost btn-sm" id="btnAffiliateFindImages" onclick="findAffiliateProductImages()" title="Tìm ảnh sản phẩm chuẩn trên web — dùng khi ảnh hiện tại chỉ là thùng/vỏ, không thấy bên trong" style="padding:8px 12px;">
-                    🔍 Tìm ảnh sản phẩm chuẩn
-                  </button>
-                  <div id="affiliateImgPreviewWrap" style="display:none;align-items:center;gap:8px;">
-                    <img loading="lazy" decoding="async" id="affiliateImgPreview" src="" style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--border);">
-                    <button type="button" class="btn btn-ghost btn-xs" onclick="clearAffiliateImage()" style="color:#ef4444;">✕ Xóa</button>
-                  </div>
-                </div>
-                <div class="u-fs11 u-c-muted u-mt4">
-                  💡 Ảnh này được AI dùng làm tham chiếu để sản phẩm trong video đồng nhất 100% với ảnh shop của bạn. Ảnh chỉ là thùng/vỏ? Bấm "Tìm ảnh sản phẩm chuẩn" để tìm ảnh bên trong sản phẩm.
-                </div>
-                <div id="affiliateFindImagesWrap" style="display:none;margin-top:8px;">
-                  <div id="affiliateFindImagesStatus" class="u-fs11 u-c-muted"></div>
-                  <div id="affiliateFindImagesGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:6px;"></div>
-                </div>
-              </div>
+              </div></details>
             </div>
           </div>
 
-          <!-- Card 2: Công thức kịch bản & Giọng đọc -->
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title">🎙️ Phong Cách Kịch Bản & Giọng Đọc Bán Hàng</div>
-            </div>
-
+          <details class="card studio-details"><summary>Kiểu quay, kịch bản và giọng đọc</summary>
             <div class="u-col-12">
               <!-- Shooting Style Selection (Kiểu quay) -->
               <div>
@@ -2340,23 +2355,17 @@
                 </select>
               </div>
 
-              <!-- Generate Button -->
-              <div class="u-mt6">
-                <button type="button" id="btnGenAffiliateScript" class="btn btn-primary u-w100" onclick="generateAffiliateScriptAction()" style="padding:12px;font-size:14px;font-weight:700;">
-                  ✨ AI Tạo Kịch Bản Video Tiếp Thị (5 Cảnh 9:16)
-                </button>
-              </div>
             </div>
-          </div>
+          </details>
+          <button type="button" id="btnGenAffiliateScript" class="btn btn-primary" onclick="generateAffiliateScriptAction()">Tạo kịch bản 5 cảnh →</button>
         </div>
-
-        <!-- RIGHT COLUMN: Storyboard Review & Video Export -->
-        <div class="aff-col">
+        <!-- Storyboard -->
+        <div class="aff-col" id="affReviewStep" hidden>
           
-          <div class="card" style="min-height:550px;">
+          <div class="card" >
             <div class="card-header fx-wrap fx-g10">
               <div>
-                <div class="card-title" id="affiliateScriptHeader">🎬 Kịch Bản Phân Cảnh Bán Hàng (Storyboard)</div>
+                <div class="card-title" id="affiliateScriptHeader">Kịch bản phân cảnh</div>
                 <div class="u-fs12 u-c-muted u-mt2" id="affiliateScriptSub">
                   Xem và chỉnh sửa trực tiếp từng câu thoại, prompt quay và nút nghe thử trước khi xuất video.
                   <span id="affiliateTotalDuration" class="u-fw700" style="color:var(--accent);"></span>
@@ -2424,7 +2433,7 @@
                 <div class="empty-icon">💡</div>
                 <div class="empty-title">Chưa có kịch bản phân cảnh</div>
                 <div class="empty-text">
-                  Nhập tên sản phẩm ở cột bên trái và bấm <b>"✨ AI Tạo Kịch Bản Video Tiếp Thị"</b> để tự động sản xuất 5 cảnh Hook - Nỗi đau - Trình diễn - Deal - Kêu gọi mua hàng!
+                  Điền thông tin sản phẩm rồi chọn Tạo kịch bản.
                 </div>
                 <button class="btn btn-ghost btn-sm" onclick="loadSampleAffiliateQuick()" style="border:1px solid var(--border);">
                   ⚡ Nạp Mẫu Sản Phẩm Xem Thử Ngay
@@ -2435,10 +2444,11 @@
             <!-- Render & Export Actions -->
             <div id="affiliateRenderActionBox" style="display:none;margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
               
+              <div data-caption-picker="affiliate"></div>
               <div class="fx fx-jc-sb fx-ac fx-wrap fx-g12 u-mb14">
                 <div>
-                  <div class="u-fs12 u-fw600 u-c-text">🎵 Nhạc nền & Phụ đề nhảy nhịp</div>
-                  <div class="u-muted-sm">Tự động hòa trộn BGM sôi động + Voiceover sắc nét + Phụ đề nổi bật.</div>
+                  <div class="u-fs12 u-fw600 u-c-text">Nhạc nền</div>
+                  <div class="u-muted-sm">Trộn cùng lời kể khi xuất phim.</div>
                 </div>
                 <div class="fx fx-g10 fx-ac">
                   <select id="affiliateBgmSelect" class="form-control" style="width:200px;font-size:12px;">
@@ -2449,7 +2459,7 @@
 
               <div class="fx fx-g10 fx-wrap">
                 <button type="button" id="btnAffiliateStartRender" class="btn btn-primary btn-lg" onclick="startAffiliateRenderJob()" style="flex:1;font-weight:700;">
-                  🚀 Bắt Đầu Tạo & Xuất Video Tiếp Thị 9:16
+                  Xuất video
                 </button>
                 <button type="button" class="btn btn-ghost" onclick="sendAffiliateToMainStudio()" title="Đưa toàn bộ phân cảnh sang tab Tạo Phim truyền thống để chỉnh sửa thêm">
                   📥 Nạp Vào Studio
@@ -2696,7 +2706,7 @@
       <div class="panel-head">
         <div>
           <h2>⚡ Tạo Video Nhanh</h2>
-          <div class="panel-sub">Gửi thẳng tới muse2api · Không ghép âm thanh/phụ đề</div>
+          <div class="panel-sub">Gửi qua <span id="qvProviderText">Muse</span> · Không ghép âm thanh/phụ đề</div>
         </div>
       </div>
       <div class="qv-grid">
@@ -2704,7 +2714,6 @@
       <div class="card">
         <div class="card-header">
           <div class="card-title">⚡ Tạo Video Nhanh</div>
-          <span style="font-size:12px;color:var(--text-muted);">Gửi thẳng tới muse2api · Không ghép âm thanh/phụ đề</span>
         </div>
 
         <!-- Prompt -->
@@ -2717,6 +2726,7 @@
           </div>
           <textarea id="qvPrompt" class="form-control" rows="4"
             placeholder="Nhập prompt tiếng Việt (vd: cô gái mukbang đồ ăn) hoặc tiếng Anh..."></textarea>
+          <div data-cast-picker="quick"></div><label class="studio-field">Phong cách<select id="qvStyle"><option value="cinematic">Điện ảnh chân thực</option></select></label><div data-style-cards="qvStyle"></div>
         </div>
 
 
@@ -2912,8 +2922,8 @@
                 🚀 Render Toàn Bộ (Đa luồng)
               </button>
               <div style="display:inline-flex;align-items:center;gap:4px;background:var(--bg0);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:12px;">
-                <span class="u-c-muted">Đa luồng:</span>
-                <select id="sdConcurrentSelect" style="border:none;background:transparent;padding:2px 4px;font-size:12px;font-weight:700;color:var(--accent);width:auto;">
+                <label><input id="sdChainFrames" type="checkbox" checked onchange="document.getElementById('sdConcurrentSelect').disabled=this.checked"> Nối khung cuối</label><span class="u-c-muted">Luồng độc lập</span>
+                <select id="sdConcurrentSelect" disabled style="border:none;background:transparent;padding:2px 4px;font-size:12px;font-weight:700;color:var(--accent);width:auto;">
                   <option value="6" selected>⚡ 6 luồng (Toàn bộ 6 tài khoản)</option>
                   <option value="1">1 luồng (Tuần tự)</option>
                   <option value="2">2 luồng song song</option>
@@ -3180,37 +3190,72 @@
           <div class="panel-sub">Kết nối Muse và khóa API Studio — phím tắt <span class="kbd">Alt</span>+<span class="kbd">O</span></div>
         </div>
       </div>
-      <div class="config-banner">
-        <span class="u-fs24">💡</span>
-        <div>
-          <strong>Hướng dẫn kết nối</strong><br>
-          <span class="u-c-muted u-fs12">Chọn <code>MUSE_PROVIDER</code> trong <code>.env</code>, rồi khởi động lại Studio.</span>
-        </div>
-      </div>
       <div class="settings-grid">
       <div class="card">
-        <div class="card-title u-mb16">Kết nối Muse · <span id="museProviderText">Đang kiểm tra…</span></div>
-        <div id="muse2apiConfig" class="form-row cols-2">
-          <div>
-            <label>URL Muse2API Server</label>
-            <input type="text" id="cfgApiUrl" placeholder="http://localhost:18610">
-          </div>
-          <div>
-            <label>API Key (MUSE2API_KEY)</label>
-            <input type="password" id="cfgApiKey" placeholder="m2a_your_secret_key">
-          </div>
-        </div>
+        <div class="card-title u-mb16">Kết nối Muse</div>
         <div class="form-row">
           <div>
-            <label>Số cảnh render song song mặc định</label>
+            <label for="museProviderSelect">Chế độ kết nối</label>
+            <select id="museProviderSelect" onchange="onMuseProviderChange()">
+              <option value="muse2api">Muse2API</option>
+              <option value="browser">Muse Browser (Chrome / Edge)</option>
+            </select>
+          </div>
+        </div>
+        <p class="u-c-muted u-fs12 u-mb12">Đang dùng <strong id="museProviderText">đang kiểm tra…</strong></p>
+        <p id="muse2apiConfig" class="u-c-muted u-fs12 u-mb12">Studio kết nối với URL và khóa Muse2API được cấu hình trên máy chủ.</p>
+        <div id="museBrowserConfig" hidden>
+          <div class="form-row">
+            <div>
+              <label for="museChromeProfile">Profile Chrome</label>
+              <select id="museChromeProfile" onchange="selectMuseChromeProfile()" disabled>
+                <option value="">Cửa sổ riêng của gateway</option>
+              </select>
+            </div>
+            <div>
+              <label for="museBrowserChatMode">Cuộc trò chuyện Muse</label>
+              <select id="museBrowserChatMode" onchange="selectMuseBrowserChatMode()" disabled>
+                <option value="side">Mở chat phụ cho mỗi yêu cầu</option>
+                <option value="main">Chỉ dùng chat chính</option>
+              </select>
+            </div>
+          </div>
+          <div class="fx fx-g10 u-mb12">
+            <button class="btn btn-ghost btn-sm" onclick="createMuseProfilePairing()">Tạo mã ghép nối</button>
+            <button class="btn btn-ghost btn-sm" onclick="loadMuseChromeProfiles()">Tải lại profile</button>
+            <button class="btn btn-ghost btn-sm" id="removeMuseChromeProfileBtn" onclick="removeMuseChromeProfile()" disabled>Bỏ ghép nối</button>
+          </div>
+          <div id="museProfilePairing" hidden>
+            <label for="museProfilePairCode">Mã ghép nối dùng một lần, có hiệu lực 10 phút</label>
+            <div class="fx fx-g10 u-mb12">
+              <input id="museProfilePairCode" type="text" readonly spellcheck="false">
+              <button class="btn btn-ghost btn-sm" onclick="copyMuseProfilePairCode()">Sao chép</button>
+            </div>
+          </div>
+          <p id="museChromeProfileStatus" class="u-c-muted u-fs12 u-mb12" aria-live="polite"></p>
+          <details class="u-mb12">
+            <summary>Dùng phiên Muse đăng nhập sẵn trong Chrome</summary>
+            <p class="u-c-muted u-fs12">Mở Chrome profile bạn muốn dùng. Vào <code>chrome://extensions</code>, bật Chế độ dành cho nhà phát triển và chọn <strong>Tải tiện ích đã giải nén</strong> từ thư mục <code>chrome-muse-profile</code> trong dự án.</p>
+            <p class="u-c-muted u-fs12">Mở tiện ích <strong>AI Movie Studio – Muse Profile</strong> trong profile đó, đặt tên và dán mã vừa tạo. Giữ tab Muse mà tiện ích mở rồi tải lại danh sách và chọn profile ở đây.</p>
+          </details>
+          <details class="u-mb12">
+            <summary>Thiết lập gateway Browser lần đầu</summary>
+            <p class="u-c-muted u-fs12">Cài <a href="https://github.com/duclm1x1/Muse-Chat-MCP" target="_blank" rel="noopener noreferrer">Muse-Chat-MCP</a>. Điền <code>MUSE_CHAT_MCP_DIR</code> và <code>MUSE_BROWSER_KEY</code> trong <code>.env</code> của Studio.</p>
+            <p class="u-c-muted u-fs12">Chạy <code>node --env-file=.env scripts/muse_browser_gateway.mjs</code> trong thư mục Studio rồi đăng nhập Muse ở trình duyệt mà gateway mở.</p>
+          </details>
+        </div>
+        <div id="museConcurrencyConfig" class="form-row">
+          <div>
+            <label for="cfgConcurrent">Số cảnh render song song mặc định</label>
             <input type="number" id="cfgConcurrent" value="12" min="1" max="12" oninput="updateConcurrent(this.value)" onchange="updateConcurrent(this.value)">
           </div>
         </div>
         <div class="fx fx-g10">
-          <button class="btn btn-primary" onclick="saveConfig()">💾 Lưu cấu hình</button>
-          <button class="btn btn-ghost" onclick="checkApiHealth()">🔍 Kiểm tra kết nối</button>
-          <span id="cfgTestResult" style="align-self:center;font-size:12px;color:var(--muted);"></span>
+          <button class="btn btn-primary" id="saveMuseProviderBtn" onclick="saveMuseSettings()" disabled>Lưu chế độ</button>
+          <button class="btn btn-ghost" id="checkMuseProviderBtn" onclick="checkSelectedMuseProvider()">Kiểm tra kết nối</button>
         </div>
+        <p id="museSettingsMessage" class="u-c-muted u-fs12" aria-live="polite"></p>
+        <p id="cfgTestResult" class="u-c-muted u-fs12" aria-live="polite"></p>
       </div>
       <div class="card">
         <div class="card-title u-mb16">🔑 Khóa API Studio (X-API-Key)</div>
@@ -3250,7 +3295,9 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js?v=20261125_browser" defer></script>
+<script src="static/js/app.js?v=20261126_editor" defer></script>
+<script src="static/js/muse-studio.js?v=2" defer></script>
+<script src="static/js/studio-editor.js?v=1" defer></script>
 <script src="static/js/ui.js?v=20261125_01" defer></script>
 
 <!-- Floating Multi-Shot Batch Action Bar -->

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from muse_connection import muse_connection
+from muse_connection import active_muse_provider, muse_connection
 load_dotenv()
 
 logger = logging.getLogger("ai_movie_studio.batch_video")
@@ -45,6 +45,8 @@ _CANCELLED_VIDEOS = set()
 _CANCELLED_LOCK = threading.Lock()
 
 # ── 1. Thư viện Phong cách Hình ảnh (Visual Styles) ──────────────────────────
+from studio_styles import install as install_studio_styles
+
 BATCH_VISUAL_STYLES: Dict[str, Dict[str, str]] = {
     "anime": {
         "id": "anime",
@@ -119,6 +121,7 @@ BATCH_VISUAL_STYLES: Dict[str, Dict[str, str]] = {
         "aspect_hint": "retro 90s"
     }
 }
+install_studio_styles(BATCH_VISUAL_STYLES)
 
 # ── 2. Thư viện Mẫu Prompt (Prompt Templates Catalog) ────────────────────────
 BATCH_PROMPT_TEMPLATES: List[Dict[str, Any]] = [
@@ -941,6 +944,8 @@ class BatchVideoManager:
                     "final_video_url": None,
                     "error": None
                 }
+                if preset and "chapter_index" in preset:
+                    item["chapter_index"] = preset["chapter_index"]
                 if extra:
                     # Audit #6 (2026-11-25): extra khong duoc ghi de cac
                     # truong he thong (id/status/...) — chi bo sung metadata.
@@ -1003,6 +1008,28 @@ class BatchVideoManager:
                     )
             return target
 
+    def edit_studio_draft(self, video_id: str, updates: dict) -> bool:
+        with _QUEUE_LOCK:
+            video = self.get_video(video_id)
+            if not video or video.get("status") != "draft" or video.get("studio_source") != "muse_studio":
+                return False
+            if video.get("guided") and any(s.get("frame") for s in video["scenes"]):
+                return False
+            updates["guided"] = video.get("guided", False)
+            updates["bundle"] = {**video.get("bundle", {}), "title": updates["title"]}
+            return bool(self.update_video(video_id, updates))
+
+    def set_scene_approval(self, video_id: str, index: int, approved: bool) -> bool:
+        with _QUEUE_LOCK:
+            video = self.get_video(video_id)
+            if not video or video.get("guided") or video.get("status") != "completed":
+                return False
+            scene = next((s for s in video["scenes"] if s.get("index") == index), None)
+            if scene is None:
+                return False
+            scene["approved"] = approved
+            return bool(self.update_video(video_id, {"scenes": video["scenes"]}))
+
     def delete_video(self, video_id: str) -> bool:
         if not is_safe_video_id(video_id):
             logger.warning("Cố gắng xóa video với ID không an toàn: %s", video_id)
@@ -1037,7 +1064,7 @@ class BatchVideoManager:
         with _QUEUE_LOCK:
             videos = self._read_queue()
             for v in videos:
-                if v.get("id") in target_ids and v.get("status") in ("draft", "failed"):
+                if not v.get("guided") and v.get("id") in target_ids and v.get("status") in ("draft", "failed"):
                     v["status"] = "queued"
                     v["error"] = None
                     v["progress"] = 0
@@ -1086,7 +1113,7 @@ class BatchVideoManager:
         with _QUEUE_LOCK:
             videos = self._read_queue()
             for v in videos:
-                if v.get("status") == "failed":
+                if not v.get("guided") and v.get("status") == "failed":
                     v["status"] = "queued"
                     v["error"] = None
                     v["progress"] = 0
@@ -1105,7 +1132,7 @@ class BatchVideoManager:
         with _QUEUE_LOCK:
             videos = self._read_queue()
             for v in videos:
-                if v.get("status") in ("draft", "queued"):
+                if not v.get("guided") and v.get("status") in ("draft", "queued"):
                     v["status"] = "queued"
                     v["current_step"] = "Đang trong hàng đợi"
                     count += 1
@@ -1125,7 +1152,7 @@ class BatchVideoManager:
         with _QUEUE_LOCK:
             videos = self._read_queue()
             for v in videos:
-                if v.get("id") == video_id:
+                if not v.get("guided") and v.get("id") == video_id:
                     v["status"] = "queued"
                     v["error"] = None
                     v["progress"] = 0
@@ -1174,7 +1201,7 @@ class BatchVideoManager:
         for i, s in enumerate(v.get("scenes", [])):
             s_idx = int(s.get("index") or (i + 1))
             src_clip_name = f"clip_{s_idx}.mp4"
-            src_audio_name = f"scene_{s_idx}.mp3"
+            src_audio_name = f"scene_{s_idx:03d}.mp3" if v.get("render_mode") == "ai_video" else f"scene_{s_idx}.mp3"
             dst_clip_rel = f"clips/shot_{s_idx:03d}_clip.mp4"
             dst_audio_rel = f"audio/shot_{s_idx:03d}_tts.mp3"
             shot_dir = proj_dir / "shots" / f"shot_{s_idx:03d}"
@@ -1209,12 +1236,22 @@ class BatchVideoManager:
                     pass
 
             src_img = v_dir / "images" / f"scene_{s_idx}.webp"
+            rendered_end = None
+            if v.get("guided"):
+                from studio_workflow import asset_path
+                if s.get("input_frame"):
+                    src_img = asset_path(video_id,s["input_frame"])
+                if s.get("last_frame"):
+                    end = asset_path(video_id,s["last_frame"])
+                    if end.is_file():
+                        shutil.copy2(end,shot_dir / "end.jpg")
+                        rendered_end = f"shots/shot_{s_idx:03d}/end.jpg"
             if src_img.exists() and src_img.stat().st_size > 500:
-                dst_img = shot_dir / "first_frame.webp"
+                dst_img = shot_dir / ("first_frame"+src_img.suffix)
                 try:
                     shutil.copy2(src_img, dst_img)
-                    first_frame = f"shots/shot_{s_idx:03d}/first_frame.webp"
-                    first_frame_url = f"/api/shot-desk/projects/{proj_id}/shots/{s_idx}/frames/first_frame.webp"
+                    first_frame = f"shots/shot_{s_idx:03d}/{dst_img.name}"
+                    first_frame_url = f"/api/shot-desk/projects/{proj_id}/shots/{s_idx}/frames/{dst_img.name}"
                 except Exception:
                     pass
 
@@ -1226,9 +1263,10 @@ class BatchVideoManager:
                 "compliance_prompt": None,
                 "risk_level": "low",
                 "voiceover": s.get("voiceover", ""),
-                "voice_mode": "narration",
+                "voice_mode": "dialogue" if s.get("dialogue") else "narration",
+                "dialogue":s.get("dialogue") or "",
                 "speaker": "",
-                "voice": default_voice,
+                "voice": s.get("voice") or default_voice,
                 "lip_sync": False,
                 "duration": max(2, dur_val),
                 "first_frame": first_frame,
@@ -1238,9 +1276,11 @@ class BatchVideoManager:
                 "middle_frame_url": None,
                 "last_frame_url": None,
                 "transition_in": None,
-                "transition_out": None,
+                "transition_out": s.get("transition_out"),
                 "transition_note": "",
-                "characters": [v["character"].get("name")] if v.get("character") and v["character"].get("name") else [],
+                "characters": s.get("characters") or ([v["character"]["name"]] if (v.get("character") or {}).get("name") else []),
+                "setting":s.get("setting") or "", "new_segment":s.get("new_segment",False),
+                "rendered_last_frame":rendered_end, "qc":s.get("qc"),
                 "status": shot_status,
                 "clip_path": target_clip,
                 "video_url": video_url,
@@ -1270,7 +1310,8 @@ class BatchVideoManager:
             "total_duration": sum(sh["duration"] for sh in shots),
             "shot_duration": 6,
             "shots": shots,
-            "characters": [v["character"]] if v.get("character") else [],
+            "characters": v.get("cast") or ([v["character"]] if v.get("character") else []),
+            "style_locks":{"style": BATCH_VISUAL_STYLES.get(v.get("visual_style"),{}).get("prompt_suffix","")},
             "timeline_settings": {
                 "music_volume": 0.25,
                 "voice_volume": 1.0,
@@ -1322,7 +1363,7 @@ def _generate_scene_image(
 ) -> bool:
     """Tạo ảnh tĩnh cho phân cảnh qua provider Muse đang chọn."""
     from batch_engine import generate_keyframe_image
-    provider, base_url, api_key = muse_connection()
+    provider, base_url, api_key = muse_connection(active_muse_provider())
     if not api_key:
         logger.warning("Chưa cấu hình khóa cho provider %s, bỏ qua gọi Muse AI.", provider)
         return False
@@ -1511,6 +1552,92 @@ def _generate_fallback_clip(
         return False
 
 
+class _BatchCancellation:
+    def __init__(self, video_id):
+        self.video_id = video_id
+
+    def is_set(self):
+        with _CANCELLED_LOCK:
+            return self.video_id in _CANCELLED_VIDEOS
+
+
+def _cast_reference(characters):
+    """Muse accepts one attachment. For an ensemble, put named portraits in reading order."""
+    from batch_engine import _browser_image_from_url
+    import base64
+    import io
+    from PIL import Image, ImageOps
+
+    portraits = [(c["name"], c["avatar"]) for c in characters if c.get("avatar")]
+    if len(portraits) < 2:
+        return (portraits[0][1] if portraits else None), ""
+    cols = min(3, len(portraits))
+    rows = (len(portraits) + cols - 1) // cols
+    sheet = Image.new("RGB", (320 * cols, 320 * rows), "#dddddd")
+    for i, (name, ref) in enumerate(portraits):
+        uri = (_browser_image_from_url(ref) if ref.startswith(("https://", "http://"))
+               else _resolve_character_ref_data_uri(ref))
+        if not uri or not uri.startswith("data:image/") or ";base64," not in uri:
+            raise ValueError(f"Không đọc được ảnh nhân vật {name}.")
+        with Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1], validate=True))) as im:
+            im.thumbnail((320, 320))
+            thumb = ImageOps.exif_transpose(im).convert("RGB")
+            x, y = i % cols * 320, i // cols * 320
+            sheet.paste(thumb, (x + (320 - thumb.width) // 2, y + (320 - thumb.height) // 2))
+    data = io.BytesIO()
+    sheet.save(data, "JPEG", quality=90)
+    order = ", ".join(name for name, _ in portraits)
+    instruction = (f"Identity guide, read across each row from the top left: {order}. "
+                   "Place the referenced subjects naturally in one shot; do not reproduce the reference grid.")
+    return "data:image/jpeg;base64," + base64.b64encode(data.getvalue()).decode("ascii"), instruction
+
+
+async def _render_story_clip(video, scene, index, directory, destination, cancel, progress):
+    import httpx
+    import batch_engine
+
+    provider, base_url, key = muse_connection(active_muse_provider())
+    cast = video.get("cast") or ([video["character"]] if video.get("character") else [])
+    content = f"{scene['prompt']}\n{scene['voiceover']}"
+    present = batch_engine.match_film_characters(content, cast)
+    if scene.get("raw_studio") or scene.get("approved_frame"):
+        reference = scene.get("approved_frame")
+        identity_guide = "Use the attached image as the exact first frame. Match position, lighting and screen direction." if reference else ""
+    else:
+        reference, identity_guide = await asyncio.to_thread(_cast_reference, present)
+    if not scene.get("raw_studio") and not scene.get("approved_frame"):
+        from consistency import opening_reference
+        previous_frame = directory / "scenes" / f"scene_{index - 1:03d}_last_frame.jpg"
+        previous_scene = next((s for s in video.get("scenes", []) if s["index"] == index - 1), None)
+        reference, source = opening_reference(scene, previous_scene, str(previous_frame) if previous_frame.is_file() else None, reference)
+        if source == "last_frame":
+            identity_guide = "Match the closing frame of the preceding shot: screen direction, lighting and positions."
+    style = BATCH_VISUAL_STYLES.get(video.get("visual_style"), {}).get("prompt_suffix") or ""
+
+    shot = {
+        **scene, "size": video["aspect_ratio"], "reference_image": reference,
+        "keep_reference": bool(reference), "require_narration": True, "offscreen_narration": not scene.get("dialogue"),
+        "duration": scene["duration"] if scene.get("raw_studio") or scene.get("approved_frame") else min((5, 6, 8, 10), key=lambda d: abs(d - scene.get("duration", 6))),
+        "prompt": (f"{scene['prompt']}\nStage the following narrated beat in motion: {scene['voiceover']}\n"
+                   "One continuous moving shot. Show the action unfolding from its start to its consequence. "
+                   "Preserve recurring faces, wardrobe, prop proportions and screen direction. "
+                   "Use the reference for visual continuity. Only show characters present in this beat. "
+                   f"Keep lettering and subtitles out of the generated footage. {identity_guide}"),
+    }
+    (directory / "scenes").mkdir(exist_ok=True)
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        result = await batch_engine.process_scene(
+            client, shot, asyncio.Semaphore(1), base_url, key, str(directory), video["voice"],
+            progress_cb=progress, style_locks={"style":style}, characters=cast, muse_provider=provider, cancel_event=cancel,
+            raw_only=bool(scene.get("raw_studio") or scene.get("approved_frame")))
+    if result.get("status") != "done" or result.get("tts_failed"):
+        raise RuntimeError(result.get("error") or result.get("tts_error") or "Muse chưa trả clip có lời kể.")
+    if cancel.is_set():
+        raise asyncio.CancelledError()
+    os.replace(result["video_path"], destination)
+    return result.get("used_prompt") or shot["prompt"]
+
+
 def _process_single_video(video_id: str):
     """Xử lý render toàn bộ các cảnh của 1 video trong hàng đợi."""
     if not is_safe_video_id(video_id):
@@ -1533,6 +1660,11 @@ def _process_single_video(video_id: str):
         # Chỉ xử lý nếu video đang thực sự ở trạng thái queued
         if v.get("status") != "queued":
             logger.info("Video %s có trạng thái '%s', không phải 'queued', bỏ qua.", video_id, v.get("status"))
+            return
+
+        if v.get("guided"):
+            import studio_workflow
+            studio_workflow.run(v)
             return
 
         logger.info("🎬 Bắt đầu sản xuất batch video: %s ('%s')", video_id, v.get("title"))
@@ -1585,7 +1717,8 @@ def _process_single_video(video_id: str):
         ai_images_count = 0
         fallback_scenes_count = 0
 
-        # Bước 1: Xử lý từng cảnh (TTS -> AI Image -> Ken Burns Clip)
+        motion_video = v.get("render_mode") == "ai_video"
+        cancel = _BatchCancellation(video_id)
         for idx, sc in enumerate(scenes, start=1):
             # Kiểm tra hủy bỏ giữa các cảnh
             with _CANCELLED_LOCK:
@@ -1601,6 +1734,27 @@ def _process_single_video(video_id: str):
             clip_path = clips_dir / f"clip_{idx}.mp4"
 
             base_pct = int(10 + ((idx - 1) / total_scenes) * 65)
+            if motion_video:
+                def progress(scene_index, message, extra=None):
+                    BATCH_MANAGER.update_video(video_id, {
+                        "current_step": f"Cảnh {scene_index}/{total_scenes} · {message}", "progress": base_pct})
+
+                if sc.get("video_status") != "done" or not clip_path.is_file():
+                    sc.update(video_status="running", error=None)
+                    BATCH_MANAGER.update_video(video_id, {"scenes": scenes})
+                    try:
+                        sc["used_prompt"] = asyncio.run(_render_story_clip(
+                            v, sc, idx, v_dir, clip_path, cancel, progress))
+                        sc["actual_duration"] = batch_engine.get_media_duration(str(clip_path))
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as error:
+                        sc.update(video_status="failed", error=str(error))
+                        raise RuntimeError(f"Cảnh {idx}: {error}") from error
+                    sc["video_status"] = "done"
+                    BATCH_MANAGER.update_video(video_id, {"scenes": scenes})
+                scene_clips.append(clip_path)
+                continue
 
             # 1.1 Lồng tiếng TTS (Có retry, nếu lỗi dứt khoát báo failed, KHÔNG tạo video câm im lặng)
             BATCH_MANAGER.update_video(video_id, {
@@ -1657,6 +1811,10 @@ def _process_single_video(video_id: str):
                         pass
                 prompt_to_gen = sc.get("prompt", "")
                 char_ref = None
+                if v.get("cast"):
+                    matched = batch_engine.match_film_characters(f"{prompt_to_gen} {vo_text}", v["cast"])
+                    char_ref, guide = _cast_reference(matched)
+                    prompt_to_gen = batch_engine.apply_film_characters(prompt_to_gen, sc, matched) + " " + guide
                 if mode == "character":
                     cur_v = BATCH_MANAGER.get_video(video_id) or v
                     char_obj = cur_v.get("character") or {}
@@ -1722,7 +1880,7 @@ def _process_single_video(video_id: str):
             scene_clips.append(clip_path)
 
         # Kiểm tra chất lượng hình ảnh AI: Nếu toàn bộ cảnh không thể sinh ảnh AI, báo lỗi failed rõ ràng
-        if ai_images_count == 0:
+        if not motion_video and ai_images_count == 0:
             raise RuntimeError("Toàn bộ các cảnh đều không thể tạo hình ảnh AI qua Muse2API. Vui lòng kiểm tra lại trạng thái dịch vụ AI vẽ ảnh.")
 
         # Bước 2: Ghép nối thô timeline
@@ -1731,32 +1889,14 @@ def _process_single_video(video_id: str):
             "current_step": "Đang ghép nối timeline các cảnh..."
         })
 
-        from composer import create_srt, burn_subtitles, _resolve_ffmpeg
-        ffmpeg_exe = _resolve_ffmpeg()
-
+        from composer import create_srt, burn_subtitles, merge_clips_advanced, compute_timeline_offsets
         raw_concat_mp4 = v_dir / "_raw_concat.mp4"
         final_mp4 = v_dir / "final.mp4"
-        concat_txt = v_dir / "concat.txt"
         srt_file = v_dir / "subtitles.srt"
-
-        # Tạo file danh sách nối cảnh (escape ' theo chuan ffmpeg — audit
-        # #6, 2026-11-25: f-string tho vo khi username dang O'Brien).
-        from composer import _concat_list_line
-        lines = [_concat_list_line(str(p.resolve())) for p in scene_clips]
-        concat_txt.write_text("\n".join(lines), encoding="utf-8")
-
-        # Ghép re-encode để đồng bộ âm thanh và khung hình 100%
-        cmd_reencode = [
-            ffmpeg_exe, "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", str(concat_txt),
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "aac", "-b:a", "192k",
-            str(raw_concat_mp4)
-        ]
-        res_re = subprocess.run(cmd_reencode, capture_output=True, timeout=180)
-        if res_re.returncode != 0 or not raw_concat_mp4.exists():
-            raise RuntimeError(f"FFmpeg ghép video thất bại: {res_re.stderr.decode(errors='replace')}")
+        paths = [str(p) for p in scene_clips]
+        transitions = [s.get("transition_out") or "dissolve" for s in scenes[:-1]]
+        offsets = compute_timeline_offsets(paths, transitions, 0.75)
+        merge_clips_advanced(paths, transitions, 0.75, str(raw_concat_mp4), "720p", aspect_ratio)
 
         # Bước 3: Tạo file phụ đề SRT và khắc phụ đề điện ảnh vào video (Burn-in Subtitles)
         BATCH_MANAGER.update_video(video_id, {
@@ -1770,7 +1910,7 @@ def _process_single_video(video_id: str):
                 results=scenes,
                 output_srt=str(srt_file),
                 clip_durations=[sc.get("actual_duration") or sc.get("duration", 6.0) for sc in scenes],
-                media_paths=[str(p) for p in scene_clips]
+                media_paths=paths, timeline_offsets=offsets
             )
         except Exception as e_srt:
             logger.error(f"Lỗi tạo file phụ đề SRT cho {video_id}: {e_srt}")
@@ -1786,6 +1926,8 @@ def _process_single_video(video_id: str):
                 srt_file=str(srt_file),
                 output_video=str(final_mp4),
                 font_size=12,
+                style=v.get("subtitle_style", "cinema"),
+                position=v.get("subtitle_position", "bottom"),
                 raise_on_error=True
             )
         except Exception as e_burn:
@@ -1838,7 +1980,10 @@ def _process_single_video(video_id: str):
     finally:
         # Luôn đảm bảo dọn sạch cờ hủy sau khi kết thúc xử lý (Point 6)
         with _CANCELLED_LOCK:
+            deleted = video_id in _CANCELLED_VIDEOS
             _CANCELLED_VIDEOS.discard(video_id)
+        if deleted and is_safe_video_id(video_id):
+            shutil.rmtree(BATCH_DIR / video_id, ignore_errors=True)
 
 
 def _worker_loop():

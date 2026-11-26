@@ -41,10 +41,10 @@ TTS_SLEEP = 1.0
 POLL_SLEEP = 0.15
 
 
-def _make_clip(path: str, duration: float = 2.0, color: str = "red", freq: int = 440):
+def _make_clip(path: str, duration: float = 2.0, freq: int = 440):
     cmd = [
         FFMPEG, "-y",
-        "-f", "lavfi", "-i", f"color=c={color}:s=320x240:d={duration}:r=24",
+        "-f", "lavfi", "-i", f"testsrc2=s=1280x720:d={duration}:r=30",
         "-f", "lavfi", "-i", f"sine=f={freq}:d={duration}:r=44100",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",

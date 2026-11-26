@@ -13,6 +13,27 @@ import pytest
 import affiliate_engine
 
 
+def test_https_connection_uses_pinned_ip_and_original_tls_hostname(monkeypatch):
+    import socket
+    import ssl
+    from unittest.mock import Mock
+    from story_engine import _PinnedHTTPSConnection
+
+    context = ssl.create_default_context()
+    dial = Mock()
+    wrap = Mock()
+    monkeypatch.setattr(socket, "create_connection", dial)
+    monkeypatch.setattr(context, "wrap_socket", wrap)
+    conn = _PinnedHTTPSConnection("shopee.vn", pinned_ip="192.0.2.1", timeout=5, context=context)
+    try:
+        conn.connect()
+        dial.assert_called_once_with(("192.0.2.1", 443), 5, None)
+        wrap.assert_called_once_with(dial.return_value, server_hostname="shopee.vn")
+        assert conn.sock is wrap.return_value
+    finally:
+        conn.close()
+
+
 class _FakeResp:
     """Response tối giản cho mock http_get (đủ cho import_affiliate_product_link)."""
 

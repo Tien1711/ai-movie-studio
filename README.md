@@ -98,19 +98,31 @@ Mở [Studio trên máy này](http://127.0.0.1:8000). Điền `MUSE2API_KEY` do 
 
 ### 5. Kết nối qua Chrome hoặc Edge
 
-Studio mặc định dùng `MUSE_PROVIDER=muse2api`. Chế độ `browser` dùng [Muse-Chat-MCP](https://github.com/duclm1x1/Muse-Chat-MCP) để gửi yêu cầu trong một hồ sơ Chrome hoặc Edge đã đăng nhập Muse. Gateway local chuyển phản hồi chat và liên kết ảnh/video thành kết quả cho các luồng hiện có của Studio.
+Studio mặc định dùng `MUSE_PROVIDER=muse2api`. Chế độ `browser` dùng phiên Muse đã đăng nhập để tạo kịch bản, ảnh và video. Cửa sổ riêng sử dụng driver [Muse-Chat-MCP](https://github.com/duclm1x1/Muse-Chat-MCP). Profile Chrome đã ghép nối sử dụng tiện ích của Studio.
 
 1. Cài Node.js 22 và Chrome hoặc Edge. Clone [Muse-Chat-MCP](https://github.com/duclm1x1/Muse-Chat-MCP) vào thư mục riêng và chạy `npm install` tại đó. Studio đã kiểm tra giao diện driver tại commit `6c00e8c`.
-2. Trong `.env` của Studio, chọn `MUSE_PROVIDER=browser`, điền đường dẫn tuyệt đối vào `MUSE_CHAT_MCP_DIR` và tạo một khóa ngẫu nhiên riêng cho `MUSE_BROWSER_KEY`. Gateway dùng cổng `MUSE_BROWSER_PORT` (mặc định `18787`). Với Edge, thêm `MUSE_CHANNEL=msedge`.
-3. Từ thư mục Studio, chạy lệnh sau. Hoàn tất đăng nhập trong cửa sổ trình duyệt do gateway mở và giữ gateway chạy.
+2. Trong `.env` của Studio, điền đường dẫn tuyệt đối vào `MUSE_CHAT_MCP_DIR` và tạo một khóa ngẫu nhiên riêng cho `MUSE_BROWSER_KEY`. Gateway dùng cổng `MUSE_BROWSER_PORT` (mặc định `18787`). Với Edge, thêm `MUSE_CHANNEL=msedge`.
+3. Từ thư mục Studio, chạy lệnh sau và giữ gateway chạy. Đăng nhập Muse trong cửa sổ do gateway mở nếu bạn chọn dùng cửa sổ riêng. Đặt `MUSE_BROWSER_OPEN_SEPARATE=0` nếu chỉ dùng profile Chrome đã ghép nối.
 
    ```bash
    node --env-file=.env scripts/muse_browser_gateway.mjs
    ```
 
-4. Khởi động lại Studio bằng `python app.py`. Trong **Cài đặt**, kiểm tra trạng thái **Muse Browser**. Để quay lại API, đặt `MUSE_PROVIDER=muse2api` rồi khởi động lại Studio.
+4. Vào **Cài đặt → Kết nối Muse**, chọn **Muse Browser (Chrome / Edge)** và bấm **Kiểm tra kết nối**. Bấm **Lưu chế độ** rồi khởi động lại Studio để áp dụng. Để quay lại API, chọn **Muse2API** trong cùng menu, lưu và khởi động lại. Studio ưu tiên lựa chọn đã lưu trên giao diện. `MUSE_PROVIDER` trong `.env` dùng làm mặc định trước khi lưu.
 
-Browser xử lý một yêu cầu tại một thời điểm. Tỷ lệ và thời lượng được gửi dưới dạng hướng dẫn trong prompt, còn kết quả do Muse quyết định. Khi dùng ảnh tham chiếu, tải ảnh lên Studio. Các clip Quick Video qua Browser dùng liên kết chia sẻ của Muse có thời hạn, nên tải về nếu cần lưu. Các luồng dựng phim tải media vào workspace như bình thường.
+Browser xử lý một yêu cầu tại một thời điểm. Khi dùng ảnh tham chiếu, tải ảnh lên Studio. Gateway chờ ảnh hoặc video của lượt hiện tại kể cả khi phần văn bản đã hoàn thành. Gateway hỗ trợ liên kết chia sẻ và media nội tuyến như ảnh WebP, video MP4 hoặc WebM. Cửa sổ riêng dùng `downloadMedia` của Muse-Chat-MCP để lấy tệp nội tuyến. Tiện ích gửi tệp từ profile đã ghép nối sang gateway theo từng gói. Tệp nội tuyến được giữ tối đa một giờ, nên tải clip Quick Video về nếu cần lưu lâu hơn. Các luồng dựng phim tải media vào workspace.
+
+Trong **Cài đặt → Kết nối Muse → Cuộc trò chuyện Muse**, chọn **Chỉ dùng chat chính** để gửi yêu cầu vào cuộc trò chuyện chính của tài khoản Muse. Các yêu cầu chạy sau khi lưu dùng lựa chọn mới. Với profile Chrome đã ghép nối, chế độ này cần tiện ích **AI Movie Studio – Muse Profile** phiên bản 1.2.0 trở lên.
+
+Tỷ lệ khung hình và thời lượng là yêu cầu trong prompt. Kiểm tra tệp thực tế để xác nhận thông số đầu ra. [Thông số đo bằng ffprobe trong Muse Manual](https://github.com/duclm1x1/Muse-Chat-MCP/blob/6c00e8c/manual/MUSE_MANUAL.md)
+
+#### Dùng profile Chrome đã đăng nhập Muse
+
+1. Mở profile cần dùng từ Chrome. Trong profile đó, vào `chrome://extensions`, bật **Chế độ dành cho nhà phát triển**, rồi chọn **Tải tiện ích đã giải nén** và trỏ tới thư mục `chrome-muse-profile` của Studio.
+2. Trong **Cài đặt → Kết nối Muse → Muse Browser**, bấm **Tạo mã ghép nối**. Mở tiện ích **AI Movie Studio – Muse Profile** trong profile Chrome đích, nhập tên để nhận biết profile và dán mã. Tiện ích mở một tab Muse dành cho Studio, dùng phiên đang đăng nhập trong profile này. Điền đúng cổng gateway nếu bạn đã thay cổng mặc định.
+3. Bấm **Tải lại profile** để xem trạng thái. Gateway tự chọn profile đầu tiên khi người dùng chưa chọn chế độ riêng. Khi có nhiều profile, chọn profile muốn dùng trong menu. Lựa chọn có hiệu lực ngay khi gateway rảnh.
+
+Giữ tab Muse của tiện ích mở khi render. Nếu Studio báo Muse đang chờ xác nhận, xem yêu cầu và bấm xác nhận trong tab đó để tiếp tục. Sau khi cập nhật tiện ích, bấm **Tải lại** tại `chrome://extensions`, rồi bấm **Mở tab Muse cho Studio** trong tiện ích. Profile đã ghép nối được lưu lại. Nếu phiên Muse hết hạn, đăng nhập lại trong profile đang dùng.
 
 ---
 

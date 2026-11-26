@@ -499,7 +499,9 @@ def test_api_create_videos_injects_scenes(monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["total"] == 2
     assert captured["auto_run"] is True
-    assert captured["extra"] == {"story_source": "story", "story_project_id": pid}
+    assert captured["extra"] == {"story_source": "story", "story_project_id": pid, "cast": [],
+                                 "render_mode": "ai_video", "subtitle_style": "cinema",
+                                 "subtitle_position": "bottom"}
     assert len(captured["scripts"]) == 2
     for script in captured["scripts"]:
         assert len(script["scenes"]) == 3

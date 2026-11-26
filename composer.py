@@ -200,7 +200,8 @@ def _clips_uniform_for_concat(clips: List[str]) -> bool:
     track audio đứt quãng giữa chừng. Chỉ khi đồng nhất mới được đi
     stream-copy; còn lại phải đi nhánh encode (đã chuẩn hóa)."""
     infos = [_probe_video_info(c) for c in clips]
-    if any(i["fps"] is None or i["width"] is None for i in infos):
+    if not infos or any(not i["fps"] or not i["width"] or not i["height"] or i["has_audio"] is None
+                            or (i["has_audio"] and (not i["sample_rate"] or not i["channels"])) for i in infos):
         return False
     base = infos[0]
     for i in infos[1:]:
@@ -734,9 +735,10 @@ def create_srt(
             # Điểm kết thúc phụ đề: Khớp thời điểm âm thanh kết thúc (đệm tối thiểu 1.5s để người xem kịp đọc)
             sub_end = round(max(sub_start + 1.5, shot_start + offset), 3)
             # Không vượt quá giới hạn của cảnh trên timeline
-            sub_end = min(round(shot_start + dur, 3), sub_end)
+            boundary = min(shot_start + dur, timeline_offsets[i + 1]) if i + 1 < n else shot_start + dur
+            sub_end = min(round(boundary, 3), sub_end)
             if sub_end <= sub_start:
-                sub_end = round(shot_start + dur, 3)
+                continue
 
             # Chia voiceover thành các cue ngắn (tối đa 2 dòng/cue, ≤ 42 ký tự/dòng)
             # để burn-in không che nửa khung hình; thời gian chia tỉ lệ theo số ký tự
@@ -951,7 +953,7 @@ def compose_scene_video(
             "-i", scene_audio,
             "-map", "0:v:0",
             "-map", "1:a:0",
-            "-af", "aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
             "-vf", vf_str,
             "-c:v", "libx264", "-preset", preset, "-crf", crf,
             "-pix_fmt", "yuv420p",
@@ -1366,7 +1368,7 @@ def merge_all_scenes(scene_clips: List[str], output_merged: str, transition: str
         return
 
     transitions = [transition] * (len(scene_clips) - 1)
-    bridge_dur = 0.5 if transition in ("fade", "dissolve") else 0.0
+    bridge_dur = 0.75 if transition in ("fade", "dissolve") else 0.0
     merge_clips_advanced(scene_clips, transitions=transitions, sound_bridge_duration=bridge_dur, output_path=output_merged)
 
 
@@ -1567,6 +1569,46 @@ def merge_audio_with_transitions(
         return output_path
 
 
+def _write_karaoke_ass(srt_path: str, ass_path: str, font_size: int, alignment: int, style: str = "karaoke"):
+    """Distribute each timed SRT cue over short phrases, highlighting the current word."""
+    def centiseconds(stamp):
+        h, m, s, ms = map(int, re.split("[:,]", stamp))
+        return (h * 3600 + m * 60 + s) * 100 + ms // 10
+
+    def stamp(t):
+        return f"{t // 360000}:{t // 6000 % 60:02}:{t // 100 % 60:02}.{t % 100:02}"
+
+    header = (
+        "[Script Info]\nScriptType: v4.00+\nPlayResY: 288\nWrapStyle: 0\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+        "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Main,Arial,{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,"
+        f"-1,0,0,0,100,100,0,0,1,1.4,0,{alignment},12,12,22,1\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+    if style == "word_box":
+        header = header.replace("&H00FFFFFF,&H00FFFFFF,&H00000000", "&H00000000,&H00000000,&H0000DAFF").replace(",1,1.4,0,", ",3,2,0,")
+    events = []
+    for block in re.split(r"\n\s*\n", Path(srt_path).read_text(encoding="utf-8-sig").strip()):
+        lines = block.splitlines()
+        start, end = map(centiseconds, lines[1].split(" --> "))
+        words = " ".join(lines[2:]).translate(str.maketrans({"\\": "＼", "{": "｛", "}": "｝"})).split()
+        total = sum(map(len, words))
+        elapsed = 0
+        for i, word in enumerate(words):
+            a = start + (end - start) * elapsed // total
+            elapsed += len(word)
+            b = start + (end - start) * elapsed // total
+            phrase = words[i // 4 * 4:i // 4 * 4 + 4]
+            phrase[i % 4] = r"{\c&H00CFFF&}" + word + r"{\rMain}"
+            if style == "word_box":
+                phrase = [word]
+            if b > a:
+                events.append(f"Dialogue: 0,{stamp(a)},{stamp(b)},Main,,0,0,0,,{' '.join(phrase)}")
+    Path(ass_path).write_text(header + "\n".join(events) + "\n", encoding="utf-8")
+
+
 def burn_subtitles(
     input_video: str,
     srt_file: str,
@@ -1576,6 +1618,8 @@ def burn_subtitles(
     total_duration: Optional[float] = None,
     raise_on_error: bool = False,
     timeout: float = 300,
+    style: str = "cinema",
+    position: str = "bottom",
 ):
     """Khắc phụ đề (burn-in) phong cách điện ảnh: Chữ trắng viền đen sắc nét, căn giữa đáy, không hộp đen, không che nhân vật.
 
@@ -1613,7 +1657,21 @@ def burn_subtitles(
         "Alignment=2,"                # Căn giữa đáy màn hình
         "MarginV=25"                  # Cách đáy an toàn cho cả màn hình ngang và 9:16
     )
+    alignment = {"top": 8, "middle": 5, "bottom": 2}.get(position, 2)
+    subtitle_style = subtitle_style.replace("Alignment=2", f"Alignment={alignment}")
+    if style == "headline":
+        subtitle_style = subtitle_style.replace("&H00FFFFFF", "&H0000DAFF") + ",Bold=-1"
+    elif style == "neon":
+        subtitle_style = subtitle_style.replace("OutlineColour=&H00000000", "OutlineColour=&H0025C5FF").replace("Outline=1.2", "Outline=2").replace("Shadow=0.5", "Shadow=1.5")
+    elif style == "boxed":
+        subtitle_style = subtitle_style.replace("BorderStyle=1", "BorderStyle=3")
     vf = f"subtitles={clean_srt_name}:force_style='{subtitle_style}'"
+    if style in {"karaoke", "word_box"}:
+        Path(clean_srt_path).unlink()
+        clean_srt_name = Path(clean_srt_name).with_suffix(".ass").name
+        clean_srt_path = os.path.join(work_dir, clean_srt_name)
+        _write_karaoke_ass(srt_file, clean_srt_path, font_size, alignment, style)
+        vf = f"ass={clean_srt_name}"
 
     cmd = [
         FFMPEG, "-y",
@@ -1881,6 +1939,8 @@ def compose_full_movie(
     aspect_ratio: str = "16:9",
     allow_partial: bool = False,       # True: Cho phép xuất bản nháp; False: Bắt buộc đủ 100% cảnh
     total_scenes: Optional[int] = None,
+    subtitle_style: str = "cinema",
+    subtitle_position: str = "bottom",
 ) -> Dict[str, Any]:
     """
     Pipeline hậu kỳ toàn diện từ danh sách results của batch_engine:
@@ -1964,8 +2024,9 @@ def compose_full_movie(
             print(f"[Hậu kỳ] Clip cảnh {idx} OK ({real_clip_dur:.2f}s) → {clip_out}")
 
         # Bước 2: Tạo SRT đồng bộ chính xác với audio onset và timeline chuyển cảnh
-        bridge_dur = 0.5 if transition in ("fade", "dissolve") else 0.0
-        timeline_offsets = compute_timeline_offsets(scene_clips, [transition] * max(0, len(scene_clips) - 1), bridge_dur)
+        transitions = [r.get("transition_out") or transition for r in ok_results[:-1]]
+        bridge_dur = 0.75 if any(t in ("fade","dissolve") for t in transitions) else 0.0
+        timeline_offsets = compute_timeline_offsets(scene_clips, transitions, bridge_dur)
 
         # Chuẩn hóa tên file an toàn cho hệ thống tập tin và FFmpeg (bỏ emoji, dấu ngoặc, dấu phẩy)
         clean_title = re.sub(r'[^a-zA-Z0-9_\-]', '_', project_title)
@@ -1996,13 +2057,14 @@ def compose_full_movie(
 
         _check_compose_cancelled()
         merged = os.path.join(tmp_dir, f"merged_{ts}.mp4")
-        merge_all_scenes(scene_clips, merged, transition=transition)
+        merge_clips_advanced(scene_clips, transitions, bridge_dur, merged, quality, aspect_ratio)
         print(f"[Hậu kỳ] Đã ghép video thành công: {merged}")
 
         video_to_mix = merged
         if subtitle_mode == "burn_in" and srt_path and os.path.getsize(srt_path) > 0:
             with_sub = os.path.join(tmp_dir, f"with_sub_{ts}.mp4")
-            burn_subtitles(merged, srt_path, with_sub, font_size=font_size, raise_on_error=True)
+            burn_subtitles(merged, srt_path, with_sub, font_size=font_size, raise_on_error=True,
+                           style=subtitle_style, position=subtitle_position)
             if not os.path.isfile(with_sub) or os.path.getsize(with_sub) <= 1000:
                 raise RuntimeError("FFmpeg không tạo được video đã khắc phụ đề.")
             video_to_mix = with_sub

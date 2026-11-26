@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<title>Muse Profile</title>
+<style>
+  body { font: 14px system-ui, sans-serif; width: 290px; margin: 16px; color: #161622; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  label { display: grid; gap: 4px; margin-bottom: 10px; }
+  input, button { font: inherit; padding: 6px; }
+  button { margin-bottom: 8px; }
+  p { margin: 4px 0 10px; }
+  #status { color: #393768; overflow-wrap: anywhere; }
+</style>
+<h1>Muse Profile · AI Movie Studio</h1>
+<p id="status" aria-live="polite">Đang kiểm tra…</p>
+<button type="button" id="open" hidden>Mở tab Muse cho Studio</button>
+<form id="pair" hidden>
+  <label>Tên profile <input id="name" maxlength="60" placeholder="Ví dụ: 1230" required></label>
+  <label>Mã ghép nối <input id="code" minlength="32" maxlength="32" autocomplete="off" spellcheck="false" required></label>
+  <label>Cổng gateway <input id="port" type="number" min="1" max="65535" value="18787" required></label>
+  <button type="submit">Ghép nối profile này</button>
+</form>
+<button type="button" id="reconnect" hidden>Ghép nối lại</button>
+<script src="popup.js"></script>
+</html>

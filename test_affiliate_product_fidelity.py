@@ -566,7 +566,7 @@ def test_ai_prompt_bans_price_when_empty(monkeypatch):
         def json(self):
             scenes = [{
                 "index": i + 1, "title": f"C{i + 1}", "role": r,
-                "duration": 10, "prompt": "Product shot.",
+                "duration": [8, 10, "6", None, "invalid"][i], "prompt": "Product shot.",
                 "voiceover": "Xem sản phẩm này nhé.", "badge": "XEM NGAY",
             } for i, r in enumerate(
                 ["hook", "pain", "demo", "proof", "cta"])]
@@ -598,6 +598,7 @@ def test_ai_prompt_bans_price_when_empty(monkeypatch):
     assert "99k" not in user_content
     assert res.compliance_disclaimer == affiliate_engine.HEALTH_DISCLAIMER
     assert isinstance(res.warnings, list)
+    assert [scene.duration for scene in res.scenes] == [8, 10, 6, 5, 5]
 
     req_price = _ensure_req_no_price()
     req_price.price_sale = "850k"

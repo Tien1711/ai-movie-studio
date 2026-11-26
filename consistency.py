@@ -245,6 +245,8 @@ def _check(level: str, code: str, message: str, suggestion: str = "",
 
 
 def _scene_text(scene: Dict[str, Any]) -> str:
+    if scene.get("setting"):
+        return str(scene["setting"])
     parts = [str(scene.get("prompt") or ""), str(scene.get("voiceover") or "")]
     for seg in scene.get("voice_segments") or []:
         if isinstance(seg, dict):
@@ -306,11 +308,66 @@ def _has_people(req: Dict[str, Any]) -> bool:
     return False
 
 
+def opening_reference(scene, previous, last_frame, anchor, fallback="fallback_image", *, retry=False):
+    """Resolve one provider attachment. Explicit product/shot locks take precedence."""
+    index = scene.get("index", 1)
+    old_setting = (previous or {}).get("setting") or ""
+    setting = scene.get("setting") or ""
+    boundary = bool(scene.get("new_segment") or (old_setting and setting and
+                    str(old_setting).strip().casefold() != str(setting).strip().casefold()))
+    if anchor and (scene.get("keep_reference") or retry or boundary or index == 1 or index % CONSISTENCY_ANCHOR_EVERY == 0):
+        return anchor, "anchor"
+    if last_frame and not boundary and not retry:
+        return last_frame, "last_frame"
+    if index > 1 and fallback == "stop":
+        raise ValueError(f"Cảnh {index} thiếu khung nối. Đã dừng theo cấu hình.")
+    if fallback == "fallback_image" and anchor:
+        return anchor, "fallback_image"
+    return None, "independent"
+
+
+def resolve_scene_cast(scene, registry):
+    """Validate explicitly declared cast and resolve named dialogue without changing the words."""
+    aliases = {str(alias).strip().casefold(): c for c in registry if c.get("kind", "character") == "character"
+               for alias in [c.get("id"), c.get("name"), *(c.get("aliases") or [])] if alias}
+    names = scene.get("characters") or []
+    cast = []
+    def lookup(name):
+        c = aliases.get(name.strip().casefold())
+        if not c:
+            raise ValueError(f"Chưa đăng ký nhân vật {name}.")
+        if not any(isinstance(c.get(k), str) and c[k].strip() for k in ("character_block","block","description","character_sheet")):
+            raise ValueError(f"Nhân vật {name} thiếu mô tả nhận dạng.")
+        if c not in cast:
+            cast.append(c)
+        return c
+    for name in names:
+        lookup(name)
+    segments = []
+    for line in (scene.get("dialogue") or "").splitlines():
+        if not line.strip():
+            continue
+        marker, sep, words = line.partition(":")
+        if sep:
+            c = lookup(marker)
+        elif names:
+            c, words = lookup(names[0]), line
+        else:
+            raise ValueError("Thoại chưa có tên người nói hoặc nhân vật đầu tiên.")
+        voice = c.get("voice_id") or c.get("voice")
+        if isinstance(voice, dict):
+            voice = voice.get("voice_id") or voice.get("id")
+        if not voice or not words.strip():
+            raise ValueError(f"Thiếu lời thoại hoặc giọng đã khóa cho {c['name']}.")
+        segments.append({"character":c["name"], "voice":voice, "text":words.strip()})
+    return cast, segments
+
+
 def consistency_anchor_reference(scene: Dict[str, Any]) -> Optional[str]:
     """Ảnh neo nhân vật cho mốc reset drift: keyframe của scene, nếu không
     có thì ảnh tham chiếu nhân vật. Trả None khi không có gì để neo."""
     return (scene.get("keyframe_path")
-            or scene.get("character_reference") or None)
+            or scene.get("character_reference") or scene.get("reference_image") or None)
 
 
 def run_consistency_checks(req: Dict[str, Any],
@@ -325,6 +382,16 @@ def run_consistency_checks(req: Dict[str, Any],
     scenes = req.get("scenes") or []
     locks = req.get("style_locks") or {}
     default_voice = str(req.get("voice") or "")
+
+    for scene in scenes:
+        try:
+            _, segments = resolve_scene_cast(scene, req.get("characters") or [])
+            if segments:
+                scene = {**scene, "voice_segments": segments}
+                if len({s["character"] for s in segments}) > len({s["voice"] for s in segments}):
+                    checks.append(_check("warning","duplicate_voice","Hai nhân vật đang dùng cùng một giọng.",scene_index=scene.get("index")))
+        except ValueError as error:
+            checks.append(_check("error", "cast_registry", str(error), scene_index=scene.get("index")))
 
     # ── 1. lock_present (error): có người/thoại mà chưa khóa nhân vật ──
     if _has_people(req):

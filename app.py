@@ -24,7 +24,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Literal, Optional, Set
 
 import aiofiles
 import httpx
@@ -34,12 +34,13 @@ load_dotenv()
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from batch_engine import run_batch, generate_keyframe_image, heal_prompt_with_ai, apply_style_locks, sanitize_prompt_heuristics
 from composer import compose_full_movie, audit_movie_scenes, compose_scene_video, run_cancellable_compose
 from consistency import run_consistency_checks
-from muse_connection import muse_connection
+import muse_connection as muse_config
 from tts_manager import list_all_voices, synthesize_voice, VIENEU_VOICES_CONFIG, OMNIVOICE_VOICES_CONFIG
 from affiliate_engine import (
     AFFILIATE_CATEGORIES,
@@ -59,7 +60,7 @@ from affiliate_engine import (
 logger = logging.getLogger("ai_movie_studio")
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────
-MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY = muse_connection()
+MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY = muse_config.muse_connection(muse_config.active_muse_provider())
 _MUSE_KEY_NAME = "MUSE_BROWSER_KEY" if MUSE_PROVIDER == "browser" else "MUSE2API_KEY"
 _MUSE_MAX_CONCURRENT = 1 if MUSE_PROVIDER == "browser" else 12
 
@@ -489,6 +490,13 @@ class SceneItem(BaseModel):
     duration: int = Field(default=5, ge=1, le=60)
     size: str = Field(default="16:9", max_length=10)
     reference_image: Optional[str] = None    # Ảnh tham chiếu nhân vật (URL hoặc base64 Data URL)
+    keep_reference: bool = False
+    characters: List[str] = Field(default_factory=list, max_length=30)
+    setting: str = Field(default="", max_length=500)
+    dialogue: str = Field(default="", max_length=3000)
+    new_segment: bool = False
+    transition_out: str = Field(default="", max_length=50)
+    offscreen_narration: bool = False
     chain_from_previous: Optional[bool] = False # First/Last Frame Chaining: kế thừa khung hình cuối của cảnh trước
     sheet_angle: Optional[str] = "front"        # "front" | "side" | "closeup" | "fullbody"
     last_frame_url: Optional[str] = None
@@ -498,7 +506,19 @@ class SceneItem(BaseModel):
     compliance_prompt: Optional[str] = Field(default=None, max_length=5000)
 
 
-class MovieRequest(BaseModel):
+class CaptionSettings(BaseModel):
+    subtitle_style: Literal["cinema", "headline", "boxed", "karaoke", "word_box", "neon"] = "cinema"
+    subtitle_position: Literal["bottom", "middle", "top"] = "bottom"
+
+
+class MovieRequest(CaptionSettings):
+    world_bible: Dict[str,str] = Field(default_factory=dict,max_length=100)
+
+    def render_scene(self, scene):
+        result = scene.model_dump()
+        result["world_description"] = self.world_bible.get(scene.setting, "")
+        return result
+
     title: str = Field(default="my_movie", max_length=200)
     voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=200)  # Giọng mặc định toàn phim
     voice_mode: Optional[str] = "tts"    # "tts" | "ai_voice" (đưa thoại vào prompt để AI tự sinh tiếng)
@@ -1073,7 +1093,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             job["progress"] = min(74, 5 + int(done / max(total, 1) * 70))
             _save_job_best_effort(job)
 
-        scenes_dicts = [s.model_dump() for s in req.scenes]
+        scenes_dicts = [req.render_scene(s) for s in req.scenes]
 
         # ── Batch render hàng loạt ──
         batch_timing: Dict[str, float] = {}
@@ -1092,6 +1112,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
             voice_mode=req.voice_mode or "tts",
             timing=batch_timing,
             cancel_event=cancel_event,
+            muse_provider=MUSE_PROVIDER,
             # Snapshot nhân vật CỦA PHIM này (đã lưu ở create_movie) —
             # scene nhắc tên ai thì dán đúng Character Block của người đó.
             characters=job.get("characters") or copy.deepcopy(req.characters or []),
@@ -1191,6 +1212,11 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         # 1. Thử lại các cảnh lỗi
         # 2. Xuất bản nháp (Draft) bỏ qua cảnh thiếu
         # 3. Hủy xuất phim
+        if job["qc_failed_scenes"] and not req.allow_partial:
+            job["status"] = "audit_pending"
+            job_log(job, "Đã dừng xuất tự động. Xem lại các cảnh có cảnh báo QC trước khi chọn xuất hoặc dựng lại.")
+            _save_job_best_effort(job)
+            return
         if not audit["is_complete"] and not req.allow_partial:
             job["status"] = "audit_pending"
             job_log(job, f"⚠️ Cảnh báo kiểm định: Phát hiện {audit['failed_count']} cảnh lỗi / thiếu. Đã tạm dừng xuất phim để bạn xem xét và quyết định!")
@@ -1248,6 +1274,7 @@ async def film_pipeline(job: Dict, req: MovieRequest):
                     music_volume=req.music_volume if req.music_volume is not None else 0.25,
                     voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
                     subtitle_mode=req.subtitle_mode or "burn_in",
+                    subtitle_style=req.subtitle_style, subtitle_position=req.subtitle_position,
                     quality=req.quality or "720p",
                     transition=req.transition or "none",
                     aspect_ratio=req.aspect_ratio or "16:9",
@@ -1575,7 +1602,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
                     job_log(job, f"✨ [Cảnh {s.index}] Đã chuyển đổi prompt sang phiên bản an toàn!")
                     s.prompt = healed
 
-        scenes_dicts = [s.model_dump() for s in failed_scenes]
+        scenes_dicts = [req.render_scene(s) for s in failed_scenes]
 
         def retry_progress_cb(idx: int, msg: str):
             _set_scene(job, idx, {"status": "running", "msg": msg})
@@ -1592,6 +1619,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             progress_cb=retry_progress_cb,
             voice_mode=req.voice_mode or "tts",
             cancel_event=retry_cancel_event,
+            muse_provider=MUSE_PROVIDER,
             characters=job.get("characters") or copy.deepcopy(req.characters or []),
         )
 
@@ -1628,7 +1656,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
                     " mất tiếng (lỗi synthesis, đã dùng audio im lặng) — kiểm tra lại giọng đọc trước khi xuất phim!")
 
         # Kiểm định lại toàn bộ các cảnh sau khi thử lại
-        all_scene_dicts = [s.model_dump() for s in req.scenes]
+        all_scene_dicts = [req.render_scene(s) for s in req.scenes]
         audit = audit_movie_scenes(all_scene_dicts, all_results)
         job["audit"] = audit
         _save_job_best_effort(job)
@@ -1652,6 +1680,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
                 music_volume=req.music_volume if req.music_volume is not None else 0.25,
                 voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
                 subtitle_mode=req.subtitle_mode or "burn_in",
+                subtitle_style=req.subtitle_style, subtitle_position=req.subtitle_position,
                 quality=req.quality or "720p",
                 transition=req.transition or "none",
                 aspect_ratio=req.aspect_ratio or "16:9",
@@ -1966,7 +1995,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
         async with httpx.AsyncClient(follow_redirects=True) as client:
             res = await process_scene(
                 client=client,
-                scene=target_scene.model_dump(),
+                scene=req.render_scene(target_scene),
                 sem=sem,
                 base_url=MUSE_API_URL,
                 api_key=MUSE_API_KEY,
@@ -1974,6 +2003,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
                 voice=req.voice,
                 progress_cb=single_cb,
                 voice_mode=req.voice_mode or "tts",
+                muse_provider=MUSE_PROVIDER,
                 # Snapshot nhân vật CỦA PHIM này — render lại 1 shot vẫn
                 # dán đúng Character Block như render cả phim.
                 characters=job.get("characters") or copy.deepcopy(req.characters or []),
@@ -2032,7 +2062,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
                 except Exception as ce:
                     job_log(job, f"⚠️ Lỗi ghép clip cảnh {idx}: {ce}")
             else:
-                scenes_dicts = [s.model_dump() for s in req.scenes]
+                scenes_dicts = [req.render_scene(s) for s in req.scenes]
                 audit = audit_movie_scenes(scenes_dicts, all_results)
                 job["audit"] = audit
                 if audit["is_complete"] and not recompose_final:
@@ -2053,6 +2083,7 @@ async def single_scene_pipeline(job: Dict, target_scene: SceneItem, recompose_fi
                             music_volume=req.music_volume if req.music_volume is not None else 0.25,
                             voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
                             subtitle_mode=req.subtitle_mode or "burn_in",
+                            subtitle_style=req.subtitle_style, subtitle_position=req.subtitle_position,
                             quality=req.quality or "720p",
                             transition=req.transition or "none",
                             aspect_ratio=req.aspect_ratio or "16:9",
@@ -2431,6 +2462,7 @@ async def job_sse(job_id: str, request: Request):
                     "status": job["status"],
                     "progress": job["progress"],
                     "scenes": job["scenes"],
+                    "source": job.get("source"),
                     "logs": job["logs"][last_log_count:],
                     "final_video": job.get("final_video"),
                     "srt_file": job.get("srt_file"),
@@ -2521,6 +2553,7 @@ def list_jobs():
         items.append({
             "id": j["id"],
             "title": title or j["id"],
+            "source": j.get("source") or ("affiliate" if any("[Tiếp Thị Liên Kết]" in msg for msg in j.get("logs", [])[:3]) else None),
             "status": j["status"],
             "progress": j["progress"],
             "total": j.get("total", 0),
@@ -2635,6 +2668,7 @@ async def api_compose_job(job_id: str, payload: Optional[ComposeJobRequest] = No
             music_volume=music_volume,
             voice_volume=voice_volume,
             subtitle_mode=subtitle_mode,
+            subtitle_style=req.subtitle_style if req else "cinema", subtitle_position=req.subtitle_position if req else "bottom",
             quality=quality,
             transition=transition,
             aspect_ratio=aspect_ratio,
@@ -3317,6 +3351,7 @@ def api_shot_desk_discard_previous(project_id: str, shot_index: int):
 
 
 class RenderAllRequest(BaseModel):
+    chain: bool = True
     concurrent: int = Field(default=6, ge=1, le=24)
 
 
@@ -3346,7 +3381,8 @@ async def api_shot_desk_render_all(project_id: str, payload: Optional[RenderAllR
     else:
         concurrent = num_accounts
 
-    concurrent = max(1, min(1 if MUSE_PROVIDER == "browser" else 24, concurrent))
+    chain = payload is None or payload.chain
+    concurrent = 1 if chain else max(1, min(1 if MUSE_PROVIDER == "browser" else 24, concurrent))
 
     active_set = ACTIVE_SHOT_TASKS.setdefault(project_id, set())
     proj_dir = get_safe_project_dir(project_id)
@@ -3391,21 +3427,27 @@ async def api_shot_desk_render_all(project_id: str, payload: Optional[RenderAllR
                     project_id=project_id,
                     shot_index=shot_idx,
                     base_url=MUSE_API_URL,
-                    api_key=MUSE_API_KEY
+                    api_key=MUSE_API_KEY, chain=chain
                 )
             except Exception as ex:
+                from shot_desk import update_shot_state
+                await update_shot_state(project_id,shot_idx,{"status":"ready","error":str(ex)})
                 print(f"[ShotDesk Concurrent Error shot {shot_idx}] {ex}")
             finally:
                 ACTIVE_SHOT_TASKS.get(project_id, set()).discard(shot_idx)
 
     async def _run_batch():
+        if chain:
+            for shot in sorted(eligible, key=lambda s: s["index"]):
+                await _render_one(shot["index"])
+            return
         tasks = [_render_one(s["index"]) for s in eligible]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.create_task(_run_batch())
     return {
         "success": True,
-        "message": f"Đã kích hoạt render đa luồng cho {len(eligible)} cảnh (song song {concurrent} luồng qua {num_accounts} tài khoản)!",
+        "message": f"Đã bắt đầu dựng {len(eligible)} cảnh · " + ("nối khung cuối tuần tự" if chain else f"{concurrent} luồng độc lập"),
         "count": len(eligible),
         "concurrent": concurrent,
         "accounts": num_accounts
@@ -4373,9 +4415,12 @@ async def api_generate_character_sheet(char_id: str, req: SheetGenRequest):
                         if img_url:
                             if img_url.startswith("/"):
                                 img_url = f"{MUSE_API_URL}{img_url}"
-                            img_resp = await client.get(img_url, timeout=180.0)
-                            if img_resp.status_code == 200:
-                                fname = f"bible_{char_id}_{ang}_{uuid.uuid4().hex[:6]}.png"
+                            media_headers = muse_config.browser_media_headers(img_url, MUSE_API_URL, MUSE_API_KEY)
+                            img_resp = await client.get(img_url, timeout=180.0, **({"headers": media_headers} if media_headers else {}))
+                            image_kind = _sniff_image_kind(img_resp.content[:16]) if img_resp.status_code == 200 else None
+                            if image_kind:
+                                extension = "jpg" if image_kind == "jpeg" else image_kind
+                                fname = f"bible_{char_id}_{ang}_{uuid.uuid4().hex[:6]}.{extension}"
                                 save_path = WORKSPACE / "_uploads" / fname
                                 (WORKSPACE / "_uploads").mkdir(parents=True, exist_ok=True)
                                 with open(save_path, "wb") as f:
@@ -4672,47 +4717,157 @@ async def delete_studio_session(request: Request):
     return response
 
 
+class MuseSettingsRequest(BaseModel):
+    provider: Literal["muse2api", "browser"]
+
+
+def _muse_settings():
+    selected = muse_config.saved_muse_provider() or MUSE_PROVIDER
+    return {
+        "provider": selected,
+        "active_provider": MUSE_PROVIDER,
+        "restart_required": selected != MUSE_PROVIDER,
+    }
+
+
+@app.get("/api/settings/muse")
+async def get_muse_settings():
+    return JSONResponse(_muse_settings(), headers={"Cache-Control": "no-store"})
+
+
+@app.put("/api/settings/muse")
+async def update_muse_settings(payload: MuseSettingsRequest, request: Request):
+    _check_local_form_origin(request)
+    path = muse_config.MUSE_SETTINGS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(path, {"provider": payload.provider})
+    except OSError as error:
+        logger.warning("Không lưu được cấu hình Muse: %s", error)
+        raise HTTPException(status_code=500, detail="Không lưu được cấu hình Muse.") from error
+    return _muse_settings()
+
+
+class ChromeProfileSelection(BaseModel):
+    id: uuid.UUID | None
+
+
+class MuseBrowserChatMode(BaseModel):
+    mode: Literal["side", "main"]
+
+
+async def _browser_profiles_request(method: str, path: str = "", **kwargs):
+    try:
+        _, url, key = muse_config.muse_connection("browser")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if not key:
+        raise HTTPException(status_code=503, detail="Chưa cấu hình MUSE_BROWSER_KEY.")
+    try:
+        async with _shared_client_ctx() as client:
+            response = await client.request(
+                method, f"{url}/admin/chrome-profiles{path}",
+                headers={"Authorization": f"Bearer {key}"}, timeout=10.0, **kwargs,
+            )
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(status_code=502, detail="Không kết nối được gateway Muse Browser.") from error
+    if not response.is_success:
+        detail = data.get("error") if isinstance(data, dict) else None
+        raise HTTPException(status_code=response.status_code, detail=detail or "Gateway Browser chưa hỗ trợ profile Chrome.")
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+def _check_local_form_origin(request: Request):
+    origin = request.headers.get("origin")
+    if origin is not None and origin != f"{request.url.scheme}://{request.url.netloc}":
+        raise HTTPException(status_code=403, detail="Origin không hợp lệ.")
+
+
+@app.get("/api/settings/muse/chrome-profiles")
+async def list_muse_chrome_profiles():
+    return await _browser_profiles_request("GET")
+
+
+@app.post("/api/settings/muse/chrome-profiles/pair")
+async def create_muse_profile_pairing(request: Request):
+    _check_local_form_origin(request)
+    return await _browser_profiles_request("POST", "/pair")
+
+
+@app.put("/api/settings/muse/chrome-profiles/selection")
+async def select_muse_chrome_profile(payload: ChromeProfileSelection, request: Request):
+    _check_local_form_origin(request)
+    return await _browser_profiles_request("PUT", "/selection", json={"id": str(payload.id) if payload.id else None})
+
+
+@app.put("/api/settings/muse/chrome-profiles/chat-mode")
+async def select_muse_browser_chat_mode(payload: MuseBrowserChatMode, request: Request):
+    _check_local_form_origin(request)
+    return await _browser_profiles_request("PUT", "/chat-mode", json={"mode": payload.mode})
+
+
+@app.delete("/api/settings/muse/chrome-profiles/{profile_id}")
+async def remove_muse_chrome_profile(profile_id: uuid.UUID, request: Request):
+    _check_local_form_origin(request)
+    return await _browser_profiles_request("DELETE", f"/{profile_id}")
+
+
+async def _check_muse_gateway(provider: str, url: str, key: Optional[str]):
+    accounts = 0
+    ready = False
+    error = ""
+    try:
+        if not key:
+            key_name = "MUSE_BROWSER_KEY" if provider == "browser" else "MUSE2API_KEY"
+            raise RuntimeError(f"Chưa cấu hình {key_name}.")
+        async with _shared_client_ctx() as client:
+            response = await client.get(
+                f"{url}/admin/accounts",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=15.0,
+            )
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, list):
+                accounts = len(data)
+            elif isinstance(data, dict):
+                accounts = data.get("stats", {}).get("total", len(data.get("accounts", [])))
+            if provider == "browser":
+                ready = isinstance(data, dict) and data.get("ready") is True
+                if not ready:
+                    hint = data.get("error") if isinstance(data, dict) else None
+                    error = str(hint)[:160] if hint else "Mở Chrome hoặc Edge của gateway và đăng nhập Muse."
+            else:
+                ready = True
+        else:
+            error = f"Gateway trả HTTP {response.status_code}."
+    except Exception as exc:
+        error = str(exc)[:120]
+    return {"ready": ready, "accounts": accounts, "error": error}
+
+
+@app.get("/api/settings/muse/health")
+async def muse_settings_health(provider: Literal["muse2api", "browser"]):
+    try:
+        connection = muse_config.muse_connection(provider)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    result = await _check_muse_gateway(*connection)
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/health")
 async def health_check():
     """Check whether the active Muse provider is ready."""
-    muse_url = MUSE_API_URL
-    studio_ok = True
-    muse_ok = False
-    muse_error = ""
-    accounts = 0
-    try:
-        if not MUSE_API_KEY:
-            raise RuntimeError(f"Muse API key chưa được cấu hình ({_MUSE_KEY_NAME})")
-        async with _shared_client_ctx() as client:
-            r = await client.get(
-                f"{muse_url}/admin/accounts",
-                headers={"Authorization": f"Bearer {MUSE_API_KEY}"},
-                timeout=15.0,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, list):
-                    accounts = len(data)
-                elif isinstance(data, dict):
-                    accounts = data.get("stats", {}).get("total", len(data.get("accounts", [])))
-                if MUSE_PROVIDER == "browser":
-                    muse_ok = isinstance(data, dict) and data.get("ready") is True
-                    if not muse_ok:
-                        muse_error = "Mở Chrome của gateway và đăng nhập Muse."
-                else:
-                    muse_ok = True
-            else:
-                muse_error = f"HTTP {r.status_code}"
-    except Exception as e:
-        muse_error = str(e)[:120]
-
+    result = await _check_muse_gateway(MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY)
     return {
-        "studio": studio_ok,
-        "muse2api": muse_ok,
+        "studio": True,
+        "muse2api": result["ready"],
         "muse_provider": MUSE_PROVIDER,
-        "muse_url": muse_url,
-        "accounts": accounts,
-        "muse_error": muse_error,
+        "muse_url": MUSE_API_URL,
+        "accounts": result["accounts"],
+        "muse_error": result["error"],
     }
 
 
@@ -4986,6 +5141,8 @@ async def auto_enhance_prompt(prompt: str, size: str = "16:9") -> str:
 
 
 class QuickVideoRequest(BaseModel):
+    cast_ids: list[str] = Field(default_factory=list, max_length=6)
+    visual_style: str = Field(default="",max_length=50)
     prompt: str = Field(max_length=5000)
     duration: int = Field(default=5, ge=1, le=60)
     size: str = Field(default="16:9", max_length=10)
@@ -5006,7 +5163,7 @@ async def api_quick_video_enhance_prompt(req: EnhancePromptReq):
 
 @app.post("/api/quick-video")
 async def api_quick_video(req: QuickVideoRequest):
-    """Tạo video ngắn trực tiếp qua muse2api /v1/videos, bỏ qua toàn bộ pipeline phim."""
+    """Tạo video ngắn qua kết nối Muse đang hoạt động."""
     require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
     prompt_to_send = req.prompt.strip()
     # Tự động tối ưu hóa prompt nếu nhập tiếng Việt hoặc prompt quá ngắn để đảm bảo Muse AI nhận diện đúng
@@ -5018,6 +5175,26 @@ async def api_quick_video(req: QuickVideoRequest):
         except Exception:
             pass
 
+    from batch_engine import character_block_of
+    try:
+        cast = _selected_cast(req.cast_ids)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    for ch in cast:
+        block = character_block_of(ch)
+        if not block:
+            raise HTTPException(422, f"Nhân vật {ch['name']} thiếu mô tả nhận dạng.")
+        if block not in prompt_to_send:
+            prompt_to_send += "\n" + ch["name"] + ": " + block
+    if req.visual_style:
+        if req.visual_style not in BATCH_VISUAL_STYLES:
+            raise HTTPException(422, "Phong cách không hợp lệ.")
+        prompt_to_send += "\n" + BATCH_VISUAL_STYLES[req.visual_style]["prompt_suffix"]
+    if cast and not req.reference_image:
+        from batch_video_engine import _cast_reference
+        req.reference_image, order = await asyncio.to_thread(_cast_reference, cast)
+        if order:
+            prompt_to_send += "\n" + order
     payload: Dict[str, Any] = {
         "prompt": prompt_to_send,
         "duration": req.duration,
@@ -5030,11 +5207,13 @@ async def api_quick_video(req: QuickVideoRequest):
             local_p = UPLOAD_DIR / os.path.basename(ref)
             if local_p.exists():
                 with open(local_p, "rb") as f:
+                    image = f.read()
+                    kind = _sniff_image_kind(image) or ("gif" if image.startswith((b"GIF87a", b"GIF89a")) else "png")
                     payload["reference_image"] = (
-                        f"data:image/png;base64,{base64.b64encode(f.read()).decode('ascii')}"
+                        f"data:image/{kind};base64,{base64.b64encode(image).decode('ascii')}"
                     )
             else:
-                payload["reference_image"] = f"http://localhost:8000{ref}"
+                raise HTTPException(422, "Ảnh tham chiếu không còn trong thư viện. Chọn lại ảnh trước khi tạo video.")
         else:
             payload["reference_image"] = ref
 
@@ -5052,7 +5231,7 @@ async def api_quick_video(req: QuickVideoRequest):
             data = r.json()
             return {"success": True, **data}
         return JSONResponse(
-            {"success": False, "error": f"muse2api HTTP {r.status_code}: {r.text[:300]}"},
+            {"success": False, "error": f"Muse HTTP {r.status_code}: {r.text[:300]}"},
             status_code=r.status_code,
         )
     except Exception as exc:
@@ -5061,7 +5240,7 @@ async def api_quick_video(req: QuickVideoRequest):
 
 @app.get("/api/quick-video/{task_id}")
 async def api_quick_video_status(task_id: str):
-    """Kiểm tra trạng thái task video nhanh từ muse2api."""
+    """Kiểm tra trạng thái task video nhanh từ kết nối Muse đang hoạt động."""
     require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
     try:
         async with _shared_client_ctx() as client:
@@ -5096,7 +5275,7 @@ async def api_quick_video_status(task_id: str):
 
 
 @app.get("/api/quick-video/{task_id}/stream")
-async def api_quick_video_stream(task_id: str):
+async def api_quick_video_stream(task_id: str, request: Request):
     """Proxy stream video nhanh từ muse2api về browser (tránh CORS)."""
     require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
     try:
@@ -5121,20 +5300,46 @@ async def api_quick_video_stream(task_id: str):
             video_url = f"{MUSE_API_URL}{video_url}"
 
 
-        async def _stream():
-            async with httpx.AsyncClient(timeout=120.0) as stream_client:
-                async with stream_client.stream("GET", video_url) as resp:
-                    async for chunk in resp.aiter_bytes(65536):
-                        yield chunk
+        headers = muse_config.browser_media_headers(video_url, MUSE_API_URL, MUSE_API_KEY)
+        headers["Accept-Encoding"] = "identity"
+        if request.headers.get("range"):
+            headers["Range"] = request.headers["range"]
+        stream_client = httpx.AsyncClient(timeout=120.0)
+        try:
+            upstream = await stream_client.send(stream_client.build_request("GET", video_url, headers=headers), stream=True)
+        except BaseException:
+            await stream_client.aclose()
+            raise
 
-        return StreamingResponse(_stream(), media_type="video/mp4")
+        async def close_stream():
+            await upstream.aclose()
+            await stream_client.aclose()
+
+        if upstream.status_code not in (200, 206):
+            code = upstream.status_code
+            outgoing_headers = {"Content-Range": upstream.headers["content-range"]} if "content-range" in upstream.headers else {}
+            await close_stream()
+            return JSONResponse({"error": f"Không tải được video (HTTP {code})."}, status_code=code, headers=outgoing_headers)
+
+        passthrough = {
+            name: upstream.headers[name]
+            for name in ("accept-ranges", "content-range", "content-length", "content-encoding")
+            if name in upstream.headers
+        }
+        return StreamingResponse(
+            upstream.aiter_raw(65536),
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "video/mp4"),
+            headers=passthrough,
+            background=BackgroundTask(close_stream),
+        )
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 # ── AFFILIATE MARKETING (TIẾP THỊ LIÊN KẾT) ──────────────────────────────────
 
-class AffiliateRenderRequest(BaseModel):
+class AffiliateRenderRequest(CaptionSettings):
     title: str = Field(default="Video Tiếp Thị", max_length=200)
     scenes: List[Dict[str, Any]] = Field(max_length=200)
     voice: str = Field(default="vieneu:AdamBua", max_length=200)
@@ -5186,6 +5391,8 @@ async def api_affiliate_import_link(req: AffiliateLinkImportRequest):
         result = await asyncio.to_thread(import_affiliate_product_link, url)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
     except Exception as e:
         return JSONResponse(
             {"error": f"Không tải được link: {e}"}, status_code=502
@@ -5263,11 +5470,14 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
             voice=s.get("voice") or req.voice or "vieneu:AdamBua",
             duration=_dur,
             size=req.aspect_ratio or "9:16",
-            reference_image=s.get("reference_image") or None
+            reference_image=s.get("reference_image") or None,
+            keep_reference=bool(s.get("reference_image")),
+            offscreen_narration=True,
         ))
 
     movie_req = MovieRequest(
         title=req.title or "Video Tiếp Thị",
+        subtitle_style=req.subtitle_style, subtitle_position=req.subtitle_position,
         voice=req.voice or "vieneu:AdamBua",
         voice_mode="tts",
         aspect_ratio=req.aspect_ratio or "9:16",
@@ -5277,18 +5487,14 @@ async def api_render_affiliate(req: AffiliateRenderRequest):
         voice_volume=req.voice_volume if req.voice_volume is not None else 1.0,
         quality=req.quality or "720p",
         transition=req.transition or "dissolve",
-        # Affiliate LUÔN nối tiếp (sequential chain): cảnh sau dùng last frame
-        # cảnh trước làm first frame, giữ tay/sản phẩm/bối cảnh đồng nhất.
-        # TRADE-OFF: render tuần tự nên wall-time ≈ tổng thời gian từng cảnh
-        # (5 cảnh ≈ 5 lần 1 cảnh), chậm hơn song song — đổi lại video bán hàng
-        # không bị trôi sản phẩm giữa các cảnh. Cảnh 1 giữ reference_image
-        # sản phẩm user đưa vào; cảnh sau bị ghi đè bằng last frame (chủ đích).
+        # The original product photo anchors every supplied scene.
         chain_mode="sequential",
         scenes=scene_items
     )
 
     job_id = uuid.uuid4().hex[:12]
     job = new_job(job_id, len(movie_req.scenes), req=movie_req)
+    job["source"] = "affiliate"
     _save_job_or_http500(job)
     _total_s = sum(s.duration for s in movie_req.scenes)
     job_log(job, f"🛍️ [Tiếp Thị Liên Kết] Dự án: '{movie_req.title}' — {len(movie_req.scenes)} cảnh, tổng ~{_total_s}s ({movie_req.aspect_ratio}, chain sequential) — Giọng: {movie_req.voice}")
@@ -5317,6 +5523,7 @@ import auto_factory
 import story_engine
 
 class BatchCreateRequest(BaseModel):
+    render_mode: Literal["illustrated","ai_video"] = "illustrated"
     prompts: List[str] = Field(default=[], max_length=100)
     aspect_ratio: str = Field(default="9:16", max_length=10)
     scenes_count: int = Field(default=8, ge=3, le=12)
@@ -5417,7 +5624,8 @@ async def create_batch_videos(req: BatchCreateRequest):
         voice=req.voice,
         mode=req.mode,
         character_id=req.character_id,
-        auto_run=req.auto_run
+        auto_run=req.auto_run,
+        **({"extra":{"render_mode":"ai_video"}} if req.render_mode=="ai_video" else {})
     )
     return {
         "message": f"Đã thêm {len(created)} video vào hàng đợi",
@@ -5483,6 +5691,9 @@ async def open_batch_in_shot_desk(video_id: str):
 @app.get("/api/batch-videos/{video_id}/video")
 async def get_batch_video_file(video_id: str):
     """Tải / stream file video hoàn chỉnh final.mp4 của batch video."""
+    item = BATCH_MANAGER.get_video(video_id)
+    if item and item.get("guided") and not item.get("final_video_url"):
+        raise HTTPException(409, "Cần xuất lại sau khi sửa phân cảnh.")
     video_path = (BATCH_DIR / video_id / "final.mp4").resolve()
     if not video_path.is_relative_to(BATCH_DIR.resolve()) or not video_path.is_file():
         return JSONResponse({"error": "Video chưa hoàn tất hoặc không tồn tại"}, status_code=404)
@@ -5492,6 +5703,9 @@ async def get_batch_video_file(video_id: str):
 @app.get("/api/batch-videos/{video_id}/subtitles")
 async def get_batch_subtitles_file(video_id: str):
     """Tải file phụ đề SRT của batch video."""
+    item = BATCH_MANAGER.get_video(video_id)
+    if item and item.get("guided") and not item.get("srt_url"):
+        raise HTTPException(409, "Cần xuất lại phụ đề.")
     srt_path = (BATCH_DIR / video_id / "subtitles.srt").resolve()
     if not srt_path.is_relative_to(BATCH_DIR.resolve()) or not srt_path.is_file():
         return JSONResponse({"error": "File phụ đề chưa sẵn sàng hoặc không tồn tại"}, status_code=404)
@@ -5521,6 +5735,7 @@ async def bulk_action_batch_videos(req: BulkActionRequest):
 # ══════════════════════════════════════════════════════════════════════════
 
 class FactoryOrderRequest(BaseModel):
+    render_mode: Literal["illustrated","ai_video"] = "illustrated"
     source: str = Field(default="trending", max_length=20)
     topics: Optional[List[str]] = Field(default=None, max_length=10)
     count: int = Field(default=3, ge=1, le=10)
@@ -5623,6 +5838,7 @@ async def create_factory_order(req: FactoryOrderRequest):
         voice=req.voice,
         mode=req.mode,
         auto_run=True,
+        **({"extra":{"render_mode":"ai_video"}} if req.render_mode=="ai_video" else {}),
     )
     for item in created:
         BATCH_MANAGER.update_video(item["id"], {"factory_source": req.source})
@@ -5737,7 +5953,10 @@ class StoryAdaptRequest(BaseModel):
         return v
 
 
-class StoryCreateVideosRequest(BaseModel):
+class StoryCreateVideosRequest(CaptionSettings):
+    guided: bool = False
+    render_mode: Literal["ai_video", "illustrated"] = "ai_video"
+    cast_ids: List[str] = Field(default_factory=list, max_length=30)
     chapter_indexes: List[int] = Field(..., min_length=1, max_length=20)
     visual_style: str = Field(default="cinematic", max_length=50)
     voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=100)
@@ -6039,24 +6258,136 @@ async def save_story_script(project_id: str, chapter_index: int, req: StorySaveS
             "chapter_index": chapter_index, "scene_count": len(scenes)}
 
 
+def _selected_cast(ids):
+    selected = set(ids)
+    cast = [c for c in load_characters() if c["id"] in selected] if selected else []
+    if len(cast) != len(selected):
+        raise ValueError("Hồ sơ nhân vật đã thay đổi. Hãy chọn lại diễn viên.")
+    return cast
+
+
+class StudioBeat(BaseModel):
+    prompt: str = Field(min_length=1, max_length=3000)
+    voiceover: str = Field(min_length=1, max_length=3000)
+    duration: Literal[5, 6, 8, 10, 12] = 6
+
+
+class MuseStudioDraft(CaptionSettings):
+    guided: bool = False
+    title: str = Field(min_length=1, max_length=200)
+    scenes: List[StudioBeat] = Field(min_length=1, max_length=40)
+    cast_ids: List[str] = Field(default_factory=list, max_length=30)
+    aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16"
+    visual_style: str = Field(default="cinematic", max_length=50)
+    voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=100)
+
+
+def _studio_draft_settings(req: MuseStudioDraft):
+    if not req.title.strip() or req.visual_style not in BATCH_VISUAL_STYLES:
+        raise HTTPException(422, "Tên phim hoặc phong cách chưa hợp lệ.")
+    try:
+        cast = _selected_cast(req.cast_ids)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    suffix = BATCH_VISUAL_STYLES[req.visual_style]["prompt_suffix"]
+    scenes = []
+    for index, scene in enumerate(req.scenes, 1):
+        if not scene.prompt.strip() or not scene.voiceover.strip():
+            raise HTTPException(422, f"Cảnh {index} thiếu mô tả hoặc lời kể.")
+        scenes.append({**scene.model_dump(), "index": index, "direction": scene.prompt.strip(),
+                       "prompt": f"{scene.prompt.strip()}. {suffix}"})
+    return scenes, {"guided": req.guided, "render_mode": "ai_video", "studio_source": "muse_studio", "cast": cast,
+                    "subtitle_style": req.subtitle_style, "subtitle_position": req.subtitle_position}
+
+
+@app.post("/api/muse-studio/drafts")
+def create_muse_studio_draft(req: MuseStudioDraft):
+    scenes, settings = _studio_draft_settings(req)
+    items = BATCH_MANAGER.add_batch([req.title], scenes_count=len(scenes), voice=req.voice,
+        aspect_ratio=req.aspect_ratio, visual_style=req.visual_style, auto_run=False,
+        scripts=[{"title": req.title, "scenes": scenes}], extra=settings)
+    return {"id": items[0]["id"]}
+
+
+@app.put("/api/muse-studio/drafts/{video_id}")
+def edit_muse_studio_draft(video_id: str, req: MuseStudioDraft):
+    scenes, settings = _studio_draft_settings(req)
+    if not BATCH_MANAGER.edit_studio_draft(video_id, {
+        **settings, "title": req.title, "prompt": req.title, "scenes": scenes, "scenes_count": len(scenes),
+        "voice": req.voice, "aspect_ratio": req.aspect_ratio, "visual_style": req.visual_style,
+    }):
+        raise HTTPException(409, "Bản dựng đã vào hàng đợi hoặc không còn tồn tại.")
+    return {"id": video_id}
+
+
+class SceneReview(BaseModel):
+    approved: bool
+
+
+@app.put("/api/muse-studio/{video_id}/scenes/{index}/review")
+def review_studio_scene(video_id: str, index: int, req: SceneReview):
+    if not BATCH_MANAGER.set_scene_approval(video_id, index, req.approved):
+        raise HTTPException(409, "Chỉ duyệt được cảnh trong bản dựng đã hoàn tất.")
+    return {"approved": req.approved}
+
+
+@app.get("/api/muse-studio/{video_id}/scenes/{index}/clip")
+def muse_studio_scene_clip(video_id: str, index: int):
+    from batch_video_engine import is_safe_video_id
+    if not is_safe_video_id(video_id) or not 1 <= index <= 200:
+        raise HTTPException(404, "Cảnh không tồn tại.")
+    folder = (BATCH_DIR / video_id).resolve()
+    path = (folder / "clips" / f"clip_{index}.mp4").resolve()
+    if not path.is_relative_to(folder) or not path.is_file():
+        raise HTTPException(404, "Clip chưa sẵn sàng.")
+    return FileResponse(path, media_type="video/mp4")
+
+
 @app.post("/api/story/projects/{project_id}/create-videos")
 async def create_story_project_videos(project_id: str, req: StoryCreateVideosRequest):
     """Tạo 1 video cho mỗi chương đã chọn (scenes inject sẵn, worker tự chạy)."""
     try:
+        cast = _selected_cast(req.cast_ids)
+        if req.guided:
+            cast.extend(studio_routes.library(project_id))
         created = story_engine.create_story_videos(
             project_id, req.chapter_indexes, req.visual_style, req.voice,
             req.aspect_ratio, req.scenes_count, mode=req.mode,
-            extra_req=req.extra_req)
+            extra_req=req.extra_req, render_mode=req.render_mode, cast=cast, guided=req.guided and req.render_mode == "ai_video",
+            subtitle_style=req.subtitle_style, subtitle_position=req.subtitle_position)
     except FileNotFoundError:
         return JSONResponse({"error": f"Không tìm thấy truyện '{project_id}'"}, status_code=404)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     return {
-        "message": f"Đã tạo {len(created)} video từ truyện (đang chạy trong hàng đợi)",
+        "message": f"Đã tạo {len(created)} bản dựng từ truyện",
         "project_id": project_id,
         "created": created,
         "total": len(created),
     }
+
+
+import studio_routes
+
+app.include_router(studio_routes.router)
+
+
+@app.post("/api/muse-studio/workshop")
+def studio_workshop(req: studio_routes.Workshop):
+    try:
+        cast = _selected_cast(req.cast_ids)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return studio_routes.create_workshop(req, cast)
+
+
+@app.post("/api/muse-studio/assistant")
+def studio_assistant(req: studio_routes.AssistantBrief):
+    try:
+        cast = _selected_cast(req.cast_ids)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return studio_routes.create_workshop(req, cast, count=req.count)
 
 
 def _studio_bind_host() -> str:
