@@ -1,13 +1,83 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import lru_cache
 import json
 import os
 import re
-from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
 
 MUSE_SETTINGS_FILE = Path(__file__).resolve().parent / "workspace" / "_settings" / "muse.json"
 MUSE_PROVIDERS = ("muse2api", "browser")
+_MUSE_AFFINITY: ContextVar[str | None] = ContextVar("muse_affinity", default=None)
+_AFFINITY_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
+
+def current_muse_affinity() -> str | None:
+    """Return the active film/job routing key for soft per-browser affinity."""
+    value = _MUSE_AFFINITY.get()
+    return value if value and _AFFINITY_RE.fullmatch(value) else None
+
+
+@contextmanager
+def muse_affinity_scope(value: str | None):
+    """Bind a soft browser-routing key (e.g. film or job id) for the current execution context."""
+    clean = value.strip() if isinstance(value, str) else None
+    token = _MUSE_AFFINITY.set(clean if clean and _AFFINITY_RE.fullmatch(clean) else None)
+    try:
+        yield
+    finally:
+        _MUSE_AFFINITY.reset(token)
+
+
+def muse_capacity_from_accounts(provider: str, data, max_concurrent: int = 12) -> int:
+    """Compute effective parallel lane count from a /admin/accounts payload."""
+    if provider == "browser" and not (isinstance(data, dict) and data.get("pool") is True):
+        return 1
+    accounts = data.get("accounts", []) if isinstance(data, dict) else data
+    if not isinstance(accounts, list):
+        return 1
+    enabled = sum(1 for acc in accounts if isinstance(acc, dict) and acc.get("enabled", True))
+    return max(1, min(enabled, max_concurrent))
+
+
+def query_muse_capacity_sync(max_concurrent: int = 12, timeout: float = 2.0) -> int:
+    """Synchronously query active Muse provider for parallel worker capacity."""
+    import httpx
+
+    try:
+        provider, url, key = muse_connection(active_muse_provider())
+        if not key:
+            return 1
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(
+                f"{url}/admin/accounts",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            response.raise_for_status()
+            return muse_capacity_from_accounts(provider, response.json(), max_concurrent)
+    except Exception:
+        return 1
+
+
+async def query_muse_capacity_async(max_concurrent: int = 12, timeout: float = 3.0) -> int:
+    """Asynchronously query active Muse provider for parallel worker capacity."""
+    import httpx
+
+    try:
+        provider, url, key = muse_connection(active_muse_provider())
+        if not key:
+            return 1
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                f"{url}/admin/accounts",
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            response.raise_for_status()
+            return muse_capacity_from_accounts(provider, response.json(), max_concurrent)
+    except Exception:
+        return 1
 
 
 def saved_muse_provider() -> str | None:

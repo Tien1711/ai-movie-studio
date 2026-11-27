@@ -171,6 +171,59 @@ def test_studio_proxies_chrome_profile_management_to_loopback(monkeypatch):
     invalid = client.put("/api/settings/muse/chrome-profiles/selection", json={"id": "invalid"})
     assert invalid.status_code == 422
 
+    pool_res = client.put("/api/settings/muse/chrome-profiles/pool", json={"enabled": True})
+    assert pool_res.status_code == 200
+    assert calls[-1] == ("PUT", "http://127.0.0.1:18787/admin/chrome-profiles/pool", {"json": {"enabled": True}})
+
+
+def test_multi_film_production_workers_run_concurrently_without_double_claim(monkeypatch):
+    import threading
+    import batch_video_engine as batch
+
+    jobs = [
+        {"id": "bv_film_1", "status": "queued", "guided": True, "operation": {"action": "write"}},
+        {"id": "bv_film_2", "status": "queued", "guided": True, "operation": {"action": "write"}},
+    ]
+    threads = {}
+    claimed = set()
+    both_started = threading.Event()
+    release = threading.Event()
+    seen = []
+
+    def process(video_id):
+        with batch._QUEUE_LOCK:
+            seen.append(video_id)
+            job = next(j for j in jobs if j["id"] == video_id)
+            job["status"] = "running"
+            if len(seen) == 2:
+                both_started.set()
+        release.wait(timeout=5)
+        with batch._QUEUE_LOCK:
+            job["status"] = "completed"
+
+    def read_queue():
+        with batch._QUEUE_LOCK:
+            return [j.copy() for j in jobs]
+
+    monkeypatch.setattr(batch, "_worker_threads", threads)
+    monkeypatch.setattr(batch, "_claimed_video_ids", claimed)
+    monkeypatch.setattr(batch, "_production_worker_limit", lambda: 2)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "_read_queue", read_queue)
+    monkeypatch.setattr(batch, "_process_single_video", process)
+    workers = set()
+    try:
+        batch.start_batch_worker()
+        with batch._worker_lock:
+            workers.update(threads.values())
+        assert both_started.wait(timeout=5), "Both films must run concurrently on 2 browser lanes"
+        assert sorted(seen) == ["bv_film_1", "bv_film_2"]
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=5)
+    assert not threads
+    assert not claimed
+
 def test_quick_video_proxy_authenticates_private_browser_video_and_forwards_range(monkeypatch):
     video_path = "/v1/browser-media/12345678-1234-1234-1234-123456789abc.mp4"
     monkeypatch.delenv("STUDIO_API_KEY", raising=False)

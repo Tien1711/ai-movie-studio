@@ -275,9 +275,12 @@ function displayMuseChromeProfiles(data) {
   museChromeProfiles = data;
   const select = document.getElementById('museChromeProfile');
   const status = document.getElementById('museChromeProfileStatus');
+  const poolToggle = document.getElementById('museBrowserPoolToggle');
+  const listEl = document.getElementById('museChromeProfileList');
   select.replaceChildren(new Option('Cửa sổ riêng của gateway', ''));
   for (const profile of data.profiles) {
-    const mode = profile.ready ? ' · Sẵn sàng' : profile.reload ? ' · Cần tải lại tiện ích'
+    const mode = profile.busy ? ' · Đang xử lý' : profile.ready ? ' · Sẵn sàng'
+      : profile.reload ? ' · Cần tải lại tiện ích'
       : profile.online ? ' · Chưa sẵn sàng' : ' · Tab chưa mở';
     select.add(new Option(profile.name + mode, profile.id));
   }
@@ -287,11 +290,35 @@ function displayMuseChromeProfiles(data) {
   chatMode.value = data.chat_mode || 'side';
   chatMode.disabled = !data.chat_mode;
   document.getElementById('removeMuseChromeProfileBtn').disabled = !data.selected;
+  if (poolToggle) {
+    poolToggle.checked = data.pool === true;
+    poolToggle.disabled = data.profiles.length < 2;
+  }
+  if (listEl) {
+    listEl.replaceChildren(...data.profiles.map(profile => {
+      const chip = document.createElement('span');
+      chip.className = 'badge ' + (profile.busy ? 'badge-warn' : profile.ready ? 'badge-ok' : 'badge-muted');
+      const stateLabel = profile.busy ? '⚡ Đang chạy'
+        : profile.ready ? '🟢 Sẵn sàng'
+        : profile.reload ? '⚠️ Tải lại tiện ích'
+        : profile.online ? '🟡 Chưa đăng nhập' : '⚪ Chưa mở tab';
+      chip.textContent = `${profile.name} · ${stateLabel}`;
+      return chip;
+    }));
+  }
+  const readyCount = data.profiles.filter(p => p.ready).length;
+  const busyCount = data.profiles.filter(p => p.busy).length;
   const active = data.profiles.find(profile => profile.id === data.selected);
-  if (active?.ready) status.textContent = 'Đang dùng phiên Muse của ' + active.name + '.';
+  if (data.pool) {
+    status.textContent = readyCount
+      ? `Chế độ Pool đang bật: ${readyCount}/${data.profiles.length} trình duyệt Chrome sẵn sàng` +
+        (busyCount ? ` (${busyCount} đang xử lý)` : '') +
+        ' — tự động chạy song song 1 phim / 1 trình duyệt và chia cảnh khi chạy 1 phim.'
+      : 'Chế độ Pool đang bật nhưng chưa có tab Muse nào mở. Hãy mở tab Muse ở ít nhất 1 profile Chrome.';
+  } else if (active?.ready) status.textContent = 'Đang dùng phiên Muse của ' + active.name + '.';
   else if (active?.reload) status.textContent = 'Tải lại tiện ích trong chrome://extensions rồi mở lại tab Muse cho Studio.';
   else if (active) status.textContent = 'Mở tab Muse cho Studio trong profile đã chọn rồi tải lại danh sách.';
-  else status.textContent = 'Ghép nối một profile Chrome để chọn phiên Muse đã đăng nhập.';
+  else status.textContent = 'Ghép nối từ 2 profile Chrome trở lên để tự động chạy song song nhiều phim cùng lúc.';
 }
 
 async function loadMuseChromeProfiles() {
@@ -365,6 +392,15 @@ function selectMuseBrowserChatMode() {
   });
 }
 
+function toggleMuseBrowserPool() {
+  const toggle = document.getElementById('museBrowserPoolToggle');
+  return updateMuseChromeProfiles('/pool', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: Boolean(toggle?.checked) }),
+  });
+}
+
 function removeMuseChromeProfile() {
   const id = museChromeProfiles?.selected;
   if (id) return updateMuseChromeProfiles('/' + encodeURIComponent(id), { method: 'DELETE' });
@@ -375,7 +411,7 @@ function onMuseProviderChange() {
   document.getElementById('muse2apiConfig').hidden = provider !== 'muse2api';
   document.getElementById('museBrowserConfig').hidden = provider !== 'browser';
   if (provider === 'browser') loadMuseChromeProfiles();
-  document.getElementById('museConcurrencyConfig').style.display = provider === 'browser' ? 'none' : '';
+  document.getElementById('museConcurrencyConfig').style.display = '';
   document.getElementById('cfgTestResult').textContent = '';
   document.getElementById('saveMuseProviderBtn').disabled = !museSettings || provider === museSettings.provider;
   const status = document.getElementById('museSettingsMessage');
@@ -494,17 +530,22 @@ async function checkApiHealth() {
 
     if (data.muse2api) {
       window.currentAccountsCount = data.accounts || 1;
+      const isBrowserPool = isBrowser && data.muse_pool === true;
       bar.className = 'muse-status-bar ok';
       txt.textContent = label + ': Đã kết nối';
-      badge.textContent = isBrowser ? 'Chrome' : data.accounts + ' tài khoản';
+      badge.textContent = isBrowserPool
+        ? `${data.accounts} Chrome${data.muse_busy ? ' · ' + data.muse_busy + ' chạy' : ' (Pool)'}`
+        : isBrowser ? 'Chrome' : data.accounts + ' tài khoản';
       badge.style.display = 'inline';
       const hint = document.getElementById('concurrentHint');
       if (hint) {
-        hint.textContent = `Tối đa ${data.accounts} luồng song song (đặt ở ô Concurrent)`;
+        hint.textContent = isBrowserPool
+          ? `Đang bật Pool ${data.accounts} trình duyệt Chrome (tối đa ${data.accounts} luồng / phim song song)`
+          : `Tối đa ${data.accounts} luồng song song (đặt ở ô Concurrent)`;
       }
 
       const maxConcInput = document.getElementById('maxConcurrent');
-      if (maxConcInput) maxConcInput.disabled = isBrowser;
+      if (maxConcInput) maxConcInput.disabled = isBrowser && !isBrowserPool;
 
       // Cập nhật select Shot Desk
       const sdSelect = document.getElementById('sdConcurrentSelect');
@@ -10036,7 +10077,11 @@ async function runSingleBatchVideo(vidId) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Lỗi kích hoạt video');
     if (typeof showToast === 'function') showToast('🚀 Đã kích hoạt sản xuất video!', 'success');
-    loadBatchQueue();
+    if (document.getElementById('panel-factory')?.classList.contains('active')) {
+      loadFactoryQueue();
+    } else {
+      loadBatchQueue();
+    }
   } catch (e) {
     console.error(e);
     if (typeof showToast === 'function') showToast(e.message, 'error');
@@ -10418,18 +10463,23 @@ function renderFactoryItemHtml(v) {
   const durSec = (v.scenes_count || 5) * 6;
   const durLabel = `${Math.floor(durSec / 60)}:${String(durSec % 60).padStart(2, '0')}`;
   const thumb = v.status === 'completed'
-    ? `<img src="/api/factory/thumbnail/${encodeURIComponent(v.id)}" alt="" loading="lazy" onerror="this.remove()">`
+    ? `<img src="/api/factory/thumbnail/${encodeURIComponent(v.id)}?v=${encodeURIComponent(v.updated_at || '')}" alt="" loading="lazy" onerror="this.remove()">`
     : '';
   const progressHtml = v.status === 'running' ? `
       <div class="factory-job-progress"><div style="width: ${v.progress || 10}%"></div></div>
       <div class="factory-job-meta">⏳ ${escapeHtml(v.current_step || 'Đang xử lý...')} (${v.progress || 10}%)</div>` : '';
   const doneHtml = v.status === 'completed' ? `
       <div class="factory-job-progress done"><div style="width: 100%"></div></div>` : '';
-  const errHtml = (v.status === 'failed' && v.error) ? `<div class="factory-job-error">❌ ${escapeHtml(v.error)}</div>` : '';
-  const actions = v.status === 'completed' ? `
+  const missingImages = v.status === 'completed' && v.has_fallback_images;
+  const message = missingImages ? 'Một số cảnh đang dùng nền dự phòng.' : v.status === 'failed' ? v.error : '';
+  const errHtml = message ? `<div class="factory-job-error">${escapeHtml(message)}</div>` : '';
+  const retry = v.status === 'failed' || missingImages
+    ? `<button type="button" class="btn btn-ghost btn-sm" onclick="runSingleBatchVideo('${v.id}')">Chạy lại cảnh thiếu</button>`
+    : '';
+  const actions = retry + (v.status === 'completed' ? `
       <button type="button" class="btn btn-primary btn-sm" onclick="openFactoryPublishModal('${v.id}')">📤 Đăng bài</button>
       <a class="btn btn-ghost btn-sm" href="/api/factory/publish-pack/${encodeURIComponent(v.id)}" download>Tải gói .zip</a>
-      <a class="btn btn-ghost btn-sm" href="/api/batch-videos/${encodeURIComponent(v.id)}/video" target="_blank" rel="noopener">Xem video (~${durLabel})</a>` : '';
+      <a class="btn btn-ghost btn-sm" href="/api/batch-videos/${encodeURIComponent(v.id)}/video?v=${encodeURIComponent(v.updated_at || '')}" target="_blank" rel="noopener">Xem video (~${durLabel})</a>` : '');
   return `
     <li class="factory-job">
       <div class="factory-job-thumb">🎬${thumb}</div>

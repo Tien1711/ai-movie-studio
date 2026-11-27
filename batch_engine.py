@@ -31,7 +31,7 @@ from typing import List, Dict, Any, Callable, Optional, Tuple
 from urllib.parse import urljoin
 
 # ── Giới hạn / timeout (audit §1.11, §1.12, §3.6-3.8) ─────────────────────────
-from muse_connection import browser_media_headers
+from muse_connection import browser_media_headers, current_muse_affinity
 
 MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024          # video tải về tối đa 500 MB
 MAX_KEYFRAME_BYTES = 50 * 1024 * 1024           # ảnh keyframe tối đa 50 MB
@@ -1098,6 +1098,9 @@ async def generate_keyframe_image(
     }
     if reference_image:
         payload["reference_image"] = reference_image
+    affinity = current_muse_affinity()
+    if affinity:
+        payload["affinity"] = affinity
 
     headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1542,6 +1545,9 @@ async def process_scene(
                     tts_started = time.monotonic()
 
                 payload = {"prompt": prompt, "duration": duration, "size": size, "timeout": 600}
+                affinity = current_muse_affinity()
+                if affinity:
+                    payload["affinity"] = affinity
                 if ref_str:
                     if ref_str.startswith(("http://", "https://", "data:")):
                         # URL/data: passthrough, không fetch ở đây (§2.3).

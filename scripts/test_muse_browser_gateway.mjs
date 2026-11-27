@@ -1,4 +1,4 @@
-import { once } from 'node:events';
+﻿import { once } from 'node:events';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createGateway } from './muse_browser_gateway.mjs';
@@ -197,7 +197,7 @@ test('the first paired profile is selected, requires a current extension and rep
 
     const removed = await call('/admin/chrome-profiles/' + id, 'DELETE', undefined, 'fixture-key');
     assert.equal(removed.status, 200);
-    assert.deepEqual(await removed.json(), { selected: null, profiles: [], chat_mode: 'side' });
+    assert.deepEqual(await removed.json(), { selected: null, profiles: [], chat_mode: 'side', pool: false });
     assert.equal((await heartbeat()).status, 401);
   });
 });
@@ -363,4 +363,125 @@ test('dedicated Chrome uses Muse-Chat-MCP downloadMedia for a new blob even afte
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Pool: several paired Chrome profiles work in parallel ─────────────────────
+const POOL_TABS = ['a1e5c195-4465-45b4-a739-085d55d73576', 'b2e5c195-4465-45b4-a739-085d55d73576'];
+
+async function pairProfiles(request, base, count = 2) {
+  const call = (path, method, data, token) => fetch(base + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    body: data === undefined ? undefined : JSON.stringify(data),
+  });
+  const accounts = [];
+  for (let index = 0; index < count; index++) {
+    const { code } = await (await request('/admin/chrome-profiles/pair', {})).json();
+    const { id, token } = await (await call('/extension/pair', 'POST', { code, name: 'Profile ' + (index + 1) })).json();
+    accounts.push({ id, token, tab: POOL_TABS[index] });
+  }
+  const poll = account => call('/extension/poll', 'POST', { tab: account.tab, ready: true, protocol: 2 }, account.token);
+  const nextCommand = async (account, attempts = 100) => {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const { command } = await (await poll(account)).json();
+      if (command) return command;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return null;
+  };
+  const finish = (account, command, media) => call('/extension/result', 'POST', { id: command.id, tab: account.tab, media: [media] }, account.token);
+  for (const account of accounts) await poll(account);
+  return { accounts, poll, nextCommand, finish, call };
+}
+
+test('pool mode runs one request per ready profile at once and queues the rest', async () => {
+  await withGateway(new FakeBrowser(), async (request, base) => {
+    const { accounts, nextCommand, finish } = await pairProfiles(request, base);
+    const list = await (await request('/admin/chrome-profiles')).json();
+    assert.equal(list.pool, true);
+    const health = await (await request('/admin/accounts')).json();
+    assert.equal(health.pool, true);
+    assert.equal(health.ready, true);
+    assert.equal(health.accounts.length, 2);
+
+    const jobs = [];
+    for (let index = 0; index < 3; index++) {
+      const created = await request('/v1/images/tasks', { prompt: 'Photo ' + index, affinity: 'film_a' });
+      assert.equal(created.status, 202);
+      jobs.push(await created.json());
+    }
+    const first = await nextCommand(accounts[0]);
+    const second = await nextCommand(accounts[1]);
+    assert.ok(first && second, 'both browsers receive work at the same time');
+    assert.notEqual(first.id, second.id);
+    const busy = await (await request('/admin/accounts')).json();
+    assert.equal(busy.stats.busy, 2);
+    const waiting = await (await request('/v1/images/tasks/' + jobs[2].id)).json();
+    assert.equal(waiting.status, 'queued');
+
+    await finish(accounts[0], first, 'https://muse.ai/files/pool/one.png');
+    const third = await nextCommand(accounts[0]);
+    assert.ok(third, 'the freed browser takes the queued request');
+    await finish(accounts[1], second, 'https://muse.ai/files/pool/two.png');
+    await finish(accounts[0], third, 'https://muse.ai/files/pool/three.png');
+    for (const job of jobs) assert.equal((await waitTask(request, '/v1/images/tasks/' + job.id)).status, 'completed');
+  });
+});
+
+test('a film keeps its browser while that browser is idle', async () => {
+  await withGateway(new FakeBrowser(), async (request, base) => {
+    const { accounts, nextCommand, finish } = await pairProfiles(request, base);
+    const owner = { id: null };
+    for (const film of ['film_a', 'film_b', 'film_a']) {
+      const job = await (await request('/v1/images/tasks', { prompt: 'Frame of ' + film, affinity: film })).json();
+      const commands = await Promise.all(accounts.map(async account => [account, await nextCommand(account, 25)]));
+      const [account, command] = commands.find(([, item]) => item);
+      await finish(account, command, 'https://muse.ai/files/pool/' + film + '.png');
+      await waitTask(request, '/v1/images/tasks/' + job.id);
+      if (film === 'film_a' && !owner.id) owner.id = account.id;
+      else if (film === 'film_a') assert.equal(account.id, owner.id);
+      else assert.notEqual(account.id, owner.id, 'another film starts on the least recently used browser');
+    }
+  });
+});
+
+test('the pool can be switched off and falls back to the selected profile only', async () => {
+  await withGateway(new FakeBrowser(), async (request, base) => {
+    const { accounts, poll, nextCommand, finish, call } = await pairProfiles(request, base);
+    assert.equal((await call('/admin/chrome-profiles/pool', 'PUT', { enabled: 'yes' }, 'fixture-key')).status, 422);
+    const off = await (await call('/admin/chrome-profiles/pool', 'PUT', { enabled: false }, 'fixture-key')).json();
+    assert.equal(off.pool, false);
+    assert.equal((await (await request('/admin/accounts')).json()).pool, undefined);
+
+    const jobs = [];
+    for (let index = 0; index < 2; index++) jobs.push(await (await request('/v1/images/tasks', { prompt: 'Solo ' + index })).json());
+    const selected = accounts.find(account => account.id === off.selected);
+    const other = accounts.find(account => account !== selected);
+    const command = await nextCommand(selected);
+    assert.ok(command);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      assert.equal((await (await poll(other)).json()).command, null);
+    }
+    await finish(selected, command, 'https://muse.ai/files/pool/solo-1.png');
+    const following = await nextCommand(selected);
+    await finish(selected, following, 'https://muse.ai/files/pool/solo-2.png');
+    for (const job of jobs) assert.equal((await waitTask(request, '/v1/images/tasks/' + job.id)).status, 'completed');
+  });
+});
+
+test('pool mode answers 503 right away when no paired profile is ready', async () => {
+  await withGateway(new FakeBrowser(), async (request, base) => {
+    const call = (path, method, data) => fetch(base + path, {
+      method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+    });
+    for (let index = 0; index < 2; index++) {
+      const { code } = await (await request('/admin/chrome-profiles/pair', {})).json();
+      assert.equal((await call('/extension/pair', 'POST', { code, name: 'Offline ' + index })).status, 201);
+    }
+    assert.equal((await (await request('/admin/chrome-profiles')).json()).pool, true);
+    const health = await (await request('/admin/accounts')).json();
+    assert.equal(health.ready, false);
+    assert.equal((await request('/v1/images/tasks', { prompt: 'No browser.' })).status, 503);
+    assert.equal((await request('/v1/chat/completions', { messages: [{ role: 'user', content: 'Hi' }] })).status, 503);
+  });
 });

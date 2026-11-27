@@ -482,3 +482,81 @@ def test_factory_js_functions_present():
 
 def test_factory_shortcut_alt_f():
     assert "f: 'factory'" in UI_JS
+
+
+def test_factory_repair_reuses_good_scenes_and_refuses_missing_images(tmp_path, monkeypatch):
+    import batch_engine
+    import batch_video_engine as batch
+    import composer
+
+    store = tmp_path / "_batch_videos"
+    monkeypatch.setattr(batch, "BATCH_DIR", store)
+    monkeypatch.setattr(batch, "QUEUE_FILE", store / "batch_queue.json")
+    monkeypatch.setattr(batch, "QUEUE_BAK_FILE", store / "batch_queue.json.bak")
+    manager = batch.BatchVideoManager()
+    monkeypatch.setattr(batch, "BATCH_MANAGER", manager)
+
+    scenes = [
+        {"index": 1, "prompt": "Missing scene", "voiceover": "Lời kể thứ nhất."},
+        {"index": 2, "prompt": "Saved scene", "voiceover": "Lời kể thứ hai.", "image_status": "ai_generated"},
+    ]
+    video = manager.add_batch(["Bản tin"], scripts=[{"scenes": scenes}], auto_run=False)[0]
+    vid = video["id"]
+    root = store / vid
+    for folder in ("audio", "images", "clips"):
+        (root / folder).mkdir(exist_ok=True)
+    for index in (1, 2):
+        (root / "audio" / f"scene_{index}.mp3").write_bytes(b"audio" * 100)
+    Image.effect_noise((96, 96), 50).save(root / "images" / "scene_2.webp")
+    (root / "clips" / "clip_2.mp4").write_bytes(b"saved image clip" * 100)
+    final = root / "final.mp4"
+    final.write_bytes(b"old completed export" * 100)
+
+    image_requests = []
+    rendered = []
+    merges = []
+    can_draw = False
+
+    def draw(**kwargs):
+        destination = kwargs["out_img_path"]
+        image_requests.append(destination.name)
+        if can_draw:
+            Image.effect_noise((96, 96), 50).save(destination)
+        return can_draw
+
+    def render(**kwargs):
+        destination = kwargs["out_clip_path"]
+        rendered.append(destination.name)
+        destination.write_bytes(b"new image clip" * 100)
+        return True
+
+    def merge(paths, transitions, bridge, destination, *args):
+        merges.append([Path(path).name for path in paths])
+        Path(destination).write_bytes(b"merged" * 200)
+
+    monkeypatch.setattr(batch_engine, "get_media_duration", lambda _: 5.0)
+    monkeypatch.setattr(batch, "_generate_scene_image", draw)
+    monkeypatch.setattr(batch, "_convert_image_and_audio_to_clip", render)
+    monkeypatch.setattr(composer, "compute_timeline_offsets", lambda *args: [0, 5.0])
+    monkeypatch.setattr(composer, "merge_clips_advanced", merge)
+    monkeypatch.setattr(composer, "create_srt", lambda **kwargs: Path(kwargs["output_srt"]).write_text("fixture subtitles"))
+    monkeypatch.setattr(composer, "burn_subtitles", lambda **kwargs: Path(kwargs["output_video"]).write_bytes(b"new final" * 200))
+
+    manager.update_video(vid, {"status": "queued", "has_fallback_images": True})
+    batch._process_single_video(vid)
+    failed = manager.get_video(vid)
+    assert failed["status"] == "failed" and "cảnh 1" in failed["error"]
+    assert failed["scenes"][0]["image_status"] == "failed"
+    assert final.read_bytes().startswith(b"old completed export")
+    assert not merges and not rendered
+
+    can_draw = True
+    manager.update_video(vid, {"status": "queued"})
+    batch._process_single_video(vid)
+    repaired = manager.get_video(vid)
+    assert repaired["status"] == "completed", repaired.get("error")
+    assert not repaired["has_fallback_images"]
+    assert image_requests == ["scene_1.webp", "scene_1.webp"]
+    assert rendered == ["clip_1.mp4"]
+    assert merges == [["clip_1.mp4", "clip_2.mp4"]]
+    assert final.read_bytes().startswith(b"new final")

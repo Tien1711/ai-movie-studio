@@ -379,10 +379,12 @@ def get_thumbnail(video_id: str) -> Optional[Path]:
         return None
     v_dir = _video_dir(video_id)
     thumb_path = v_dir / "thumbnail.jpg"
-    if thumb_path.exists() and thumb_path.stat().st_size > 1000:
-        return thumb_path
     final_mp4 = v_dir / "final.mp4"
-    if final_mp4.exists():
+    if thumb_path.is_file() and thumb_path.stat().st_size > 1000 and (
+        not final_mp4.is_file() or thumb_path.stat().st_mtime_ns >= final_mp4.stat().st_mtime_ns
+    ):
+        return thumb_path
+    if final_mp4.is_file():
         if _extract_thumbnail(final_mp4, thumb_path, v.get("aspect_ratio") or "9:16"):
             return thumb_path
     return None

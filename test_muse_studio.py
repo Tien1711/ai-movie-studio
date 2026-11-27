@@ -558,6 +558,21 @@ def test_images_use_enabled_muse2api_accounts_and_isolate_failure(
     )
     assert asyncio.run(workflow.image_workers()) == 1
 
+    def pool_response(request):
+        assert request.url.path == "/admin/accounts"
+        return httpx.Response(
+            200,
+            json={"pool": True, "ready": True, "accounts": [{}, {}, {}]},
+        )
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: client(transport=httpx.MockTransport(pool_response), **kw),
+    )
+    assert asyncio.run(workflow.image_workers(6)) == 3
+    assert asyncio.run(workflow.image_workers(2)) == 2
+
     async def render():
         all_started = asyncio.Event()
         started = []

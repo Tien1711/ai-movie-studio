@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -29,7 +30,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from muse_connection import active_muse_provider, muse_connection
+from muse_connection import (
+    active_muse_provider,
+    muse_affinity_scope,
+    muse_connection,
+    query_muse_capacity_sync,
+)
 load_dotenv()
 
 logger = logging.getLogger("ai_movie_studio.batch_video")
@@ -1351,6 +1357,7 @@ class BatchVideoManager:
 # ── 5. Worker Xử Lý Video Chạy Nền Tự Động ───────────────────────────────────
 
 _worker_threads: dict[str, threading.Thread] = {}
+_claimed_video_ids: set[str] = set()
 _worker_lock = threading.Lock()
 
 
@@ -1693,7 +1700,8 @@ def _process_single_video(video_id: str):
 
         if v.get("guided"):
             import studio_workflow
-            studio_workflow.run(v)
+            with muse_affinity_scope(video_id):
+                studio_workflow.run(v)
             return
 
         logger.info("🎬 Bắt đầu sản xuất batch video: %s ('%s')", video_id, v.get("title"))
@@ -1728,7 +1736,8 @@ def _process_single_video(video_id: str):
         # (KHÔNG áp dụng cho video có script_locked — vd: Truyện thành video,
         # scenes đã adapt từ chương truyện, worker phải giữ nguyên)
         vo_set = set(s.get("voiceover", "") for s in scenes)
-        if not v.get("script_locked") and len(scenes) >= 3 and (len(vo_set) <= 3 or len(vo_set) < len(scenes) * 0.8):
+        has_saved_assets = any(audio_dir.glob("scene_*.mp3")) or any(images_dir.glob("scene_*.webp")) or any(clips_dir.glob("clip_*.mp4"))
+        if not has_saved_assets and not v.get("script_locked") and len(scenes) >= 3 and (len(vo_set) <= 3 or len(vo_set) < len(scenes) * 0.8):
             logger.info("Phát hiện kịch bản cũ bị lặp thoại, tự động nâng cấp sang narrative beat pool đa dạng...")
             new_script = generate_batch_script_local(
                 raw_prompt=v.get("prompt") or v.get("title", ""),
@@ -1744,7 +1753,7 @@ def _process_single_video(video_id: str):
         total_scenes = len(scenes)
         scene_clips: List[Path] = []
         ai_images_count = 0
-        fallback_scenes_count = 0
+        incomplete_scenes: List[int] = []
 
         motion_video = v.get("render_mode") == "ai_video"
         cancel = _BatchCancellation(video_id)
@@ -1772,8 +1781,9 @@ def _process_single_video(video_id: str):
                     sc.update(video_status="running", error=None)
                     BATCH_MANAGER.update_video(video_id, {"scenes": scenes})
                     try:
-                        sc["used_prompt"] = asyncio.run(_render_story_clip(
-                            v, sc, idx, v_dir, clip_path, cancel, progress))
+                        with muse_affinity_scope(video_id):
+                            sc["used_prompt"] = asyncio.run(_render_story_clip(
+                                v, sc, idx, v_dir, clip_path, cancel, progress))
                         sc["actual_duration"] = batch_engine.get_media_duration(str(clip_path))
                     except asyncio.CancelledError:
                         return
@@ -1855,29 +1865,22 @@ def _process_single_video(video_id: str):
                     reference_image=char_ref,
                 )
 
-            # Đánh giá kết quả tạo ảnh AI thông qua kiểm tra magic bytes và PIL giải mã (Point 2 & 7)
-            has_ai_image = _validate_image_file(img_path)
-            if has_ai_image:
-                ai_images_count += 1
-                sc["image_status"] = "ai_generated"
-            else:
-                fallback_scenes_count += 1
-                sc["image_status"] = "fallback"
-                if img_path.exists():
-                    try:
-                        img_path.unlink()
-                    except Exception:
-                        pass
+            if not _validate_image_file(img_path):
+                sc.update(image_status="failed", error="Muse chưa trả ảnh hợp lệ.")
+                incomplete_scenes.append(idx)
+                continue
 
-            # 1.3 Dựng video clip (ưu tiên ảnh AI + Ken Burns motion)
-            step_clip_pct = min(78, base_pct + int(60 / total_scenes))
-            BATCH_MANAGER.update_video(video_id, {
-                "progress": step_clip_pct,
-                "current_step": f"Đang render chuyển động cảnh {idx}/{total_scenes}..."
-            })
-
-            clip_success = False
-            if has_ai_image:
+            continue_using_clip = (
+                sc.get("image_status") == "ai_generated"
+                and clip_path.is_file() and clip_path.stat().st_size >= 1000
+                and clip_path.stat().st_mtime_ns >= max(img_path.stat().st_mtime_ns, audio_path.stat().st_mtime_ns)
+            )
+            sc["image_status"] = "ai_generated"
+            if not continue_using_clip:
+                BATCH_MANAGER.update_video(video_id, {
+                    "progress": min(78, base_pct + int(60 / total_scenes)),
+                    "current_step": f"Đang render chuyển động cảnh {idx}/{total_scenes}..."
+                })
                 clip_success = _convert_image_and_audio_to_clip(
                     img_path=img_path,
                     audio_path=audio_path,
@@ -1885,32 +1888,18 @@ def _process_single_video(video_id: str):
                     aspect_ratio=aspect_ratio,
                     out_clip_path=clip_path
                 )
+                if not clip_success or not clip_path.is_file() or clip_path.stat().st_size < 1000:
+                    sc.update(image_status="failed", error="FFmpeg chưa dựng được clip từ ảnh.")
+                    incomplete_scenes.append(idx)
+                    continue
 
-            if not clip_success or not clip_path.exists() or clip_path.stat().st_size < 1000:
-                logger.info("Chạy fallback clip cho cảnh %d...", idx)
-                clip_success = _generate_fallback_clip(
-                    out_clip_path=clip_path,
-                    audio_path=audio_path,
-                    duration=dur,
-                    aspect_ratio=aspect_ratio,
-                    title_text=v.get("title", ""),
-                    scene_idx=idx,
-                    total_scenes=total_scenes
-                )
-                # Nếu ảnh tồn tại nhưng render clip thất bại và phải dùng fallback clip, điều chỉnh chính xác số lượng cảnh fallback (Point 2)
-                if has_ai_image:
-                    ai_images_count = max(0, ai_images_count - 1)
-                    fallback_scenes_count += 1
-                    sc["image_status"] = "fallback"
-
-            if not clip_success:
-                raise RuntimeError(f"Không thể tạo video clip cho cảnh {idx}")
-
+            sc.pop("error", None)
+            ai_images_count += 1
             scene_clips.append(clip_path)
 
-        # Kiểm tra chất lượng hình ảnh AI: Nếu toàn bộ cảnh không thể sinh ảnh AI, báo lỗi failed rõ ràng
-        if not motion_video and ai_images_count == 0:
-            raise RuntimeError("Toàn bộ các cảnh đều không thể tạo hình ảnh AI qua Muse2API. Vui lòng kiểm tra lại trạng thái dịch vụ AI vẽ ảnh.")
+        if incomplete_scenes:
+            numbers = ", ".join(map(str, incomplete_scenes))
+            raise RuntimeError(f"Thiếu hình hoặc clip hợp lệ ở cảnh {numbers}. Bấm Chạy lại cảnh thiếu để tiếp tục.")
 
         # Bước 2: Ghép nối thô timeline
         BATCH_MANAGER.update_video(video_id, {
@@ -1919,77 +1908,54 @@ def _process_single_video(video_id: str):
         })
 
         from composer import create_srt, burn_subtitles, merge_clips_advanced, compute_timeline_offsets
-        raw_concat_mp4 = v_dir / "_raw_concat.mp4"
-        final_mp4 = v_dir / "final.mp4"
-        srt_file = v_dir / "subtitles.srt"
-        paths = [str(p) for p in scene_clips]
-        transitions = [s.get("transition_out") or "dissolve" for s in scenes[:-1]]
-        offsets = compute_timeline_offsets(paths, transitions, 0.75)
-        merge_clips_advanced(paths, transitions, 0.75, str(raw_concat_mp4), "720p", aspect_ratio)
+        with tempfile.TemporaryDirectory(dir=v_dir) as staging_dir:
+            staging = Path(staging_dir)
+            merged = staging / "merged.mp4"
+            final = staging / "final.mp4"
+            subtitles = staging / "subtitles.srt"
+            paths = [str(clip) for clip in scene_clips]
+            transitions = [sc.get("transition_out") or "dissolve" for sc in scenes[:-1]]
+            offsets = compute_timeline_offsets(paths, transitions, 0.75)
+            merge_clips_advanced(paths, transitions, 0.75, str(merged), "720p", aspect_ratio)
 
-        # Bước 3: Tạo file phụ đề SRT và khắc phụ đề điện ảnh vào video (Burn-in Subtitles)
-        BATCH_MANAGER.update_video(video_id, {
-            "progress": 88,
-            "current_step": "Đang đồng bộ và khắc phụ đề tự động (Burn-in Subtitles)..."
-        })
-
-        # Tạo file phụ đề SRT (Point 3: Báo lỗi nếu thất bại, không âm thầm bỏ qua phụ đề)
-        try:
+            BATCH_MANAGER.update_video(video_id, {
+                "progress": 88,
+                "current_step": "Đang đồng bộ và khắc phụ đề tự động (Burn-in Subtitles)...",
+            })
             create_srt(
                 results=scenes,
-                output_srt=str(srt_file),
+                output_srt=str(subtitles),
                 clip_durations=[sc.get("actual_duration") or sc.get("duration", 6.0) for sc in scenes],
-                media_paths=paths, timeline_offsets=offsets
+                media_paths=paths,
+                timeline_offsets=offsets,
             )
-        except Exception as e_srt:
-            logger.error(f"Lỗi tạo file phụ đề SRT cho {video_id}: {e_srt}")
-            raise RuntimeError(f"Lỗi tạo phụ đề video (SRT): {e_srt}")
+            if not subtitles.is_file() or subtitles.stat().st_size < 10:
+                raise RuntimeError("File phụ đề SRT bị rỗng hoặc không thể tạo được.")
 
-        if not srt_file.exists() or srt_file.stat().st_size < 10:
-            raise RuntimeError("File phụ đề SRT bị rỗng hoặc không thể tạo được.")
-
-        # Khắc phụ đề vào video thành phẩm (Point 3)
-        try:
             burn_subtitles(
-                input_video=str(raw_concat_mp4),
-                srt_file=str(srt_file),
-                output_video=str(final_mp4),
+                input_video=str(merged),
+                srt_file=str(subtitles),
+                output_video=str(final),
                 font_size=12,
                 style=v.get("subtitle_style", "cinema"),
                 position=v.get("subtitle_position", "bottom"),
-                raise_on_error=True
+                raise_on_error=True,
             )
-        except Exception as e_burn:
-            logger.error(f"Burn-in phụ đề gặp sự cố: {e_burn}")
-            raise RuntimeError(f"Lỗi khắc phụ đề vào video: {e_burn}")
-
-        if not final_mp4.exists() or final_mp4.stat().st_size < 1000:
-            raise RuntimeError("File video cuối cùng sau khi khắc phụ đề không tồn tại hoặc bị lỗi.")
-
-        # Dọn dẹp file tạm concat
-        if raw_concat_mp4.exists():
-            try:
-                raw_concat_mp4.unlink()
-            except Exception:
-                pass
-
-        # Xác định thông báo hoàn tất & cảnh báo fallback nếu có
-        warning_msg = None
-        completion_step = "Hoàn tất video"
-        if fallback_scenes_count > 0:
-            warning_msg = f"Có {fallback_scenes_count}/{total_scenes} cảnh phải dùng hình nền dự phòng do AI vẽ ảnh quá tải."
-            completion_step = f"Hoàn tất ({ai_images_count}/{total_scenes} cảnh AI)"
+            if not final.is_file() or final.stat().st_size < 1000:
+                raise RuntimeError("File video cuối cùng sau khi khắc phụ đề không tồn tại hoặc bị lỗi.")
+            os.replace(final, v_dir / "final.mp4")
+            os.replace(subtitles, v_dir / "subtitles.srt")
 
         # Hoàn tất thành công! (Lưu lại đầy đủ metadata scenes bao gồm actual_duration và image_status)
         BATCH_MANAGER.update_video(video_id, {
             "status": "completed",
             "progress": 100,
-            "current_step": completion_step,
+            "current_step": "Hoàn tất video",
             "scenes": scenes,
             "final_video_url": f"/api/batch-videos/{video_id}/video",
             "srt_url": f"/api/batch-videos/{video_id}/subtitles",
-            "has_fallback_images": fallback_scenes_count > 0,
-            "warning": warning_msg,
+            "has_fallback_images": False,
+            "warning": None,
             "error": None
         })
         logger.info("✅ Hoàn tất sản xuất batch video: %s (AI images: %d/%d, Subtitles: OK)", video_id, ai_images_count, total_scenes)
@@ -2022,42 +1988,79 @@ def _batch_worker_kind(video: Dict[str, Any]) -> str:
     return "production"
 
 
-def _worker_loop(kind: str):
-    """Run one job at a time within this worker's group."""
+def _production_worker_limit() -> int:
+    """Số phim chạy dựng song song (1 phim / 1 browser khi bật Chrome Pool hoặc theo tài khoản Muse2API)."""
+    return query_muse_capacity_sync(max_concurrent=12, timeout=1.5)
+
+
+def _worker_loop(kind: str, lane_key: str):
+    """Run one job at a time within this worker lane, never double-claiming a queued film."""
     while True:
         # Start and retire a worker under the same lock so a new job cannot
         # be left queued between the last scan and the thread's shutdown.
         with _worker_lock:
             target_id = next(
                 (video["id"] for video in BATCH_MANAGER._read_queue()
-                 if video.get("status") == "queued" and _batch_worker_kind(video) == kind),
+                 if video.get("status") == "queued"
+                 and _batch_worker_kind(video) == kind
+                 and video["id"] not in _claimed_video_ids),
                 None,
             )
             if target_id is None:
-                _worker_threads.pop(kind, None)
+                _worker_threads.pop(lane_key, None)
                 return
-        _process_single_video(target_id)
+            _claimed_video_ids.add(target_id)
+        try:
+            _process_single_video(target_id)
+        finally:
+            with _worker_lock:
+                _claimed_video_ids.discard(target_id)
         time.sleep(0.5)
 
 
 def start_batch_worker():
-    """Start workers for queued production and export jobs independently."""
+    """Start workers for queued export (1 lane) and production (up to available browser/API lanes)."""
     with _worker_lock:
-        kinds = {
-            _batch_worker_kind(video)
-            for video in BATCH_MANAGER._read_queue()
-            if video.get("status") == "queued"
-        }
-        for kind in sorted(kinds):
-            worker = _worker_threads.get(kind)
-            if worker and worker.is_alive():
+        queued = [
+            video for video in BATCH_MANAGER._read_queue()
+            if video.get("status") == "queued" and video["id"] not in _claimed_video_ids
+        ]
+        queued_export = sum(1 for video in queued if _batch_worker_kind(video) == "export")
+        queued_production = sum(1 for video in queued if _batch_worker_kind(video) == "production")
+        active_prod_before = sum(
+            1 for key, thread in _worker_threads.items()
+            if (key == "production" or key.startswith("production:")) and thread.is_alive()
+        )
+    prod_capacity = _production_worker_limit() if queued_production else 0
+    prod_limit = min(active_prod_before + queued_production, prod_capacity) if queued_production else 0
+    with _worker_lock:
+        if queued_export:
+            export_worker = _worker_threads.get("export")
+            if not (export_worker and export_worker.is_alive()):
+                export_worker = threading.Thread(
+                    target=_worker_loop, args=("export", "export"), daemon=True, name="BatchVideo-export"
+                )
+                _worker_threads["export"] = export_worker
+                export_worker.start()
+                logger.info("Đã khởi động worker Batch Video (export).")
+        active_prod = sum(
+            1 for key, thread in _worker_threads.items()
+            if (key == "production" or key.startswith("production:")) and thread.is_alive()
+        )
+        slot_idx = 0
+        while active_prod < prod_limit:
+            lane_key = "production" if (slot_idx == 0 and prod_limit == 1) else f"production:{slot_idx}"
+            slot_idx += 1
+            existing = _worker_threads.get(lane_key)
+            if existing and existing.is_alive():
                 continue
             worker = threading.Thread(
-                target=_worker_loop, args=(kind,), daemon=True, name=f"BatchVideo-{kind}"
+                target=_worker_loop, args=("production", lane_key), daemon=True, name=f"BatchVideo-{lane_key}"
             )
-            _worker_threads[kind] = worker
+            _worker_threads[lane_key] = worker
             worker.start()
-            logger.info("Đã khởi động worker Batch Video (%s).", kind)
+            active_prod += 1
+            logger.info("Đã khởi động worker Batch Video (%s).", lane_key)
 
 
 def start_pending_batch_worker():

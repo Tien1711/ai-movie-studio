@@ -20,6 +20,7 @@ import batch_video_engine as batch
 import composer
 import qc
 from consistency import opening_reference, resolve_scene_cast, run_consistency_checks
+from muse_connection import current_muse_affinity, muse_capacity_from_accounts
 
 BUSY = {"queued", "running"}
 ASYNC = {
@@ -473,6 +474,7 @@ async def ask_json(system, user, reference_image=None):
     _, base, key = batch.muse_connection(batch.active_muse_provider())
     if not key:
         raise ValueError("Chưa cấu hình khóa kết nối Muse. Kiểm tra mục Cài đặt Muse.")
+    affinity = current_muse_affinity()
     async with httpx.AsyncClient(timeout=150) as client:
         try:
             res = await client.post(
@@ -481,6 +483,7 @@ async def ask_json(system, user, reference_image=None):
                 json={
                     "model": "muse-spark",
                     **({"reference_image": reference_image} if reference_image else {}),
+                    **({"affinity": affinity} if affinity else {}),
                     "timeout": 120,
                     "messages": [
                         {"role": "system", "content": system},
@@ -724,50 +727,65 @@ async def draw_cast(v, progress):
     uploads = batch.BATCH_DIR.parent / "_uploads"
     uploads.mkdir(exist_ok=True)
     style_suffix = batch.BATCH_VISUAL_STYLES[v["visual_style"]]["prompt_suffix"]
-    for index, character in enumerate(v["cast"], 1):
-        if character.get("avatar") or not character.get("auto_cast"):
-            continue
-        if not batch.BATCH_MANAGER.get_video(v["id"]):
-            raise asyncio.CancelledError()
-        progress(index, "Vẽ tạo hình nhân vật " + character["name"])
-        dest = uploads / (uuid.uuid4().hex + ".webp")
-        primary_prompt, fallback_prompt = character_design_prompts(
-            character, style_suffix
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "portrait"
-            try:
-                await media.generate_keyframe_image(
-                    primary_prompt, base, key, str(source), "1:1"
-                )
-            except (RuntimeError, TimeoutError, ValueError, OSError) as first_err:
-                if not batch.BATCH_MANAGER.get_video(v["id"]):
-                    raise asyncio.CancelledError()
-                err_text = str(first_err).lower()
-                transient_dom = any(
-                    k in err_text
-                    for k in (
-                        "tải lại lượt chat",
-                        "ô chat muse",
-                        "chưa xác nhận đã gửi",
+    pending_chars = [
+        (index, character)
+        for index, character in enumerate(v["cast"], 1)
+        if not character.get("avatar") and character.get("auto_cast")
+    ]
+    if not pending_chars:
+        return
+    workers = await image_workers(len(pending_chars)) if len(pending_chars) > 1 else 1
+    sem = asyncio.Semaphore(workers)
+
+    async def _draw_one(index, character):
+        async with sem:
+            if not batch.BATCH_MANAGER.get_video(v["id"]):
+                raise asyncio.CancelledError()
+            progress(index, "Vẽ tạo hình nhân vật " + character["name"])
+            dest = uploads / (uuid.uuid4().hex + ".webp")
+            primary_prompt, fallback_prompt = character_design_prompts(
+                character, style_suffix
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "portrait"
+                try:
+                    await media.generate_keyframe_image(
+                        primary_prompt, base, key, str(source), "1:1"
                     )
-                )
-                retry_prompt = primary_prompt if transient_dom else fallback_prompt
-                progress(
-                    index,
-                    (
-                        "Thử gửi lại tạo hình nhân vật "
-                        if transient_dom
-                        else "Đổi góc cảnh điện ảnh cho nhân vật "
+                except (RuntimeError, TimeoutError, ValueError, OSError) as first_err:
+                    if not batch.BATCH_MANAGER.get_video(v["id"]):
+                        raise asyncio.CancelledError()
+                    err_text = str(first_err).lower()
+                    transient_dom = any(
+                        k in err_text
+                        for k in (
+                            "tải lại lượt chat",
+                            "ô chat muse",
+                            "chưa xác nhận đã gửi",
+                        )
                     )
-                    + character["name"],
-                )
-                await media.generate_keyframe_image(
-                    retry_prompt, base, key, str(source), "1:1"
-                )
-            await asyncio.to_thread(image_to_webp, source, dest)
-        character["avatar"] = "/api/uploads/" + dest.name
-        batch.BATCH_MANAGER.update_video(v["id"], {"cast": v["cast"]})
+                    retry_prompt = primary_prompt if transient_dom else fallback_prompt
+                    progress(
+                        index,
+                        (
+                            "Thử gửi lại tạo hình nhân vật "
+                            if transient_dom
+                            else "Đổi góc cảnh điện ảnh cho nhân vật "
+                        )
+                        + character["name"],
+                    )
+                    await media.generate_keyframe_image(
+                        retry_prompt, base, key, str(source), "1:1"
+                    )
+                await asyncio.to_thread(image_to_webp, source, dest)
+            character["avatar"] = "/api/uploads/" + dest.name
+            batch.BATCH_MANAGER.update_video(v["id"], {"cast": v["cast"]})
+
+    if workers <= 1:
+        for index, character in pending_chars:
+            await _draw_one(index, character)
+    else:
+        await asyncio.gather(*(_draw_one(index, character) for index, character in pending_chars))
 
 
 def studio_opening(video, scene):
@@ -1110,7 +1128,7 @@ async def image_workers(max_concurrent=12):
     import httpx
 
     provider, url, key = batch.muse_connection(batch.active_muse_provider())
-    if provider != "muse2api" or not key:
+    if provider not in ("muse2api", "browser") or not key:
         return 1
     try:
         async with httpx.AsyncClient(timeout=3) as client:
@@ -1119,9 +1137,7 @@ async def image_workers(max_concurrent=12):
             )
             response.raise_for_status()
             data = response.json()
-        accounts = data.get("accounts", []) if isinstance(data, dict) else data
-        enabled = sum(1 for account in accounts if account.get("enabled", True))
-        return max(1, min(enabled, max_concurrent))
+        return muse_capacity_from_accounts(provider, data, max_concurrent)
     except (httpx.HTTPError, ValueError, TypeError, AttributeError):
         return 1
 

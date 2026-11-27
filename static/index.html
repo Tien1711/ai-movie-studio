@@ -3343,6 +3343,13 @@
               </select>
             </div>
           </div>
+          <div class="fx fx-g10 u-mb12" style="align-items:center;flex-wrap:wrap;">
+            <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;margin:0;font-size:13px;font-weight:600;">
+              <input id="museBrowserPoolToggle" type="checkbox" style="width:auto;margin:0;" onchange="toggleMuseBrowserPool()" disabled>
+              <span>Chạy song song tất cả profile đang mở (Pool · 1 phim / 1 trình duyệt)</span>
+            </label>
+          </div>
+          <div id="museChromeProfileList" class="fx fx-g8 u-mb12" style="flex-wrap:wrap;"></div>
           <div class="fx fx-g10 u-mb12">
             <button class="btn btn-ghost btn-sm" onclick="createMuseProfilePairing()">Tạo mã ghép nối</button>
             <button class="btn btn-ghost btn-sm" onclick="loadMuseChromeProfiles()">Tải lại profile</button>
@@ -3418,7 +3425,7 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js?v=20261127_comic_import" defer></script>
+<script src="static/js/app.js?v=20261128_pool" defer></script>
 <script src="static/js/muse-studio.js?v=20261126_perf" defer></script>
 <script src="static/js/studio-editor.js?v=20261127_comic_import" defer></script>
 <script src="static/js/ui.js?v=20261126_perf" defer></script>

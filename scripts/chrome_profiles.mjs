@@ -31,6 +31,44 @@ export class ChromeProfiles {
     this.online = new Map();
     this.pending = new Map();
     this.pairing = null;
+    this.affinity = new Map();
+    this.lastUsed = new Map();
+  }
+
+  // Pool mode: spread requests over every ready paired profile. It turns on by itself
+  // once two or more profiles are paired, unless the user pinned the gateway's own window
+  // (selected === null) or switched the pool off explicitly.
+  get pool() {
+    if (this.saved.profiles.length < 2 || this.saved.pool === false) return false;
+    return this.saved.pool === true || this.saved.selected !== null;
+  }
+
+  selectPool(enabled) {
+    if (typeof enabled !== 'boolean') throw new RequestError(422, 'Chế độ chạy song song không hợp lệ.');
+    this.save({ ...this.saved, pool: enabled });
+    return this.list();
+  }
+
+  readyProfiles() {
+    return this.saved.profiles.filter(({ id }) => this.readiness(id).ready);
+  }
+
+  // Lease one idle ready profile. `affinity` (e.g. a film id) is a soft preference: the same
+  // film keeps its browser while that browser is idle, otherwise the least recently used
+  // idle profile takes the work so a single film can still fan out across browsers.
+  acquire(affinity, taken) {
+    const free = this.readyProfiles().filter(({ id }) => !taken.has(id) && !this.pending.has(id));
+    if (!free.length) return null;
+    const preferred = affinity ? this.affinity.get(affinity) : undefined;
+    const chosen = free.find(({ id }) => id === preferred)
+      || free.reduce((best, item) => ((this.lastUsed.get(item.id) ?? 0) < (this.lastUsed.get(best.id) ?? 0) ? item : best));
+    this.lastUsed.set(chosen.id, Date.now());
+    if (affinity) {
+      this.affinity.delete(affinity);
+      this.affinity.set(affinity, chosen.id);
+      if (this.affinity.size > 500) this.affinity.delete(this.affinity.keys().next().value);
+    }
+    return { id: chosen.id, name: chosen.name, driver: this.profileDriver(chosen.id) };
   }
 
   save(next) {
@@ -68,7 +106,10 @@ export class ChromeProfiles {
     return {
       selected: this.saved.selected,
       chat_mode: this.chatMode,
-      profiles: this.saved.profiles.map(({ id, name }) => ({ id, name, ...this.readiness(id) })),
+      pool: this.pool,
+      profiles: this.saved.profiles.map(({ id, name }) => ({
+        id, name, ...this.readiness(id), ...(this.pending.has(id) ? { busy: true } : {}),
+      })),
     };
   }
 
@@ -213,8 +254,12 @@ export class ChromeProfiles {
 
   activeDriver(fallback) {
     const id = this.saved.selected;
-    const chatMode = this.chatMode;
     if (!id) return fallback;
+    return this.profileDriver(id);
+  }
+
+  profileDriver(id) {
+    const chatMode = this.chatMode;
     return {
       status: async () => {
         const { online, ready, reload } = this.readiness(id);

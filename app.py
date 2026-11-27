@@ -63,7 +63,7 @@ logger = logging.getLogger("ai_movie_studio")
 # ── Cấu hình ──────────────────────────────────────────────────────────────
 MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY = muse_config.muse_connection(muse_config.active_muse_provider())
 _MUSE_KEY_NAME = "MUSE_BROWSER_KEY" if MUSE_PROVIDER == "browser" else "MUSE2API_KEY"
-_MUSE_MAX_CONCURRENT = 1 if MUSE_PROVIDER == "browser" else 12
+_MUSE_MAX_CONCURRENT = 12
 
 if not MUSE_API_KEY:
     logger.warning("%s chưa được đặt. Các endpoint gọi Muse sẽ trả 503.", _MUSE_KEY_NAME)
@@ -1103,7 +1103,8 @@ async def film_pipeline(job: Dict, req: MovieRequest):
         (output_dir / "final").mkdir(exist_ok=True)
 
         raw_concurrent = req.max_concurrent if (req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
-        concurrent = min(raw_concurrent, _MUSE_MAX_CONCURRENT)
+        max_cap = await muse_config.query_muse_capacity_async(_MUSE_MAX_CONCURRENT) if MUSE_PROVIDER == "browser" else _MUSE_MAX_CONCURRENT
+        concurrent = min(raw_concurrent, max_cap)
         total = len(req.scenes)
         if req.chain_mode == "sequential":
             job_log(job, f"🔗 Bắt đầu sản xuất {total} cảnh theo chế độ Nối tiếp tuần tự (Sequential Chaining: Kế thừa Last Frame liên tục qua từng cảnh)...")
@@ -1147,26 +1148,27 @@ async def film_pipeline(job: Dict, req: MovieRequest):
 
         # ── Batch render hàng loạt ──
         batch_timing: Dict[str, float] = {}
-        results = await run_batch(
-            scenes=scenes_dicts,
-            base_url=MUSE_API_URL,
-            api_key=MUSE_API_KEY,
-            output_dir=str(output_dir),
-            voice=req.voice,
-            max_concurrent=concurrent,
-            progress_cb=progress_cb,
-            chain_mode=req.chain_mode or "none",
-            chain_fallback_mode=req.chain_fallback_mode or "independent",
-            style_locks=req.style_locks,
-            start_scene_idx=req.start_scene_idx or 1,
-            voice_mode=req.voice_mode or "tts",
-            timing=batch_timing,
-            cancel_event=cancel_event,
-            muse_provider=MUSE_PROVIDER,
-            # Snapshot nhân vật CỦA PHIM này (đã lưu ở create_movie) —
-            # scene nhắc tên ai thì dán đúng Character Block của người đó.
-            characters=job.get("characters") or copy.deepcopy(req.characters or []),
-        )
+        with muse_config.muse_affinity_scope(job_id):
+            results = await run_batch(
+                scenes=scenes_dicts,
+                base_url=MUSE_API_URL,
+                api_key=MUSE_API_KEY,
+                output_dir=str(output_dir),
+                voice=req.voice,
+                max_concurrent=concurrent,
+                progress_cb=progress_cb,
+                chain_mode=req.chain_mode or "none",
+                chain_fallback_mode=req.chain_fallback_mode or "independent",
+                style_locks=req.style_locks,
+                start_scene_idx=req.start_scene_idx or 1,
+                voice_mode=req.voice_mode or "tts",
+                timing=batch_timing,
+                cancel_event=cancel_event,
+                muse_provider=MUSE_PROVIDER,
+                # Snapshot nhân vật CỦA PHIM này (đã lưu ở create_movie) —
+                # scene nhắc tên ai thì dán đúng Character Block của người đó.
+                characters=job.get("characters") or copy.deepcopy(req.characters or []),
+            )
 
         job["results"] = results
         job["timing"].update({k: batch_timing.get(k, 0.0) for k in ("render_s", "poll_s", "tts_s")})
@@ -1684,20 +1686,22 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
             _set_scene(job, idx, {"status": "running", "msg": msg})
 
         raw_concurrent = req.max_concurrent if (req and req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
-        concurrent = min(raw_concurrent, _MUSE_MAX_CONCURRENT)
-        new_results = await run_batch(
-            scenes=scenes_dicts,
-            base_url=MUSE_API_URL,
-            api_key=MUSE_API_KEY,
-            output_dir=str(output_dir),
-            voice=req.voice,
-            max_concurrent=concurrent,
-            progress_cb=retry_progress_cb,
-            voice_mode=req.voice_mode or "tts",
-            cancel_event=retry_cancel_event,
-            muse_provider=MUSE_PROVIDER,
-            characters=job.get("characters") or copy.deepcopy(req.characters or []),
-        )
+        max_cap = await muse_config.query_muse_capacity_async(_MUSE_MAX_CONCURRENT) if MUSE_PROVIDER == "browser" else _MUSE_MAX_CONCURRENT
+        concurrent = min(raw_concurrent, max_cap)
+        with muse_config.muse_affinity_scope(job_id):
+            new_results = await run_batch(
+                scenes=scenes_dicts,
+                base_url=MUSE_API_URL,
+                api_key=MUSE_API_KEY,
+                output_dir=str(output_dir),
+                voice=req.voice,
+                max_concurrent=concurrent,
+                progress_cb=retry_progress_cb,
+                voice_mode=req.voice_mode or "tts",
+                cancel_event=retry_cancel_event,
+                muse_provider=MUSE_PROVIDER,
+                characters=job.get("characters") or copy.deepcopy(req.characters or []),
+            )
 
         # Audit #8: hủy trong lúc retry -> dừng, không ghép lại phim.
         if job.get("cancelled") or job.get("status") == "cancelled" or retry_cancel_event.is_set():
@@ -3438,17 +3442,13 @@ async def api_shot_desk_render_all(project_id: str, payload: Optional[RenderAllR
     if not proj:
         return JSONResponse({"error": "Không tìm thấy dự án"}, status_code=404)
 
-    # Tự động phát hiện số tài khoản Muse đang hoạt động để phân bổ tối đa toàn bộ tài khoản
+    # Tự động phát hiện số tài khoản Muse / Chrome Profile đang hoạt động để phân bổ song song
     num_accounts = 1 if MUSE_PROVIDER == "browser" else 6
     try:
         _cl = get_http_client()
         hr = await _cl.get(f"{MUSE_API_URL}/admin/accounts", headers={"Authorization": f"Bearer {MUSE_API_KEY}"}, timeout=3.0)
         if hr.status_code == 200:
-            d = hr.json()
-            accs = d.get("accounts", []) if isinstance(d, dict) else d
-            enabled_accs = [a for a in accs if a.get("enabled", True)]
-            if enabled_accs:
-                num_accounts = len(enabled_accs)
+            num_accounts = muse_config.muse_capacity_from_accounts(MUSE_PROVIDER, hr.json(), max_concurrent=24)
     except Exception as acc_e:
         print(f"[RenderAll] Warning querying active accounts: {acc_e}")
 
@@ -3458,7 +3458,8 @@ async def api_shot_desk_render_all(project_id: str, payload: Optional[RenderAllR
         concurrent = num_accounts
 
     chain = payload is None or payload.chain
-    concurrent = 1 if chain else max(1, min(1 if MUSE_PROVIDER == "browser" else 24, concurrent))
+    max_lanes = num_accounts if MUSE_PROVIDER == "browser" else 24
+    concurrent = 1 if chain else max(1, min(max_lanes, concurrent))
 
     active_set = ACTIVE_SHOT_TASKS.setdefault(project_id, set())
     proj_dir = get_safe_project_dir(project_id)
@@ -4831,7 +4832,7 @@ async def update_muse_settings(payload: MuseSettingsRequest, request: Request):
         raise HTTPException(status_code=500, detail="Không lưu được cấu hình Muse.") from error
     MUSE_PROVIDER, MUSE_API_URL, MUSE_API_KEY = connection
     _MUSE_KEY_NAME = "MUSE_BROWSER_KEY" if MUSE_PROVIDER == "browser" else "MUSE2API_KEY"
-    _MUSE_MAX_CONCURRENT = 1 if MUSE_PROVIDER == "browser" else 12
+    _MUSE_MAX_CONCURRENT = 12
     muse_config.active_muse_provider.cache_clear()
     return _muse_settings()
 
@@ -4842,6 +4843,10 @@ class ChromeProfileSelection(BaseModel):
 
 class MuseBrowserChatMode(BaseModel):
     mode: Literal["side", "main"]
+
+
+class MuseBrowserPoolMode(BaseModel):
+    enabled: bool
 
 
 async def _browser_profiles_request(method: str, path: str = "", **kwargs):
@@ -4895,6 +4900,12 @@ async def select_muse_browser_chat_mode(payload: MuseBrowserChatMode, request: R
     return await _browser_profiles_request("PUT", "/chat-mode", json={"mode": payload.mode})
 
 
+@app.put("/api/settings/muse/chrome-profiles/pool")
+async def select_muse_browser_pool(payload: MuseBrowserPoolMode, request: Request):
+    _check_local_form_origin(request)
+    return await _browser_profiles_request("PUT", "/pool", json={"enabled": payload.enabled})
+
+
 @app.delete("/api/settings/muse/chrome-profiles/{profile_id}")
 async def remove_muse_chrome_profile(profile_id: uuid.UUID, request: Request):
     _check_local_form_origin(request)
@@ -4905,6 +4916,8 @@ async def _check_muse_gateway(provider: str, url: str, key: Optional[str]):
     accounts = 0
     ready = False
     error = ""
+    pool = False
+    busy = 0
     try:
         if not key:
             key_name = "MUSE_BROWSER_KEY" if provider == "browser" else "MUSE2API_KEY"
@@ -4921,6 +4934,8 @@ async def _check_muse_gateway(provider: str, url: str, key: Optional[str]):
                 accounts = len(data)
             elif isinstance(data, dict):
                 accounts = data.get("stats", {}).get("total", len(data.get("accounts", [])))
+                busy = int(data.get("stats", {}).get("busy", 0) or 0)
+                pool = data.get("pool") is True
             if provider == "browser":
                 ready = isinstance(data, dict) and data.get("ready") is True
                 if not ready:
@@ -4932,7 +4947,7 @@ async def _check_muse_gateway(provider: str, url: str, key: Optional[str]):
             error = f"Gateway trả HTTP {response.status_code}."
     except Exception as exc:
         error = str(exc)[:120]
-    return {"ready": ready, "accounts": accounts, "error": error}
+    return {"ready": ready, "accounts": accounts, "error": error, "pool": pool, "busy": busy}
 
 
 @app.get("/api/settings/muse/health")
@@ -4955,6 +4970,8 @@ async def health_check():
         "muse_provider": MUSE_PROVIDER,
         "muse_url": MUSE_API_URL,
         "accounts": result["accounts"],
+        "muse_pool": result.get("pool", False),
+        "muse_busy": result.get("busy", 0),
         "muse_error": result["error"],
     }
 

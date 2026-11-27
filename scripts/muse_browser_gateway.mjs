@@ -8,6 +8,8 @@ import { MEDIA_PATH, mediaExtension } from './browser_media_files.mjs';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_BODY_BYTES = Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 128 * 1024;
 const MAX_PENDING = 3;
+const POOL_PENDING_BASE = 16;
+const POOL_PENDING_PER_PROFILE = 8;
 const TASK_TTL_MS = 60 * 60 * 1000;
 const MAX_TASKS = 200;
 const MEDIA_EXTENSIONS = {
@@ -93,6 +95,12 @@ function chatPrompt(messages) {
 
 function textLinks(text) {
   return text.match(/https:\/\/[^\s<>\x22'\x60()\[\]]+/g) || [];
+}
+
+// Soft routing hint (usually a film id): keeps one film on one browser while that browser is idle.
+function affinityOf(data) {
+  return typeof data.affinity === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(data.affinity)
+    ? data.affinity : undefined;
 }
 
 function mediaLink(values, kind) {
@@ -197,23 +205,54 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
   const tasks = new Map();
   const queue = [];
   const currentDriver = () => profiles.activeDriver(driver);
-  let busy = false;
+  // One lane per browser. In pool mode every ready Chrome profile is its own lane, so as many
+  // requests run at once as there are profiles; otherwise a single shared lane ('solo').
+  const lanes = new Set();
+  const isBusy = () => lanes.size > 0;
+  const POOL_EMPTY = 'Mở tab Muse trong ít nhất một profile Chrome đã ghép nối.';
 
-  // Track all browser operations in a single lane, including the reply read.
-  function drain() {
-    if (busy || !queue.length) return;
-    busy = true;
-    const { run, fulfill, fail } = queue.shift();
-    Promise.resolve().then(run).then(fulfill, fail).finally(() => {
-      busy = false;
-      drain();
-    });
+  function lease(affinity) {
+    if (profiles.pool) {
+      const got = profiles.acquire(affinity, lanes);
+      if (got) lanes.add(got.id);
+      return got;
+    }
+    if (lanes.has('solo')) return null;
+    lanes.add('solo');
+    return { id: 'solo', name: undefined, driver: currentDriver() };
   }
 
-  function schedule(run) {
-    if (queue.length >= MAX_PENDING) throw new RequestError(429, 'Hàng đợi Muse Browser đã đầy.');
+  // Track every browser operation, including the reply read, on the lane that owns it.
+  function drain() {
+    if (profiles.pool && queue.length && !profiles.readyProfiles().length) {
+      for (const item of queue.splice(0)) item.fail(new RequestError(503, POOL_EMPTY));
+      return;
+    }
+    for (let index = 0; index < queue.length;) {
+      const item = queue[index];
+      const got = lease(item.affinity);
+      if (!got) {
+        if (!profiles.pool) return;
+        index++;
+        continue;
+      }
+      queue.splice(index, 1);
+      Promise.resolve().then(() => item.run(got)).then(item.fulfill, item.fail).finally(() => {
+        lanes.delete(got.id);
+        drain();
+      });
+    }
+  }
+
+  function schedule(run, { affinity, priority = false } = {}) {
+    const pool = profiles.pool;
+    if (pool && !profiles.readyProfiles().length) throw new RequestError(503, POOL_EMPTY);
+    const limit = pool ? POOL_PENDING_BASE + profiles.readyProfiles().length * POOL_PENDING_PER_PROFILE : MAX_PENDING;
+    if (queue.length >= limit) throw new RequestError(429, 'Hàng đợi Muse Browser đã đầy.');
     return new Promise((fulfill, fail) => {
-      queue.push({ run, fulfill, fail });
+      const item = { run, fulfill, fail, affinity };
+      if (priority) queue.unshift(item);
+      else queue.push(item);
       drain();
     });
   }
@@ -222,13 +261,14 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
     const prompt = mediaPrompt(data, kind);
     const files = imageAttachment(data.reference_image);
     const id = randomUUID();
-    const selected = currentDriver();
     const chatMode = profiles.chatMode;
-    const task = { id, status: 'queued', kind, progress: selected.progress };
-    schedule(async () => {
+    const task = { id, status: 'queued', kind, progress: null };
+    schedule(async lease => {
       task.status = 'in_progress';
+      task.progress = lease.driver.progress;
+      task.account = lease.name;
       try {
-        task.url = await generate(selected, prompt, files, kind, profiles.mediaFiles, { chatMode });
+        task.url = await generate(lease.driver, prompt, files, kind, profiles.mediaFiles, { chatMode });
         task.status = 'completed';
       } catch (error) {
         task.status = 'failed';
@@ -236,7 +276,7 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
       } finally {
         task.finished = Date.now();
       }
-    });
+    }, { affinity: affinityOf(data) });
     tasks.set(id, task);
     for (const [taskId, old] of tasks) {
       if (old.finished && (Date.now() - old.finished > TASK_TTL_MS || tasks.size > MAX_TASKS)) {
@@ -250,7 +290,7 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
     const path = (request.url || '').split('?', 1)[0];
     try {
       if (request.method === 'POST' && path === '/extension/pair') {
-        return send(response, 201, profiles.pair(await jsonBody(request), !busy && !queue.length));
+        return send(response, 201, profiles.pair(await jsonBody(request), !isBusy() && !queue.length));
       }
       if (request.method === 'POST' && ['/extension/poll', '/extension/result', '/extension/video-chunk', '/extension/media-chunk'].includes(path)) {
         const id = profiles.authenticate(request.headers.authorization);
@@ -277,25 +317,40 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
       }
       if (request.method === 'PUT' && path === '/admin/chrome-profiles/selection') {
         const { id } = await jsonBody(request);
-        if (busy || queue.length) throw new RequestError(409, 'Đợi yêu cầu Muse hiện tại kết thúc rồi đổi profile.');
+        if (isBusy() || queue.length) throw new RequestError(409, 'Đợi yêu cầu Muse hiện tại kết thúc rồi đổi profile.');
         const result = profiles.select(id);
         if (id === null) openSeparate();
         return send(response, 200, result);
       }
       if (request.method === 'PUT' && path === '/admin/chrome-profiles/chat-mode') {
         const { mode } = await jsonBody(request);
-        if (busy || queue.length) throw new RequestError(409, 'Đợi yêu cầu Muse hiện tại kết thúc rồi đổi chế độ chat.');
+        if (isBusy() || queue.length) throw new RequestError(409, 'Đợi yêu cầu Muse hiện tại kết thúc rồi đổi chế độ chat.');
         return send(response, 200, profiles.selectChatMode(mode));
+      }
+      if (request.method === 'PUT' && path === '/admin/chrome-profiles/pool') {
+        const { enabled } = await jsonBody(request);
+        if (isBusy() || queue.length) throw new RequestError(409, 'Đợi yêu cầu Muse hiện tại kết thúc rồi đổi chế độ chạy song song.');
+        return send(response, 200, profiles.selectPool(enabled));
       }
       if (request.method === 'DELETE' && path.startsWith('/admin/chrome-profiles/')) {
         const id = path.split('/').at(-1);
-        if (busy || queue.length) throw new RequestError(409, 'Đợi yêu cầu Muse hiện tại kết thúc rồi xóa profile.');
+        if (isBusy() || queue.length) throw new RequestError(409, 'Đợi yêu cầu Muse hiện tại kết thúc rồi xóa profile.');
         const result = profiles.remove(id);
         if (result.selected === null) openSeparate();
         return send(response, 200, result);
       }
       if (request.method === 'GET') {
         if (path === '/admin/accounts') {
+          if (profiles.pool) {
+            const accounts = profiles.readyProfiles().map(({ id, name }) => ({
+              id, name, enabled: true, busy: lanes.has(id),
+            }));
+            return send(response, 200, {
+              accounts, stats: { total: accounts.length, busy: accounts.filter(a => a.busy).length },
+              ready: accounts.length > 0, pool: true,
+              error: accounts.length ? '' : POOL_EMPTY,
+            });
+          }
           const state = await currentDriver().status();
           const ready = Boolean(state.loggedIn && state.composerReady);
           const accounts = ready ? [{ id: 'browser', enabled: true }] : [];
@@ -319,6 +374,7 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
           const message = status === 'in_progress' ? task.progress?.() : null;
           return send(response, 200, {
             id, status, error, url, ...(message ? { message } : {}),
+            ...(task.account && status === 'in_progress' ? { account: task.account } : {}),
             ...(task.kind === 'video' && url ? { video_url: url } : {}),
           });
         }
@@ -331,17 +387,26 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
         if (path === '/v1/images/generations') {
           const data = await jsonBody(request);
           if (data.async === true) return send(response, 202, submit(data, 'image'));
-          if (busy) throw new RequestError(429, 'Muse Browser đang xử lý yêu cầu khác.');
+          if (!profiles.pool && isBusy()) throw new RequestError(429, 'Muse Browser đang xử lý yêu cầu khác.');
           const prompt = mediaPrompt(data, 'image');
           const files = imageAttachment(data.reference_image);
-          const url = await schedule(() => generate(currentDriver(), prompt, files, 'image', profiles.mediaFiles, { chatMode: profiles.chatMode }));
+          const url = await schedule(
+            lease => generate(lease.driver, prompt, files, 'image', profiles.mediaFiles, { chatMode: profiles.chatMode }),
+            { affinity: affinityOf(data) },
+          );
           return send(response, 200, { data: [{ url }] });
         }
         if (path === '/v1/chat/completions') {
           const data = await jsonBody(request);
-          if (busy) throw new RequestError(429, 'Muse Browser đang xử lý yêu cầu khác.');
+          if (!profiles.pool && isBusy()) throw new RequestError(429, 'Muse Browser đang xử lý yêu cầu khác.');
           const seconds = Number.isFinite(data.timeout) ? Math.max(1, Math.min(120, data.timeout)) : 35;
-          const content = await schedule(() => generate(currentDriver(), chatPrompt(data.messages), imageAttachment(data.reference_image), null, profiles.mediaFiles, { chatTimeoutMs: seconds * 1000, chatMode: profiles.chatMode }));
+          const prompt = chatPrompt(data.messages);
+          const files = imageAttachment(data.reference_image);
+          // Script writing jumps the queue so it is not stuck behind a long image/video backlog.
+          const content = await schedule(
+            lease => generate(lease.driver, prompt, files, null, profiles.mediaFiles, { chatTimeoutMs: seconds * 1000, chatMode: profiles.chatMode }),
+            { affinity: affinityOf(data), priority: true },
+          );
           return send(response, 200, { choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
         }
       }
