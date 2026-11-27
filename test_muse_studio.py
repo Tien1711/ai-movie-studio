@@ -190,10 +190,11 @@ def test_muse_draft_motion_and_review(tmp_path, monkeypatch, guided):
         "subtitle_style": "karaoke",
         "subtitle_position": "top",
         "scenes": [
-            {"prompt": "Mai opens the door", "voiceover": "Mai mở cửa.", "duration": 5},
+            {"prompt": "Mai opens the door", "voiceover": "Mai mở cửa.", "duration": 5, "setting": "Hall, morning"},
             {
                 "prompt": "Camera follows the footsteps",
                 "voiceover": "Bước chân tiến gần.",
+                "setting": "Hall, morning",
                 "duration": 5,
             },
         ],
@@ -251,6 +252,12 @@ def test_muse_draft_motion_and_review(tmp_path, monkeypatch, guided):
         )
         assert client.get(f"/api/batch-videos/{vid}/video").content[4:8] == b"ftyp"
         assert "Bước chân" in client.get(f"/api/batch-videos/{vid}/subtitles").text
+        assert act("compose", [], include_subtitles=False).is_success
+        batch._process_single_video(vid)
+        clean = batch.BATCH_MANAGER.get_video(vid)
+        assert clean["status"] == "completed", clean["error"]
+        assert clean["include_subtitles"] is False and clean["srt_url"] is None
+        assert not (store / vid / "subtitles.srt").exists()
         assert act("approve_image", [1], approved=False).is_success
         assert not batch.BATCH_MANAGER.get_video(vid)["scenes"][0]["clip"]
         assert batch.BATCH_MANAGER.get_video(vid)["scenes"][1]["stale_join"]
@@ -410,9 +417,9 @@ def test_ask_json_parses_browser_dom_prose_and_favicon_not_404(monkeypatch):
     browser_dom_reply = (
         "Dưới đây là kịch bản phân cảnh [1, 2]:\n"
         "json\nCopy\n"
-        "{\u00a0\"characters\": [{\"name\": \"Trưng Trắc\", \"description\": \"Áo giáp đồng, tóc búi cao\"}],\n"
-        "  \"scenes\": [\n"
-        "    {\"index\": \"1\", \"title\": \"Mê Linh rực lửa\", \"prompt\": \"Wide shot\", \"voiceover\": \"Mùa xuân năm 40.\", \"characters\": [\"Trưng Trắc\", \"Nghĩa quân quần chúng\"],},\n"
+        '{\u00a0"characters": [{"name": "Trưng Trắc", "description": "Áo giáp đồng, tóc búi cao"}],\n'
+        '  "scenes": [\n'
+        '    {"index": "1", "title": "Mê Linh rực lửa", "prompt": "Wide shot", "voiceover": "Mùa xuân năm 40.", "characters": ["Trưng Trắc", "Nghĩa quân quần chúng"],},\n'
         "  ]\n"
         "}\n"
         "Bạn có muốn viết tiếp cảnh sau không?"
@@ -442,7 +449,12 @@ def test_ask_json_parses_browser_dom_prose_and_favicon_not_404(monkeypatch):
                     200,
                     json={
                         "choices": [
-                            {"message": {"role": "assistant", "content": browser_dom_reply}}
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": browser_dom_reply,
+                                }
+                            }
                         ]
                     },
                 )
@@ -509,7 +521,9 @@ def test_draw_cast_avoids_portrait_filter_and_retries_scenic_fallback(
         assert "Gương mặt trái xoan" in prompt
         assert "áo giáp đỏ thẫm viền vàng" in prompt
         if len(attempts) == 1:
-            raise RuntimeError("Muse chưa tạo được tệp media (I couldn't generate that portrait)")
+            raise RuntimeError(
+                "Muse chưa tạo được tệp media (I couldn't generate that portrait)"
+            )
         Image.new("RGB", (48, 48), "crimson").save(target, "PNG")
 
     monkeypatch.setattr(batch_engine, "generate_keyframe_image", fake_generate)
@@ -517,3 +531,63 @@ def test_draw_cast_avoids_portrait_filter_and_retries_scenic_fallback(
     assert len(attempts) == 2
     assert "misty river" in attempts[1]
     assert video["cast"][0]["avatar"].startswith("/api/uploads/")
+
+
+def test_images_use_enabled_muse2api_accounts_and_isolate_failure(
+    tmp_path, monkeypatch
+):
+    import studio_workflow as workflow
+
+    def response(request):
+        assert request.url.path == "/admin/accounts"
+        return httpx.Response(200, json={"accounts": [{}, {}, {}, {"enabled": False}]})
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: client(transport=httpx.MockTransport(response), **kw),
+    )
+    monkeypatch.setattr(
+        batch, "muse_connection", lambda _: ("muse2api", "https://muse.test", "fixture")
+    )
+    assert asyncio.run(workflow.image_workers(6)) == 3
+    assert asyncio.run(workflow.image_workers(2)) == 2
+    monkeypatch.setattr(
+        batch, "muse_connection", lambda _: ("browser", "https://muse.test", "fixture")
+    )
+    assert asyncio.run(workflow.image_workers()) == 1
+
+    async def render():
+        all_started = asyncio.Event()
+        started = []
+
+        async def produce(video, scene, action, work, progress):
+            started.append(work)
+            if len(started) == 3:
+                all_started.set()
+            await asyncio.wait_for(all_started.wait(), timeout=2)
+            if scene["index"] == 2:
+                raise ValueError("lỗi mô phỏng")
+            scene["frame"] = "ready"
+
+        monkeypatch.setattr(workflow, "directory", lambda _: tmp_path)
+        monkeypatch.setattr(workflow, "produce", produce)
+        video = {"id": "fixture", "scenes": [{"index": i} for i in (1, 2, 3)]}
+        errors = await workflow.produce_images(video, [1, 2, 3], None)
+        assert len(set(started)) == 3
+        assert errors == ["Cảnh 2: lỗi mô phỏng"]
+        assert video["scenes"][0]["frame"] == video["scenes"][2]["frame"] == "ready"
+
+    asyncio.run(render())
+
+
+def test_studio_uses_approved_frame_when_continuity_is_unspecified():
+    import studio_workflow as workflow
+
+    previous = {"index": 1, "setting": "Làng — sáng", "last_frame": "previous.jpg"}
+    current = {"index": 2, "frame": "approved.webp", "frame_approved": True}
+    video = {"id": "fixture", "scenes": [previous, current]}
+    assert workflow.studio_opening(video, current) == ("approved.webp", "anchor")
+    current["setting"] = "Sân tập — sáng"
+    assert workflow.studio_opening(video, current) == ("approved.webp", "anchor")

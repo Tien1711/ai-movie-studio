@@ -917,6 +917,7 @@ function drawGuidedBoard(board, v) {
       "</div>";
   html +=
     '<div class="studio-actions">' +
+    (v.comic && !done ? action("Tiếp tục dựng truyện tranh", "comic") : "") +
     (needsPortrait ? action("Vẽ ảnh nhân vật", "portraits") : "") +
     (v.status === "draft" && v.studio_source && !v.workshop
       ? action("Sửa bản nháp", "draft")
@@ -936,7 +937,7 @@ function drawGuidedBoard(board, v) {
       !scenes.some((s) => s.frame_approved && !s.clip),
     ) +
     action("Duyệt video đã xong", "clips-ok", clips === approvedClips) +
-    action("Ghép clip", "compose", approvedClips !== total) +
+    action("Ghép clip · giữ tiếng AI", "compose", approvedClips !== total) +
     action("Dựng phim có lời kể", "narrated", !stillMode, "btn-primary") +
     action("Thiết lập", "settings") +
     action("Dựng lại", "rebuild", written !== total) +
@@ -1127,7 +1128,7 @@ function drawGuidedBoard(board, v) {
     ["Có âm thanh", !!report.has_audio],
     ["Có thời lượng", report.duration_s > 0],
     ["Đúng số cảnh", approvedClips === total || stillMode],
-    ["Có phụ đề", !!v.srt_url],
+    ...(v.include_subtitles === false ? [] : [["Có phụ đề", !!v.srt_url]]),
     ["Âm lượng lời kể", report.lufs >= -24 && report.lufs <= -10],
     ["Đỉnh âm thanh", Number.isFinite(report.peak) && report.peak <= -1],
   ];
@@ -1141,9 +1142,8 @@ function drawGuidedBoard(board, v) {
         '"></video>' +
         '<div class="studio-actions"><a class="btn btn-ghost" href="' +
         prefix +
-        '/video" download>Tải MP4</a><a class="btn btn-ghost" href="' +
-        prefix +
-        '/subtitles" download>Phụ đề SRT</a>' +
+        '/video" download>Tải MP4</a>' +
+        (v.srt_url ? '<a class="btn btn-ghost" href="' + prefix + '/subtitles" download>Phụ đề SRT</a>' : "") +
         '<a class="btn btn-ghost" href="/api/factory/publish-pack/' +
         encodeURIComponent(v.id) +
         '" download>Gói đăng bài</a>' +
@@ -1151,7 +1151,7 @@ function drawGuidedBoard(board, v) {
         "</div>" +
         "<h4>Kiểm định thành phẩm</h4><p>" +
         checks.filter((x) => x[1]).length +
-        "/7 mục đạt</p><dl><dt>Thời lượng</dt><dd>" +
+        "/" + checks.length + " mục đạt</p><dl><dt>Thời lượng</dt><dd>" +
         timeLabel(report.duration_s) +
         "</dd><dt>Khung hình</dt><dd>" +
         esc(report.width || "—") +
@@ -1199,7 +1199,15 @@ async function stage(v, action, indexes = [], extra = {}) {
     await editorApi(
       "/api/muse-studio/" + encodeURIComponent(v.id) + "/actions",
       "POST",
-      { action, indexes, version: v.updated_at, ...extra },
+      {
+        action,
+        indexes,
+        version: v.updated_at,
+        ...(action === "image" && {
+          max_concurrent: Math.max(1, Math.min(12, parseInt(el("cfgConcurrent").value, 10) || 6)),
+        }),
+        ...extra,
+      },
     );
   } finally {
     await refreshMuseBoard();
@@ -1325,14 +1333,22 @@ async function guidedAction(v, b) {
         [i],
         { approved: !(op === "image-ok" ? s.frame_approved : s.approved) },
       );
-    else if (op === "narrated" && scenes.some((s) => !s.approved)) {
+    else if (op === "compose" || op === "narrated") {
+      const narrated = op === "narrated";
+      const useStills = narrated && scenes.some((scene) => !scene.approved);
+      const note = useStills
+        ? "<p>Các cảnh chưa có clip sẽ dùng ảnh đã duyệt có chuyển động nhẹ.</p>"
+        : "";
       return dialog(
-        "Dựng phim có lời kể",
-        "<p>" +
-          scenes.filter((s) => !s.clip).length +
-          " cảnh sẽ dùng ảnh đã duyệt có chuyển động nhẹ. Các cảnh còn lại dùng clip AI đã duyệt.</p>",
-        () => stage(v, op, [], { allow_stills: true }),
-        "Dựng bản kết hợp",
+        narrated ? "Dựng phim có lời kể" : "Ghép clip · giữ tiếng AI",
+        note + '<label>Phụ đề<select name="subtitles"><option value="yes">' +
+          (narrated ? "Gắn phụ đề và xuất SRT" : "Xuất tệp SRT riêng") +
+          '</option><option value="no">Không phụ đề</option></select></label>',
+        (data) => stage(v, op, [], {
+          include_subtitles: data.get("subtitles") === "yes",
+          allow_stills: useStills,
+        }),
+        "Xuất phim",
       );
     } else await stage(v, op, s ? [i] : []);
   } finally {

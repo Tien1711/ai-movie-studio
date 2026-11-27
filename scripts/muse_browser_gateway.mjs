@@ -341,7 +341,7 @@ export function createGateway(driver, key, { profiles = new ChromeProfiles(), op
           const data = await jsonBody(request);
           if (busy) throw new RequestError(429, 'Muse Browser đang xử lý yêu cầu khác.');
           const seconds = Number.isFinite(data.timeout) ? Math.max(1, Math.min(120, data.timeout)) : 35;
-          const content = await schedule(() => generate(currentDriver(), chatPrompt(data.messages), [], null, profiles.mediaFiles, { chatTimeoutMs: seconds * 1000, chatMode: profiles.chatMode }));
+          const content = await schedule(() => generate(currentDriver(), chatPrompt(data.messages), imageAttachment(data.reference_image), null, profiles.mediaFiles, { chatTimeoutMs: seconds * 1000, chatMode: profiles.chatMode }));
           return send(response, 200, { choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
         }
       }

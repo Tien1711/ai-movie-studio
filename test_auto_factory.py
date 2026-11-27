@@ -122,7 +122,7 @@ def _completed_video(tmp_path, monkeypatch):
 
 
 # ── 1. Parse RSS trending / news ───────────────────────────────────────────
-def test_fetch_trending_parses_10_dedupes_and_cleans():
+def test_fetch_trending_parses_all_unique_titles():
     items = [f"Chủ đề hot {i}" for i in range(12)]
     items.append("Chủ đề hot 0")  # trùng -> phải khử trùng
     items.append("<b>Tiêu đề có tag</b> &amp; ký tự")  # HTML + entity -> làm sạch
@@ -133,7 +133,7 @@ def test_fetch_trending_parses_10_dedupes_and_cleans():
     )
     assert result["source"] == "trending"
     assert result["fallback"] is False
-    assert len(result["topics"]) == 10  # tối đa 10
+    assert len(result["topics"]) == 13
     assert result["topics"][0] == "Chủ đề hot 0"
     assert len(set(result["topics"])) == len(result["topics"])
     assert not any("<" in t or "&amp;" in t for t in result["topics"])
@@ -158,7 +158,7 @@ def test_fetch_all_feeds_fail_returns_pool_with_fallback_flag():
     result = fetch_topics("trending", http_get=http_get, use_cache=False)
     assert result["fallback"] is True
     assert len(result["topics"]) > 0
-    assert len(result["topics"]) <= 10
+    assert len(result["topics"]) <= 100
 
 
 def test_fetch_cache_hit_skips_network():
@@ -170,7 +170,7 @@ def test_fetch_cache_hit_skips_network():
 
     first = fetch_topics("trending", http_get=http_get_ok, use_cache=True)
     assert first["cached"] is False
-    assert calls["n"] == 1
+    assert calls["n"] == 2
 
     def http_get_boom(url):
         raise RuntimeError("không được gọi mạng nữa")
@@ -178,7 +178,7 @@ def test_fetch_cache_hit_skips_network():
     second = fetch_topics("trending", http_get=http_get_boom, use_cache=True)
     assert second["cached"] is True
     assert second["topics"] == ["Chủ đề A", "Chủ đề B"]
-    assert calls["n"] == 1
+    assert calls["n"] == 2
 
 
 def test_fetch_bad_source_raises():
@@ -315,6 +315,13 @@ def test_order_manual_uses_given_topics(_mock_order_backend):
         "Chuyện ma Đà Lạt",
         "Bài học người cha",
     ]
+
+
+def test_order_news_uses_selected_titles_in_order(_mock_order_backend):
+    titles = ["Tin B", "Tin A"]
+    response = client.post("/api/factory/order", json=_order_payload(source="news", topics=titles, count=2))
+    assert response.status_code == 200, response.text
+    assert _mock_order_backend.calls[0]["prompts"] == titles
 
 
 def test_topics_endpoint_bad_source_422():

@@ -825,18 +825,28 @@
 .factory-hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
 .factory-hint b { color: var(--text); }
 .factory-range { width: 100%; accent-color: #f97316; cursor: pointer; }
+#factoryTopicPicker > summary { cursor: pointer; }
 .factory-topics-list {
-  list-style: none; margin: 0; padding: 0;
+  list-style: none; margin: 8px 0; padding: 0 4px 0 0;
   display: flex; flex-direction: column; gap: 5px;
-  max-height: 190px; overflow-y: auto;
+  max-height: min(300px, 45vh); overflow-y: auto;
 }
 .factory-topics-list li {
-  font-size: 12.5px; color: var(--text); background: var(--bg2);
-  border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 0 0 auto;
+  font-size: 12.5px; line-height: 1.45; color: var(--text); background: var(--bg2);
+  border: 1px solid var(--border); border-radius: 8px;
 }
-.factory-topics-list li.factory-topics-loading,
-.factory-topics-list li.factory-topics-empty { color: var(--muted); }
+.factory-topics-list label {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px;
+  align-items: start; padding: 8px 11px; cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.factory-topics-list input[type="checkbox"] {
+  width: 15px; height: 15px; margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+.factory-topics-list li:focus-within,
+.factory-topics-list li:has(input:checked) { border-color: var(--accent); }
 .factory-fallback-note { margin: 6px 0 0; font-size: 12px; color: var(--warn-ink, #f59e0b); }
 .factory-order-btn { width: 100%; margin-top: 6px; }
 .factory-estimate { margin: 8px 0 0; font-size: 12px; color: var(--muted); text-align: center; }
@@ -1841,9 +1851,14 @@
                 <label class="batch-block-label">Chủ đề sẽ sản xuất</label>
                 <button type="button" class="btn btn-ghost btn-xs" onclick="loadFactoryTopics(true)">🔄 Làm mới</button>
               </div>
-              <ul class="factory-topics-list" id="factoryTopicsList">
-                <li class="factory-topics-loading">Đang lấy chủ đề…</li>
-              </ul>
+              <details id="factoryTopicPicker">
+                <summary id="factoryTopicSummary">Mở danh sách chủ đề</summary>
+                <label class="studio-field">Tìm chủ đề
+                  <input type="search" id="factoryTopicSearch" placeholder="Nhập từ khóa" oninput="renderFactoryTopics()">
+                </label>
+                <ul class="factory-topics-list" id="factoryTopicsList"></ul>
+                <button type="button" class="btn btn-ghost btn-xs" onclick="clearFactoryTopics()">Bỏ chọn tất cả</button>
+              </details>
               <p class="factory-fallback-note" id="factoryFallbackNote" style="display:none;">⚠️ Nguồn RSS lỗi — đang dùng chủ đề dự phòng có sẵn.</p>
             </div>
 
@@ -3403,9 +3418,9 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js?v=20261126_fix404" defer></script>
+<script src="static/js/app.js?v=20261127_comic_import" defer></script>
 <script src="static/js/muse-studio.js?v=20261126_perf" defer></script>
-<script src="static/js/studio-editor.js?v=20261126_perf" defer></script>
+<script src="static/js/studio-editor.js?v=20261127_comic_import" defer></script>
 <script src="static/js/ui.js?v=20261126_perf" defer></script>
 
 <!-- Floating Multi-Shot Batch Action Bar -->

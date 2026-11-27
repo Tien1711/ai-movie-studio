@@ -89,7 +89,15 @@ def test_studio_reports_browser_readiness(monkeypatch, ready):
     assert result["muse2api"] is ready
     assert result["accounts"] == int(ready)
 
-def test_settings_persists_pending_provider_without_changing_running_studio(tmp_path, monkeypatch):
+def test_settings_applies_provider_without_restart(tmp_path, monkeypatch):
+    import batch_video_engine
+
+    queue_file = tmp_path / "batch_queue.json"
+    queue_file.write_text('{"videos":[],"updated_at":0}', encoding="utf-8")
+    monkeypatch.setattr(batch_video_engine, "QUEUE_FILE", queue_file)
+    monkeypatch.setattr(studio, "RENDER_QUEUE", [])
+    monkeypatch.setattr(studio, "JOBS", {})
+    monkeypatch.setattr(studio, "ACTIVE_SHOT_TASKS", {})
     monkeypatch.setattr(muse_config, "MUSE_SETTINGS_FILE", tmp_path / "settings" / "muse.json")
     monkeypatch.setattr(studio, "MUSE_PROVIDER", "muse2api")
     monkeypatch.delenv("STUDIO_API_KEY", raising=False)
@@ -107,11 +115,11 @@ def test_settings_persists_pending_provider_without_changing_running_studio(tmp_
     assert response.status_code == 200
     assert response.json() == {
         "provider": "browser",
-        "active_provider": "muse2api",
-        "restart_required": True,
+        "active_provider": "browser",
+        "restart_required": False,
     }
     assert client.get("/api/settings/muse").json() == response.json()
-    assert muse_config.active_muse_provider.__wrapped__() == "browser"
+    assert muse_config.active_muse_provider() == "browser"
 
     invalid = client.put("/api/settings/muse", json={"provider": "remote"})
     assert invalid.status_code == 422

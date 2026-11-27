@@ -575,6 +575,31 @@ def _safe_story_url_get(url: str) -> _StreamedStoryResp:
     raise ValueError("Link chuyển hướng quá nhiều lần (tối đa 5 lần)")
 
 
+def comic_pages(url, html):
+    from html.parser import HTMLParser
+
+    pages = {}
+
+    class ChapterImages(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag != "img":
+                return
+            attrs = dict(attrs)
+            match = re.search(r"(?:trang|page)\s+(\d+)\s*$", attrs.get("alt") or "", re.I)
+            source = attrs.get("data-src") or attrs.get("src")
+            if match and source:
+                image_url = urllib.parse.urljoin(url, source)
+                if urllib.parse.urlsplit(image_url).scheme in ("http", "https"):
+                    pages.setdefault(int(match[1]), image_url)
+
+    ChapterImages().feed(html)
+    if len(pages) < 2:
+        return []
+    if len(pages) > 80 or sorted(pages) != list(range(1, len(pages) + 1)):
+        raise ValueError("Chương truyện tranh thiếu trang hoặc vượt 80 trang.")
+    return [pages[index] for index in sorted(pages)]
+
+
 def extract_text_from_url(url: str, http_get: Optional[Callable] = None) -> str:
     """Fetch 1 URL rồi trích văn bản chính (bỏ script/style/nav/quảng cáo).
 

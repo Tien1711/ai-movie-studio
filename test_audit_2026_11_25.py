@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 test_audit_2026_11_25.py — Bộ kiểm thử chống tái phát cho toàn bộ 27 điểm audit (2026-11-25).
-Bao phủ: C1-C4, H1-H9, M1-M7, L1-L3 (và kiểm tra cú pháp/symtable toàn dự án).
+Bao phủ: C1-C4, H1-H9, M1-M7, L1-L3 (và kiểm tra cú pháp toàn dự án).
 """
 import asyncio
 import io
 import json
 import shutil
-import symtable
+import threading
 import zipfile
 from pathlib import Path
 
@@ -36,9 +36,9 @@ def test_c1_convert_to_shot_desk_uses_canonical_shot_files_and_urls(tmp_path, mo
     (tmp_path / "_batch_videos").mkdir(parents=True, exist_ok=True)
     (tmp_path / "_shot_desk_projects").mkdir(parents=True, exist_ok=True)
 
+    monkeypatch.setattr(batch_video_engine, "QUEUE_FILE", tmp_path / "_batch_videos" / "batch_queue.json")
+    monkeypatch.setattr(batch_video_engine, "QUEUE_BAK_FILE", tmp_path / "_batch_videos" / "batch_queue.json.bak")
     mgr = batch_video_engine.BatchVideoManager()
-    mgr.queue_file = tmp_path / "_batch_videos" / "batch_queue.json"
-    mgr.queue_bak_file = tmp_path / "_batch_videos" / "batch_queue.json.bak"
 
     vid_id = "bv_testshot01"
     v_dir = tmp_path / "_batch_videos" / vid_id
@@ -192,13 +192,51 @@ def test_h3_workspace_clean_protects_batch_and_story_dirs(tmp_path, monkeypatch)
         assert not (ws / "temp_job_123").exists()
 
 
-def test_h4_worker_loop_declares_global_worker_thread():
-    """H4: _worker_loop phải khai báo global _worker_thread (không phải biến local)."""
-    src = (ROOT / "batch_video_engine.py").read_text(encoding="utf-8")
-    top = symtable.symtable(src, "batch_video_engine.py", "exec")
-    fn_sym = next(c for c in top.get_children() if c.get_name() == "_worker_loop")
-    sym = fn_sym.lookup("_worker_thread")
-    assert sym.is_declared_global(), "_worker_thread trong _worker_loop bắt buộc là global!"
+def test_h4_production_runs_while_export_is_in_progress(monkeypatch):
+    batch = batch_video_engine
+    jobs = [{"id": "film", "status": "queued", "guided": True, "operation": {"action": "compose"}}]
+    threads = {}
+    export_started = threading.Event()
+    allow_export_to_finish = threading.Event()
+    production_finished = threading.Event()
+
+    def process(video_id):
+        with batch._QUEUE_LOCK:
+            job = next(job for job in jobs if job["id"] == video_id)
+            job["status"] = "running"
+        if video_id == "film":
+            export_started.set()
+            allow_export_to_finish.wait(timeout=10)
+        with batch._QUEUE_LOCK:
+            job["status"] = "completed"
+        if video_id == "comic":
+            production_finished.set()
+
+    def read_queue():
+        with batch._QUEUE_LOCK:
+            return [job.copy() for job in jobs]
+
+    monkeypatch.setattr(batch, "_worker_threads", threads)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "_read_queue", read_queue)
+    monkeypatch.setattr(batch, "_process_single_video", process)
+    workers = set()
+    try:
+        batch.start_batch_worker()
+        with batch._worker_lock:
+            workers.update(threads.values())
+        assert export_started.wait(timeout=5)
+        with batch._QUEUE_LOCK:
+            jobs.append({"id": "comic", "status": "queued", "guided": True, "operation": {"action": "comic"}})
+        batch.start_batch_worker()
+        with batch._worker_lock:
+            workers.update(threads.values())
+        assert production_finished.wait(timeout=5)
+        assert jobs[0]["status"] == "running"
+    finally:
+        allow_export_to_finish.set()
+        for worker in workers:
+            worker.join(timeout=5)
+    assert not threads
 
 
 def test_h5_special_voices_rejected_for_batch_factory_story():

@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -735,11 +736,13 @@ def is_safe_video_id(vid: str) -> bool:
 class BatchVideoManager:
     """Quản trị danh sách hàng đợi các video hàng loạt trên đĩa (có RAM cache theo mtime_ns)."""
 
-    def __init__(self):
+    def __init__(self, recover_on_init: bool = True):
         self._cache_sig: Optional[Tuple[str, int, int]] = None
         self._cache_videos: List[Dict[str, Any]] = []
         self._ensure_storage()
-        self.recovered_on_init = self._recover_interrupted_jobs()
+        self.recovered_on_init = (
+            self._recover_interrupted_jobs() if recover_on_init else 0
+        )
 
     def _ensure_storage(self):
         with _QUEUE_LOCK:
@@ -1347,8 +1350,7 @@ class BatchVideoManager:
 
 # ── 5. Worker Xử Lý Video Chạy Nền Tự Động ───────────────────────────────────
 
-_worker_wake_event = threading.Event()
-_worker_thread: Optional[threading.Thread] = None
+_worker_threads: dict[str, threading.Thread] = {}
 _worker_lock = threading.Lock()
 
 
@@ -1610,6 +1612,14 @@ def _cast_reference(characters):
     return "data:image/jpeg;base64," + base64.b64encode(data.getvalue()).decode("ascii"), instruction
 
 
+STORY_AMBIENCE_DIRECTION = (
+    "Generate audible location ambience and natural Foley synchronized to the visible action, "
+    "such as footsteps, cloth, tools, wind and indistinct crowd murmur when appropriate. "
+    "Background voices are unintelligible. No spoken words, narration, singing or music. "
+    "On-screen characters do not speak or mouth sentences."
+)
+
+
 async def _render_story_clip(video, scene, index, directory, destination, cancel, progress):
     import httpx
     import batch_engine
@@ -1632,11 +1642,12 @@ async def _render_story_clip(video, scene, index, directory, destination, cancel
             identity_guide = "Match the closing frame of the preceding shot: screen direction, lighting and positions."
     style = BATCH_VISUAL_STYLES.get(video.get("visual_style"), {}).get("prompt_suffix") or ""
 
+    sound_direction = "" if scene.get("dialogue") else STORY_AMBIENCE_DIRECTION
     shot = {
         **scene, "size": video["aspect_ratio"], "reference_image": reference,
         "keep_reference": bool(reference), "require_narration": True, "offscreen_narration": not scene.get("dialogue"),
         "duration": scene["duration"] if scene.get("raw_studio") or scene.get("approved_frame") else min((5, 6, 8, 10), key=lambda d: abs(d - scene.get("duration", 6))),
-        "prompt": (f"{scene['prompt']}\nStage the following narrated beat in motion: {scene['voiceover']}\n"
+        "prompt": (f"{scene['prompt']}\n{sound_direction}\n"
                    "One continuous moving shot. Show the action unfolding from its start to its consequence. "
                    "Preserve recurring faces, wardrobe, prop proportions and screen direction. "
                    "Use the reference for visual continuity. Only show characters present in this beat. "
@@ -2004,46 +2015,49 @@ def _process_single_video(video_id: str):
             shutil.rmtree(BATCH_DIR / video_id, ignore_errors=True)
 
 
-def _worker_loop():
-    """Vòng lặp lấy các video 'queued' và xử lý lần lượt, có cơ chế chờ và chống race condition."""
-    global _worker_thread
-    idle_rounds = 0
-    while True:
-        target_id = None
-        with _QUEUE_LOCK:
-            videos = BATCH_MANAGER._read_queue()
-            for v in videos:
-                if v.get("status") == "queued":
-                    target_id = v.get("id")
-                    break
+def _batch_worker_kind(video: Dict[str, Any]) -> str:
+    action = (video.get("operation") or {}).get("action")
+    if video.get("guided") and action in ("compose", "narrated"):
+        return "export"
+    return "production"
 
-        if target_id:
-            idle_rounds = 0
-            _process_single_video(target_id)
-            time.sleep(0.5)
-        else:
-            idle_rounds += 1
-            if idle_rounds >= 2:
-                # Kiểm tra lần cuối trong _worker_lock trước khi kết thúc luồng (Point 5: loại bỏ hoàn toàn race condition)
-                with _worker_lock:
-                    with _QUEUE_LOCK:
-                        has_queued = any(v.get("status") == "queued" for v in BATCH_MANAGER._read_queue())
-                    if not has_queued:
-                        _worker_thread = None
-                        return
-            _worker_wake_event.wait(timeout=2.0)
-            _worker_wake_event.clear()
+
+def _worker_loop(kind: str):
+    """Run one job at a time within this worker's group."""
+    while True:
+        # Start and retire a worker under the same lock so a new job cannot
+        # be left queued between the last scan and the thread's shutdown.
+        with _worker_lock:
+            target_id = next(
+                (video["id"] for video in BATCH_MANAGER._read_queue()
+                 if video.get("status") == "queued" and _batch_worker_kind(video) == kind),
+                None,
+            )
+            if target_id is None:
+                _worker_threads.pop(kind, None)
+                return
+        _process_single_video(target_id)
+        time.sleep(0.5)
 
 
 def start_batch_worker():
-    """Khởi động luồng worker nền nếu chưa chạy hoặc đánh thức worker đang chờ."""
-    global _worker_thread
+    """Start workers for queued production and export jobs independently."""
     with _worker_lock:
-        _worker_wake_event.set()
-        if _worker_thread is None or not _worker_thread.is_alive():
-            _worker_thread = threading.Thread(target=_worker_loop, daemon=True, name="BatchVideoWorker")
-            _worker_thread.start()
-            logger.info("🚀 Đã khởi động BatchVideoWorker daemon thread.")
+        kinds = {
+            _batch_worker_kind(video)
+            for video in BATCH_MANAGER._read_queue()
+            if video.get("status") == "queued"
+        }
+        for kind in sorted(kinds):
+            worker = _worker_threads.get(kind)
+            if worker and worker.is_alive():
+                continue
+            worker = threading.Thread(
+                target=_worker_loop, args=(kind,), daemon=True, name=f"BatchVideo-{kind}"
+            )
+            _worker_threads[kind] = worker
+            worker.start()
+            logger.info("Đã khởi động worker Batch Video (%s).", kind)
 
 
 def start_pending_batch_worker():
@@ -2052,9 +2066,11 @@ def start_pending_batch_worker():
         start_batch_worker()
 
 
-BATCH_MANAGER = BatchVideoManager()
-try:
-    start_pending_batch_worker()
-except Exception as _e_rec:
-    logger.warning("Không thể tự động khởi động worker sau recovery: %s", _e_rec)
+_UNDER_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
+BATCH_MANAGER = BatchVideoManager(recover_on_init=not _UNDER_PYTEST)
+if not _UNDER_PYTEST:
+    try:
+        start_pending_batch_worker()
+    except Exception as _e_rec:
+        logger.warning("Không thể tự động khởi động worker sau recovery: %s", _e_rec)
 

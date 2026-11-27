@@ -454,7 +454,7 @@ def test_cache_path_sanitizes_traversal():  # [RED-OLD]
     p = auto_factory._cache_path("../evil")
     assert p.resolve().is_relative_to(auto_factory.FACTORY_CACHE_DIR.resolve())
     assert ".." not in p.name
-    assert auto_factory._cache_path("trending").name == "trending.json"
+    assert auto_factory._cache_path("trending").name == "trending_catalog.json"
 
 
 # ── #6 — giong VieNeu la lang le doi sang Edge ─────────────────────────────

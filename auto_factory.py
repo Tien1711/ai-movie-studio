@@ -22,6 +22,7 @@ import subprocess
 import time
 import zipfile
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,7 +52,7 @@ NEWS_RSS_URLS = [
 
 FACTORY_CACHE_DIR = Path(__file__).resolve().parent / "workspace" / "_factory_cache"
 FACTORY_CACHE_TTL_S = 30 * 60  # cache chủ đề 30 phút
-FACTORY_TOPICS_LIMIT = 10
+FACTORY_TOPICS_LIMIT = 100
 FACTORY_RSS_TIMEOUT_S = 15
 
 # 11 phong cách hình ảnh của Xưởng (thứ tự hiển thị ở UI). Hậu tố prompt
@@ -115,9 +116,9 @@ def _parse_rss_titles(xml_text: str, limit: int = FACTORY_TOPICS_LIMIT) -> List[
     seen = set()
     for item in root.iter("item"):
         title_el = item.find("title")
-        if title_el is None or not title_el.text:
+        if title_el is None:
             continue
-        title = _clean_topic_title(title_el.text)
+        title = _clean_topic_title("".join(title_el.itertext()))
         if title and title not in seen:
             seen.add(title)
             titles.append(title)
@@ -146,7 +147,7 @@ def _cache_path(source: str) -> Path:
     if not safe:
         safe = "default"
     FACTORY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return FACTORY_CACHE_DIR / f"{safe}.json"
+    return FACTORY_CACHE_DIR / f"{safe}_catalog.json"
 
 
 def _read_cache(source: str) -> Optional[List[str]]:
@@ -212,20 +213,25 @@ def fetch_topics(
 
     get = http_get or _default_http_get
     urls = TRENDING_RSS_URLS if source == "trending" else NEWS_RSS_URLS
-    for url in urls:
+    def read_feed(url):
         try:
             res = get(url)
-            status = getattr(res, "status_code", 0)
-            if status != 200:
-                logger.warning("RSS %s trả status %s", url, status)
-                continue
-            titles = _parse_rss_titles(getattr(res, "text", "") or "")
-            if titles:
-                _write_cache(source, titles)
-                return {"source": source, "topics": titles, "fallback": False, "cached": False}
-            logger.warning("RSS %s không có tiêu đề nào", url)
-        except Exception as e:
-            logger.warning("Không lấy được RSS %s: %s", url, e)
+            if res.status_code == 200:
+                return _parse_rss_titles(res.text)
+            logger.warning("RSS %s trả status %s", url, res.status_code)
+        except Exception as error:
+            logger.warning("Không lấy được RSS %s: %s", url, error)
+        return []
+
+    with ThreadPoolExecutor(max_workers=len(urls)) as pool:
+        topics_by_title = {}
+        for titles in pool.map(read_feed, urls):
+            for title in titles:
+                topics_by_title.setdefault(title.casefold(), title)
+    if topics_by_title:
+        topics = list(topics_by_title.values())[:FACTORY_TOPICS_LIMIT]
+        _write_cache(source, topics)
+        return {"source": source, "topics": topics, "fallback": False, "cached": False}
 
     topics = _fallback_topics()
     return {"source": source, "topics": topics, "fallback": True, "cached": False}

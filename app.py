@@ -5897,10 +5897,10 @@ class FactoryOrderRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_manual_topics(self):
-        if self.source == "manual":
-            topics = [t.strip() for t in (self.topics or []) if t and t.strip()]
+        if self.source == "manual" or self.topics is not None:
+            topics = list(dict.fromkeys(t.strip() for t in (self.topics or []) if t.strip()))
             if not topics:
-                raise ValueError("Chế độ 'manual' bắt buộc nhập ít nhất 1 chủ đề (topics)")
+                raise ValueError("Chọn hoặc nhập ít nhất 1 chủ đề.")
             self.topics = topics
         return self
 
@@ -5917,7 +5917,8 @@ async def get_factory_topics(source: str = "trending", refresh: bool = False):
     refresh=true: bỏ qua cache, lấy mới từ RSS."""
     if source not in ("trending", "news"):
         return JSONResponse({"error": "Nguồn nội dung chỉ nhận 'trending' hoặc 'news'"}, status_code=422)
-    return await asyncio.to_thread(auto_factory.fetch_topics, source, None, not refresh)
+    result = await asyncio.to_thread(auto_factory.fetch_topics, source, None, not refresh)
+    return {**result, "supports_topic_selection": True}
 
 
 @app.post("/api/factory/order")
@@ -5925,8 +5926,8 @@ async def create_factory_order(req: FactoryOrderRequest):
     """Đặt hàng 1 cú bấm: lấy chủ đề tự động rồi tạo N video qua hàng đợi
     batch (worker có sẵn tự chạy, không tạo worker mới)."""
     fallback = False
-    if req.source == "manual":
-        topics = [t.strip() for t in (req.topics or []) if t and t.strip()]
+    if req.topics is not None:
+        topics = req.topics
     else:
         fetched = await asyncio.to_thread(auto_factory.fetch_topics, req.source)
         topics = fetched["topics"][: req.count]
@@ -6197,7 +6198,29 @@ async def fetch_story_web(title: str = "", source: str = "wikipedia"):
 async def import_story_url(req: StoryImportUrlRequest):
     """Nhập truyện từ 1 link: fetch rồi trích văn bản chính, tạo project."""
     try:
-        text = await asyncio.to_thread(story_engine.extract_text_from_url, req.url)
+        page = await asyncio.to_thread(story_engine._safe_story_url_get, req.url.strip())
+        if page.status_code != 200:
+            raise ValueError(f"Link trả về HTTP {page.status_code}.")
+        pages = story_engine.comic_pages(req.url, page.text)
+        if pages:
+            if MUSE_PROVIDER != "browser" or not MUSE_API_KEY:
+                raise ValueError("Chọn Muse Browser trước khi tự động dựng truyện tranh từ ảnh.")
+            title = req.title.strip() or "Chương truyện tranh"
+            scenes = [
+                {"index": index, "page_url": url, "prompt": "", "voiceover": "", "duration": 8}
+                for index, url in enumerate(pages, 1)
+            ]
+            items = await asyncio.to_thread(
+                BATCH_MANAGER.add_batch, [title], scenes_count=len(scenes), visual_style=req.style,
+                aspect_ratio="9:16", scripts=[{"scenes": scenes}], auto_run=True,
+                extra={
+                    "guided": True, "studio_source": "muse_studio", "render_mode": "ai_video",
+                    "reference_mode": "approved", "comic": True,
+                    "operation": {"action": "comic", "allow_stills": False, "include_subtitles": True},
+                },
+            )
+            return {"message": f"Đã xếp hàng dựng phim từ {len(scenes)} trang truyện.", "video_id": items[0]["id"]}
+        text = await asyncio.to_thread(story_engine.extract_text_from_url, req.url, lambda _: page)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     title = req.title.strip()
@@ -6371,6 +6394,7 @@ def _selected_cast(ids):
 
 
 class StudioBeat(BaseModel):
+    setting: str = Field(default="", max_length=500)
     prompt: str = Field(min_length=1, max_length=3000)
     voiceover: str = Field(min_length=1, max_length=3000)
     duration: Literal[5, 6, 8, 10, 12] = 6

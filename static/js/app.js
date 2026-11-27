@@ -381,7 +381,7 @@ function onMuseProviderChange() {
   const status = document.getElementById('museSettingsMessage');
   if (!museSettings) return;
   if (provider !== museSettings.provider) {
-    status.textContent = 'Chế độ mới sẽ áp dụng sau khi lưu và khởi động lại Studio.';
+    status.textContent = 'Chế độ mới sẽ áp dụng ngay sau khi lưu.';
   } else if (museSettings.restart_required) {
     status.textContent = `Đã lưu ${MUSE_PROVIDER_LABELS[provider]}. Khởi động lại Studio để áp dụng.`;
   } else {
@@ -422,7 +422,8 @@ async function saveMuseSettings() {
     const data = await response.json();
     if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Không lưu được chế độ Muse.');
     displayMuseSettings(data);
-    window.showToast('Đã lưu chế độ Muse.', 'success');
+    window.showToast('Đã chuyển sang ' + MUSE_PROVIDER_LABELS[data.active_provider] + '.', 'success');
+    void checkApiHealth();
   } catch (error) {
     button.disabled = false;
     document.getElementById('museSettingsMessage').textContent = error.message || 'Không lưu được chế độ Muse.';
@@ -502,18 +503,8 @@ async function checkApiHealth() {
         hint.textContent = `Tối đa ${data.accounts} luồng song song (đặt ở ô Concurrent)`;
       }
 
-      // Tự động cập nhật input Render song song và cấu hình nếu chưa chỉnh thủ công.
-      // Backend chỉ nhận max_concurrent ≤ 12 (audit #6): không bao giờ tự
-      // đẩy concurrent vượt 12 dù có nhiều tài khoản Muse.
       const maxConcInput = document.getElementById('maxConcurrent');
-      const safeConc = Math.max(1, Math.min(12, data.accounts || 6));
-      if (maxConcInput) {
-        maxConcInput.max = isBrowser ? 1 : 12;
-        if (isBrowser || !maxConcInput.value || parseInt(maxConcInput.value) < safeConc) {
-          maxConcInput.value = safeConc;
-          updateConcurrent(safeConc);
-        }
-      }
+      if (maxConcInput) maxConcInput.disabled = isBrowser;
 
       // Cập nhật select Shot Desk
       const sdSelect = document.getElementById('sdConcurrentSelect');
@@ -10194,7 +10185,13 @@ function initFactoryPanel() {
 }
 
 function setFactorySource(src) {
-  window.factoryState.source = src;
+  const state = window.factoryState;
+  if (state.source !== src) {
+    state.topics = [];
+    state.selectedTopics = new Set();
+    document.getElementById('factoryTopicSearch').value = '';
+  }
+  state.source = src;
   ['trending', 'news', 'manual'].forEach(s => {
     const btn = document.getElementById('btnFactorySrc' + s.charAt(0).toUpperCase() + s.slice(1));
     if (btn) btn.classList.toggle('active', s === src);
@@ -10223,7 +10220,10 @@ function formatFactoryDuration(totalSeconds) {
 }
 
 function updateFactoryEstimate() {
-  const count = parseInt(document.getElementById('factoryCountRange')?.value || '3', 10);
+  const preset = parseInt(document.getElementById('factoryCountRange')?.value || '3', 10);
+  const selected = window.factoryState.source === 'manual' ? 0 : window.factoryState.selectedTopics?.size;
+  const count = selected || preset;
+  document.getElementById('factoryCountRange').disabled = Boolean(selected);
   const scenes = parseInt(document.getElementById('factoryScenesRange')?.value || '5', 10);
   window.factoryState.count = count;
   window.factoryState.scenesCount = scenes;
@@ -10237,27 +10237,69 @@ function updateFactoryEstimate() {
   }
 }
 
+function renderFactoryTopics() {
+  const state = window.factoryState;
+  const selected = state.selectedTopics ||= new Set();
+  const topics = state.topics || [];
+  const query = document.getElementById('factoryTopicSearch').value.trim().toLocaleLowerCase('vi');
+  const list = document.getElementById('factoryTopicsList');
+  document.getElementById('factoryTopicSummary').textContent =
+    `Chọn chủ đề · ${topics.length} kết quả · ${selected.size} đã chọn`;
+  const rows = topics.filter(title => title.toLocaleLowerCase('vi').includes(query));
+  list.replaceChildren(...rows.map(title => {
+    const item = document.createElement('li');
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selected.has(title);
+    checkbox.onchange = () => {
+      if (checkbox.checked && selected.size >= 10) {
+        checkbox.checked = false;
+        showToast('Chọn tối đa 10 chủ đề mỗi đơn.', 'warning');
+        return;
+      }
+      if (checkbox.checked) selected.add(title);
+      else selected.delete(title);
+      document.getElementById('factoryTopicSummary').textContent =
+        `Chọn chủ đề · ${topics.length} kết quả · ${selected.size} đã chọn`;
+      updateFactoryEstimate();
+    };
+    label.append(checkbox, ' ' + title);
+    item.append(label);
+    return item;
+  }));
+  if (!rows.length) list.textContent = query ? 'Không tìm thấy chủ đề phù hợp.' : 'Chưa có chủ đề nào.';
+}
+
+function clearFactoryTopics() {
+  window.factoryState.selectedTopics?.clear();
+  renderFactoryTopics();
+  updateFactoryEstimate();
+}
+
 async function loadFactoryTopics(forceRefresh = false) {
-  const listEl = document.getElementById('factoryTopicsList');
-  const noteEl = document.getElementById('factoryFallbackNote');
-  if (!listEl) return;
-  const src = window.factoryState.source;
-  if (src === 'manual') return;
-  listEl.innerHTML = '<li class="factory-topics-loading">Đang lấy chủ đề…</li>';
+  const state = window.factoryState;
+  const source = state.source;
+  if (source === 'manual') return;
+  const request = state.topicRequest = (state.topicRequest || 0) + 1;
+  const current = () => state.topicRequest === request && state.source === source;
+  const list = document.getElementById('factoryTopicsList');
+  const note = document.getElementById('factoryFallbackNote');
+  list.textContent = 'Đang lấy chủ đề…';
   try {
-    const res = await apiFetch(`/api/factory/topics?source=${encodeURIComponent(src)}${forceRefresh ? '&refresh=true' : ''}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Không lấy được chủ đề');
-    window.factoryState.topics = data.topics || [];
-    window.factoryState.fallback = !!data.fallback;
-    const shown = window.factoryState.topics.slice(0, window.factoryState.count || 3);
-    listEl.innerHTML = shown.length
-      ? shown.map(t => `<li title="${escapeHtml(t)}">${escapeHtml(t)}</li>`).join('')
-      : '<li class="factory-topics-empty">Chưa có chủ đề nào.</li>';
-    if (noteEl) noteEl.style.display = data.fallback ? 'block' : 'none';
-  } catch (e) {
-    listEl.innerHTML = '<li class="factory-topics-empty">Không lấy được chủ đề — thử lại sau.</li>';
-    if (noteEl) noteEl.style.display = 'none';
+    const response = await apiFetch(`/api/factory/topics?source=${encodeURIComponent(source)}${forceRefresh ? '&refresh=true' : ''}`);
+    const data = await response.json();
+    if (!current()) return;
+    if (!response.ok) throw new Error(data.error || 'Không lấy được chủ đề');
+    const selected = state.selectedTopics ||= new Set();
+    state.topics = [...new Set([...selected, ...(data.topics || [])])];
+    state.supportsTopicSelection = data.supports_topic_selection === true;
+    note.style.display = data.fallback ? 'block' : 'none';
+    renderFactoryTopics();
+  } catch (error) {
+    if (!current()) return;
+    list.textContent = 'Không lấy được chủ đề. Bấm Làm mới để thử lại.';
+    note.style.display = 'none';
   }
 }
 
@@ -10288,6 +10330,14 @@ async function submitFactoryOrder() {
     }
     payload.topics = topics;
     payload.count = topics.length;
+  }
+  if (state.source !== 'manual' && state.selectedTopics?.size) {
+    if (!state.supportsTopicSelection) {
+      showToast('Server cần nạp bản cập nhật để đặt hàng theo chủ đề đã chọn.', 'warning');
+      return;
+    }
+    payload.topics = [...state.selectedTopics];
+    payload.count = payload.topics.length;
   }
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang đặt hàng…'; }
   try {
@@ -10710,6 +10760,13 @@ async function importStoryUrl() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Nhập từ link lỗi');
     storySetMsg('storyUrlMsg', `✅ ${data.message}`, true);
+    if (data.video_id) {
+      switchEditorView('films');
+      studioState.selected = data.video_id;
+      studioState.filter = 'all';
+      showPanel('muse-studio');
+      return;
+    }
     await openStoryProject(data.project.id);
   } catch (e) {
     storySetMsg('storyUrlMsg', `❌ ${e.message}`);

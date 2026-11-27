@@ -849,6 +849,7 @@ def compose_scene_video(
     target_duration: Optional[float] = None,
     quality: str = "720p",
     aspect_ratio: str = "9:16",
+    ambience_volume: float = 0.0,
 ):
     """
     Ghép 1 cảnh: Kéo dài hoặc loop video để khớp đúng với thời lượng audio TTS hoặc target_duration.
@@ -945,6 +946,16 @@ def compose_scene_video(
         seek_args = []
 
     if has_audio:
+        speech_filter = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad"
+        audio_mapping = ["-map", "1:a:0", "-af", speech_filter]
+        if ambience_volume > 0 and check_video_has_audio(input_video):
+            mix = (
+                f"[1:a]{speech_filter}[speech];"
+                "[0:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"volume={ambience_volume}[ambience];"
+                "[speech][ambience]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=false[audio]"
+            )
+            audio_mapping = ["-filter_complex", mix, "-map", "[audio]"]
         # Có file lồng tiếng riêng (TTS voiceover / dialogue): ghép đè scene_audio vào video
         cmd = [
             FFMPEG, "-y",
@@ -952,8 +963,7 @@ def compose_scene_video(
             "-stream_loop", "-1", "-i", input_video,   # Loop video nếu audio dài hơn
             "-i", scene_audio,
             "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
+            *audio_mapping,
             "-vf", vf_str,
             "-c:v", "libx264", "-preset", preset, "-crf", crf,
             "-pix_fmt", "yuv420p",
@@ -1253,6 +1263,7 @@ def merge_clips_advanced(
             # Audit #11: uoc luong 5.0 tai cho cho clip do khong duoc.
             d1 = get_media_duration(current_merged) or 5.0
             d2 = get_media_duration(next_clip) or 5.0
+            encode_timeout = max(120, int((d1 + d2) * 2))
             t_dur = min(sound_bridge_duration, min(d1, d2) * 0.4)
 
             if progress_cb:
@@ -1317,7 +1328,7 @@ def merge_clips_advanced(
                         "-c:a", "aac", "-b:a", "192k",
                         step_out
                     ]
-                    _run(cmd, f"Ghép nối clip {i} (chuẩn hóa)")
+                    _run(cmd, f"Ghép nối clip {i} (chuẩn hóa)", timeout=encode_timeout)
             else:
                 offset = max(0.1, d1 - t_dur)
                 if _has_xfade():
@@ -1340,7 +1351,7 @@ def merge_clips_advanced(
                     "-c:a", "aac", "-b:a", "192k",
                     step_out
                 ]
-                _run(cmd, f"Ghép chuyển cảnh clip {i}: {trans}")
+                _run(cmd, f"Ghép chuyển cảnh clip {i}: {trans}", timeout=encode_timeout)
 
             if current_merged != clips[0] and os.path.exists(current_merged):
                 try: os.remove(current_merged)

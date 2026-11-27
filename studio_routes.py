@@ -45,6 +45,7 @@ class Command(BaseModel):
         "clip",
         "speech",
         "compose",
+        "comic",
         "narrated",
         "write",
         "emphasis",
@@ -60,6 +61,8 @@ class Command(BaseModel):
     version: float
     approved: bool = True
     allow_stills: bool = False
+    include_subtitles: bool = True
+    max_concurrent: int = Field(default=12, ge=1, le=12)
     accept_qc: bool = False
     characters: list[str] = Field(default_factory=list, max_length=30)
     dialogue: str = Field(default="", max_length=3000)
