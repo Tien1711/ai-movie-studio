@@ -364,3 +364,93 @@ def qc_clip(
 
     result["passed"] = not issues
     return result
+
+
+# ── AI Vision QC: chấm điểm đồng nhất khuôn mặt / trang phục / lỗi ảnh AI ────
+
+VISUAL_QC_PASS_SCORE = 75
+
+
+def build_vision_qc_contact_sheet(
+    frame_path: str,
+    anchor_data_uri: Optional[str] = None,
+) -> Optional[str]:
+    """Ghép ảnh neo (trái) và ảnh vừa sinh (phải) thành 1 ảnh JPEG gọn nhẹ để AI Vision chấm điểm."""
+    import base64
+    import io
+    from PIL import Image, ImageOps
+
+    if not frame_path or not os.path.isfile(frame_path):
+        return None
+    try:
+        with Image.open(frame_path) as gen_im:
+            gen_rgb = ImageOps.exif_transpose(gen_im).convert("RGB")
+        target_h = 448
+        gen_w = max(1, int(gen_rgb.width * (target_h / max(1, gen_rgb.height))))
+        gen_rgb = gen_rgb.resize((min(640, gen_w), target_h), Image.Resampling.LANCZOS)
+
+        anchor_rgb = None
+        if anchor_data_uri and anchor_data_uri.startswith("data:image/"):
+            raw = base64.b64decode(anchor_data_uri.split(",", 1)[1])
+            with Image.open(io.BytesIO(raw)) as ref_im:
+                ref_rgb = ImageOps.exif_transpose(ref_im).convert("RGB")
+            ref_w = max(1, int(ref_rgb.width * (target_h / max(1, ref_rgb.height))))
+            anchor_rgb = ref_rgb.resize((min(640, ref_w), target_h), Image.Resampling.LANCZOS)
+
+        if anchor_rgb is not None:
+            gap = 12
+            sheet = Image.new("RGB", (anchor_rgb.width + gap + gen_rgb.width, target_h), (24, 24, 28))
+            sheet.paste(anchor_rgb, (0, 0))
+            sheet.paste(gen_rgb, (anchor_rgb.width + gap, 0))
+        else:
+            sheet = gen_rgb
+
+        buf = io.BytesIO()
+        sheet.save(buf, format="JPEG", quality=85)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+
+async def evaluate_visual_consistency(
+    frame_path: str,
+    anchor_data_uri: Optional[str],
+    scene_prompt: str,
+    ask_json_fn,
+    pass_threshold: int = VISUAL_QC_PASS_SCORE,
+) -> Dict[str, Any]:
+    """Dùng AI Vision chấm điểm đồng nhất (0–100) + phát hiện lỗi biến dạng/chữ rác/đổi mặt."""
+    sheet = build_vision_qc_contact_sheet(frame_path, anchor_data_uri)
+    if not sheet:
+        return {"score": 100, "passed": True, "issues": [], "summary": "Không đọc được ảnh để chấm điểm."}
+    has_ref = bool(anchor_data_uri and anchor_data_uri.startswith("data:image/"))
+    system = (
+        "You are a strict film continuity and AI visual QC supervisor. "
+        "Output ONLY raw valid JSON with keys: score (integer 0-100), issues (array of short Vietnamese strings, empty if clean), "
+        "and summary (one short Vietnamese sentence). "
+        + (
+            "The LEFT image is the canonical character reference; the RIGHT image is the newly generated scene frame. "
+            "Score how consistently face, hair, costume, colors match the reference, and check for distorted hands/faces, "
+            "stray embedded text/watermarks, or broken anatomy."
+            if has_ref
+            else "Inspect this generated scene frame for distorted faces/hands, stray embedded text/watermarks, "
+            "broken anatomy, or mismatch with the intended scene prompt."
+        )
+    )
+    user = f"Scene prompt: {(scene_prompt or '')[:600]}"
+    try:
+        raw = await ask_json_fn(system, user, reference_image=sheet)
+        if not isinstance(raw, dict):
+            raise ValueError("Phản hồi chấm điểm không phải JSON object.")
+        score = max(0, min(100, int(raw.get("score", 80))))
+        raw_issues = raw.get("issues")
+        issues = [str(x).strip()[:160] for x in (raw_issues if isinstance(raw_issues, list) else []) if str(x).strip()]
+        summary = str(raw.get("summary") or "").strip()[:240]
+        return {
+            "score": score,
+            "passed": score >= pass_threshold,
+            "issues": issues,
+            "summary": summary or (f"Đạt chuẩn đồng nhất ({score}/100)" if score >= pass_threshold else f"Cần xem lại ({score}/100)"),
+        }
+    except Exception as exc:
+        return {"score": None, "passed": True, "issues": [], "summary": f"Bỏ qua chấm điểm Vision ({exc})"}

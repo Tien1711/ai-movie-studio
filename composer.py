@@ -88,6 +88,60 @@ def _has_xfade() -> bool:
 # chuẩn hóa về CFR 30fps trước khi ghép (TikTok/Reels chuẩn 30fps).
 TARGET_FPS = 30
 
+# ── Bộ màu điện ảnh đồng nhất xuyên suốt cả phim (Color Grading / Cinema LUT) ──
+COLOR_GRADE_PRESETS: Dict[str, Dict[str, str]] = {
+    "none": {
+        "label": "Nguyên bản (không chỉnh màu)",
+        "vf": "",
+    },
+    "cinema_teal_orange": {
+        "label": "Điện ảnh Hollywood (Teal & Orange)",
+        "vf": "eq=contrast=1.06:saturation=1.12:gamma=0.98,colorbalance=rs=-0.04:gs=0.01:bs=0.05:rm=0.03:gm=0.0:bm=-0.02:rh=0.05:gh=0.02:bh=-0.04,unsharp=3:3:0.35:3:3:0.0",
+    },
+    "warm_epic": {
+        "label": "Sử thi vàng ấm (Lịch sử / Cổ trang)",
+        "vf": "eq=contrast=1.07:saturation=1.14:brightness=0.01,colorbalance=rs=0.03:gs=0.01:bs=-0.03:rh=0.06:gh=0.03:bh=-0.05,unsharp=3:3:0.35:3:3:0.0",
+    },
+    "vibrant_3d": {
+        "label": "Rực rỡ 3D / Pixar / Hoạt hình",
+        "vf": "eq=contrast=1.05:saturation=1.18:brightness=0.015,unsharp=3:3:0.45:3:3:0.0",
+    },
+    "moody_noir": {
+        "label": "Huyền bí / Trinh thám / Kinh dị",
+        "vf": "eq=contrast=1.14:saturation=0.82:gamma=0.93,colorbalance=rs=-0.05:gs=-0.02:bs=0.07:rh=-0.02:gh=0.0:bh=0.04",
+    },
+    "soft_film": {
+        "label": "Phim nhựa 35mm cổ điển",
+        "vf": "eq=contrast=1.04:saturation=0.96:gamma=1.02,colorbalance=rs=0.02:gs=0.02:bs=-0.01:rh=0.03:gh=0.02:bh=-0.02,unsharp=3:3:0.25:3:3:0.0",
+    },
+}
+
+
+def _detect_lead_trim_offset(video_path: str, max_trim_s: float = 0.45) -> float:
+    """Phát hiện 0.1–0.45s đen/đứng hình mở đầu của clip AI để cắt sạch mối nối."""
+    try:
+        res = subprocess.run(
+            [
+                FFMPEG, "-nostdin", "-t", "1.2", "-i", video_path,
+                "-vf", "blackdetect=d=0.1:pix_th=0.10:pic_th=0.98,freezedetect=n=-60dB:d=0.25",
+                "-an", "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, errors="replace", timeout=15,
+        )
+        err = res.stderr or ""
+        trim_to = 0.0
+        for m in re.finditer(r"black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)", err):
+            if float(m.group(1)) <= 0.08:
+                trim_to = max(trim_to, min(max_trim_s, float(m.group(2))))
+        f_starts = [float(x) for x in re.findall(r"freeze_start:\s*([\d.]+)", err)]
+        f_ends = [float(x) for x in re.findall(r"freeze_end:\s*([\d.]+)", err)]
+        if f_starts and f_ends and f_starts[0] <= 0.08:
+            trim_to = max(trim_to, min(max_trim_s, f_ends[0]))
+        return round(trim_to, 3) if trim_to >= 0.1 else 0.0
+    except Exception:
+        return 0.0
+
 
 def _probe_fps(clip: str) -> Optional[float]:
     """Đo fps (r_frame_rate) của clip; None nếu đo không được.
@@ -850,13 +904,15 @@ def compose_scene_video(
     quality: str = "720p",
     aspect_ratio: str = "9:16",
     ambience_volume: float = 0.0,
+    smart_pacing: bool = True,
+    smart_trim: bool = False,
+    color_grade: str = "none",
+    watermark_text: str = "",
 ):
     """
-    Ghép 1 cảnh: Kéo dài hoặc loop video để khớp đúng với thời lượng audio TTS hoặc target_duration.
-    Đảm bảo không cắt ngắn video khi audio ngắn hơn video (giữ trọn vẹn thước phim điện ảnh).
-    Tự động chuẩn hóa codec sang H.264 / AAC để đảm bảo tương thích mọi trình duyệt và concat trơn tru.
-    Hỗ trợ chuẩn xác cả khung hình dọc 9:16 (Shorts/TikTok/Reels) và khung hình ngang 16:9 (Cinema/YouTube/TV).
-    Nếu không có scene_audio (chế độ không lồng tiếng), giữ nguyên 100% âm thanh & giọng gốc do AI sinh ra!
+    Ghép 1 cảnh: Kéo dài mượt (Smart Pacing slow-mo nhẹ 0.74x–1.0x khi chênh <= 35%, chỉ loop khi lệch lớn)
+    để khớp đúng thời lượng audio TTS hoặc target_duration mà không bị giật vòng lặp.
+    Hỗ trợ Smart Seam Trim, đồng bộ màu điện ảnh (Color Grade LUT) và Watermark kênh trong cùng 1 pass FFmpeg.
     """
     vf_filters = []
     ar_key = _normalize_aspect_key(aspect_ratio)
@@ -884,13 +940,6 @@ def compose_scene_video(
         crf = "22"
         preset = "fast"
 
-    # Chuẩn hóa về CFR 30fps TRƯỚC scale/pad (fix lag/đứng hình): clip AI có
-    # fps trộn (24/25/30/VFR) — không chuẩn hóa thì xfade lỗi timebase và
-    # concat stream-copy lệch timeline ở chỗ nối.
-    vf_filters.append(f"fps={TARGET_FPS}")
-    vf_filters.append(f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
-    vf_str = ",".join(vf_filters) if vf_filters else "null"
-
     # Tính toán thời lượng chuẩn: giữ ít nhất thời lượng đầy đủ của video gốc (không lãng phí AI render)
     vid_dur = get_media_duration(scene_video)
     aud_dur = 0.0
@@ -901,8 +950,6 @@ def compose_scene_video(
     elif audio_duration and float(audio_duration) > 0:
         aud_dur = float(audio_duration)
 
-    # Tính toán thời lượng chuẩn xác theo timeline và kịch bản:
-    # Nếu có target_duration, tuân thủ đúng target_duration; chỉ kéo dài nếu audio lồng tiếng (TTS) dài hơn để tránh cụt thoại.
     if target_duration and float(target_duration) > 0:
         t_dur = float(target_duration)
         dur = max(t_dur, aud_dur) if aud_dur > 0 else t_dur
@@ -912,18 +959,49 @@ def compose_scene_video(
     if dur <= 0.1:
         dur = 5.0
 
-    # Bảo vệ chống trùng lặp cảnh: nếu video tải về từ Muse bị nối tiếp dài hơn thời lượng kịch bản,
-    # tự động cắt đúng phần đuôi (nội dung mới sinh) thay vì lấy nhầm phần đầu (cảnh cũ bị Muse nối vào).
-    # LƯU Ý (audit §1.17, kiểm chứng thực tế 2026-11-07): "-ss <offset>" đặt
-    # trước "-stream_loop -1 -i" KHÔNG giữ offset khi loop — ffmpeg loop lại
-    # từ ĐẦU clip (đoạn đầu cũ) thay vì từ offset. Vì vậy ở đây cắt đuôi
-    # thành file tạm re-encode rồi mới loop file tạm đó (loop đúng đoạn đuôi).
+    # Smart Seam Trim: cắt bỏ 0.1–0.45s đầu bị đen/đứng hình (chỉ khi clip đủ dài >= 2.5s)
+    lead_trim = 0.0
+    if smart_trim and vid_dur >= 2.5:
+        lead_trim = _detect_lead_trim_offset(scene_video)
+        if lead_trim > 0 and (vid_dur - lead_trim) >= 1.5:
+            vid_dur = max(0.5, vid_dur - lead_trim)
+        else:
+            lead_trim = 0.0
+
+    # Smart Pacing: nếu thoại dài hơn clip từ 1% đến 35%, dùng slow-motion mượt (setpts) thay vì lặp vòng (-stream_loop)
+    stretch_factor = 1.0
+    use_stream_loop = True
+    if smart_pacing and vid_dur >= 0.5 and dur > vid_dur * 1.01 and dur <= vid_dur * 1.35:
+        stretch_factor = dur / vid_dur
+        use_stream_loop = False
+        vf_filters.append(f"setpts={stretch_factor:.4f}*PTS")
+
+    # Chuẩn hóa về CFR 30fps TRƯỚC scale/pad (fix lag/đứng hình)
+    vf_filters.append(f"fps={TARGET_FPS}")
+    vf_filters.append(f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+
+    # Đồng bộ màu & độ nét điện ảnh (Color Grade / LUT preset)
+    grade_vf = (COLOR_GRADE_PRESETS.get((color_grade or "none").strip().lower()) or {}).get("vf") or ""
+    if grade_vf:
+        vf_filters.append(grade_vf)
+
+    # Watermark thương hiệu kênh tinh tế ở góc trên phải
+    clean_wm = re.sub(r"[\r\n\t'\\%:]", "", (watermark_text or "").strip())[:40]
+    if clean_wm:
+        wm_size = max(14, int(min(w, h) * 0.026))
+        vf_filters.append(
+            f"drawtext=text='{clean_wm}':fontcolor=white@0.58:fontsize={wm_size}:"
+            f"shadowcolor=black@0.45:shadowx=1:shadowy=1:x=w-tw-24:y=22"
+        )
+
+    vf_str = ",".join(vf_filters) if vf_filters else "null"
+
     input_video = scene_video
     trimmed_video = None
-    seek_args = []
+    seek_args = ["-ss", f"{lead_trim:.3f}"] if (lead_trim > 0 and not use_stream_loop) else []
     if vid_dur > dur * 1.15 and (vid_dur - dur) > 0.4:
-        offset = max(0.0, vid_dur - dur)
-        tail_dur = max(0.1, vid_dur - offset)
+        offset = max(lead_trim, (vid_dur + lead_trim) - dur)
+        tail_dur = max(0.1, (vid_dur + lead_trim) - offset)
         print(f"[compose_scene_video] Canh bao: Video goc ({vid_dur:.2f}s) dai hon thoi luong ({dur:.2f}s). Lay {tail_dur:.2f}s doan duoi moi sinh (offset={offset:.2f}s)...")
         _fd, trimmed_video = tempfile.mkstemp(prefix="composer_tail_", suffix=".mp4")
         os.close(_fd)
@@ -944,15 +1022,37 @@ def compose_scene_video(
             raise
         input_video = trimmed_video
         seek_args = []
+    elif lead_trim > 0 and use_stream_loop:
+        _fd, trimmed_video = tempfile.mkstemp(prefix="composer_lead_", suffix=".mp4")
+        os.close(_fd)
+        try:
+            _run([
+                FFMPEG, "-y",
+                "-ss", f"{lead_trim:.3f}", "-i", scene_video,
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "192k",
+                trimmed_video,
+            ], "Cắt đoạn đứng hình mở đầu")
+        except Exception:
+            try: os.remove(trimmed_video)
+            except Exception: pass
+            trimmed_video = None
+            raise
+        input_video = trimmed_video
+        seek_args = []
+
+    loop_args = ["-stream_loop", "-1"] if use_stream_loop else []
 
     if has_audio:
         speech_filter = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad"
         audio_mapping = ["-map", "1:a:0", "-af", speech_filter]
         if ambience_volume > 0 and check_video_has_audio(input_video):
+            amb_tempo = f"atempo={1.0 / stretch_factor:.4f}," if stretch_factor > 1.005 else ""
             mix = (
                 f"[1:a]{speech_filter}[speech];"
-                "[0:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                f"volume={ambience_volume}[ambience];"
+                f"[0:a]{amb_tempo}aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"volume={ambience_volume},apad[ambience];"
                 "[speech][ambience]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=false[audio]"
             )
             audio_mapping = ["-filter_complex", mix, "-map", "[audio]"]
@@ -960,7 +1060,7 @@ def compose_scene_video(
         cmd = [
             FFMPEG, "-y",
             *seek_args,
-            "-stream_loop", "-1", "-i", input_video,   # Loop video nếu audio dài hơn
+            *loop_args, "-i", input_video,
             "-i", scene_audio,
             "-map", "0:v:0",
             *audio_mapping,
@@ -974,16 +1074,15 @@ def compose_scene_video(
         ]
     else:
         # Chế độ không lồng tiếng (Dùng giọng & âm thanh gốc của AI):
-        # Kiểm tra xem scene_video có chứa audio stream gốc do AI sinh ra không
         if check_video_has_audio(scene_video):
-            # GIỮ NGUYÊN âm thanh / giọng gốc của AI và chuẩn hóa sang 44100Hz stereo AAC
+            nat_tempo = f"atempo={1.0 / stretch_factor:.4f}," if stretch_factor > 1.005 else ""
             cmd = [
                 FFMPEG, "-y",
                 *seek_args,
-                "-stream_loop", "-1", "-i", input_video,
+                *loop_args, "-i", input_video,
                 "-map", "0:v:0",
                 "-map", "0:a:0",
-                "-af", "aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
+                "-af", f"{nat_tempo}aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
                 "-vf", vf_str,
                 "-c:v", "libx264", "-preset", preset, "-crf", crf,
                 "-pix_fmt", "yuv420p",
@@ -993,11 +1092,10 @@ def compose_scene_video(
                 output,
             ]
         else:
-            # Video câm: tạo audio track tĩnh chuẩn 44100Hz stereo để concat demuxer trơn tru
             cmd = [
                 FFMPEG, "-y",
                 *seek_args,
-                "-stream_loop", "-1", "-i", input_video,
+                *loop_args, "-i", input_video,
                 "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=44100:cl=stereo",
                 "-map", "0:v:0",
                 "-map", "1:a:0",
@@ -1580,7 +1678,7 @@ def merge_audio_with_transitions(
         return output_path
 
 
-def _write_karaoke_ass(srt_path: str, ass_path: str, font_size: int, alignment: int, style: str = "karaoke"):
+def _write_karaoke_ass(srt_path: str, ass_path: str, font_size: int, alignment: int, style: str = "karaoke", word_timings: Optional[List[Dict[str, Any]]] = None):
     """Distribute each timed SRT cue over short phrases, highlighting the current word."""
     def centiseconds(stamp):
         h, m, s, ms = map(int, re.split("[:,]", stamp))
@@ -1601,23 +1699,73 @@ def _write_karaoke_ass(srt_path: str, ass_path: str, font_size: int, alignment: 
     if style == "word_box":
         header = header.replace("&H00FFFFFF,&H00FFFFFF,&H00000000", "&H00000000,&H00000000,&H0000DAFF").replace(",1,1.4,0,", ",3,2,0,")
     events = []
-    for block in re.split(r"\n\s*\n", Path(srt_path).read_text(encoding="utf-8-sig").strip()):
-        lines = block.splitlines()
-        start, end = map(centiseconds, lines[1].split(" --> "))
-        words = " ".join(lines[2:]).translate(str.maketrans({"\\": "＼", "{": "｛", "}": "｝"})).split()
-        total = sum(map(len, words))
-        elapsed = 0
-        for i, word in enumerate(words):
-            a = start + (end - start) * elapsed // total
-            elapsed += len(word)
-            b = start + (end - start) * elapsed // total
-            phrase = words[i // 4 * 4:i // 4 * 4 + 4]
+    if word_timings:
+        clean_words = []
+        for item in word_timings:
+            w_txt = str(item.get("word") or "").translate(str.maketrans({"\\": "＼", "{": "｛", "}": "｝"})).strip()
+            a = max(0, int(round(float(item.get("start", 0)) * 100)))
+            b = max(a + 2, int(round(float(item.get("end", 0)) * 100)))
+            if w_txt:
+                clean_words.append((a, b, w_txt))
+        for i, (a, b, word) in enumerate(clean_words):
+            chunk = clean_words[i // 4 * 4 : i // 4 * 4 + 4]
+            phrase = [w for _, _, w in chunk]
             phrase[i % 4] = r"{\c&H00CFFF&}" + word + r"{\rMain}"
             if style == "word_box":
                 phrase = [word]
-            if b > a:
-                events.append(f"Dialogue: 0,{stamp(a)},{stamp(b)},Main,,0,0,0,,{' '.join(phrase)}")
+            events.append(f"Dialogue: 0,{stamp(a)},{stamp(b)},Main,,0,0,0,,{' '.join(phrase)}")
+    else:
+        for block in re.split(r"\n\s*\n", Path(srt_path).read_text(encoding="utf-8-sig").strip()):
+            lines = block.splitlines()
+            if len(lines) < 3:
+                continue
+            start, end = map(centiseconds, lines[1].split(" --> "))
+            words = " ".join(lines[2:]).translate(str.maketrans({"\\": "＼", "{": "｛", "}": "｝"})).split()
+            total = sum(map(len, words))
+            if not total:
+                continue
+            elapsed = 0
+            for i, word in enumerate(words):
+                a = start + (end - start) * elapsed // total
+                elapsed += len(word)
+                b = start + (end - start) * elapsed // total
+                phrase = words[i // 4 * 4:i // 4 * 4 + 4]
+                phrase[i % 4] = r"{\c&H00CFFF&}" + word + r"{\rMain}"
+                if style == "word_box":
+                    phrase = [word]
+                if b > a:
+                    events.append(f"Dialogue: 0,{stamp(a)},{stamp(b)},Main,,0,0,0,,{' '.join(phrase)}")
     Path(ass_path).write_text(header + "\n".join(events) + "\n", encoding="utf-8")
+
+
+def collect_timeline_word_timings(
+    speech_paths: List[Optional[str]],
+    timeline_offsets: List[float],
+) -> List[Dict[str, Any]]:
+    """Gom các file <speech>.words.json của từng cảnh về đúng mốc thời gian trên timeline ghép."""
+    import json as _json
+
+    merged: List[Dict[str, Any]] = []
+    for speech, offset in zip(speech_paths, timeline_offsets):
+        if not speech:
+            continue
+        sidecar = Path(f"{speech}.words.json")
+        if not sidecar.is_file():
+            continue
+        try:
+            rows = _json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rows, list):
+            continue
+        for item in rows:
+            if isinstance(item, dict) and item.get("word"):
+                merged.append({
+                    "start": round(float(offset) + float(item.get("start", 0)), 3),
+                    "end": round(float(offset) + float(item.get("end", 0)), 3),
+                    "word": str(item["word"]),
+                })
+    return merged
 
 
 def burn_subtitles(
@@ -1631,6 +1779,7 @@ def burn_subtitles(
     timeout: float = 300,
     style: str = "cinema",
     position: str = "bottom",
+    word_timings: Optional[List[Dict[str, Any]]] = None,
 ):
     """Khắc phụ đề (burn-in) phong cách điện ảnh: Chữ trắng viền đen sắc nét, căn giữa đáy, không hộp đen, không che nhân vật.
 
@@ -1681,7 +1830,7 @@ def burn_subtitles(
         Path(clean_srt_path).unlink()
         clean_srt_name = Path(clean_srt_name).with_suffix(".ass").name
         clean_srt_path = os.path.join(work_dir, clean_srt_name)
-        _write_karaoke_ass(srt_file, clean_srt_path, font_size, alignment, style)
+        _write_karaoke_ass(srt_file, clean_srt_path, font_size, alignment, style, word_timings=word_timings)
         vf = f"ass={clean_srt_name}"
 
     cmd = [
@@ -1801,49 +1950,225 @@ def add_background_music(
     music_volume: float = 0.15,
     voice_volume: float = 1.0,
     fade_duration: float = 1.5,
+    auto_ducking: bool = True,
 ):
     """
     Hòa âm nhạc nền (BGM) đa tầng với giọng thoại:
     - Chỉnh volume độc lập cho nhạc nền và giọng đọc.
-    - Tự động loop nhạc nếu video dài hơn nhạc.
-    - Tự động áp dụng Audio Fade-in đầu video và Fade-out cuối video để âm thanh êm dịu.
+    - Auto-Ducking (sidechaincompress): khi có giọng kể/thoại thì nhạc tự hạ êm,
+      đến quãng nghỉ/chuyển cảnh nhạc tự nâng lên tạo cảm xúc điện ảnh; tự fallback nếu FFmpeg không hỗ trợ.
+    - Tự động loop nhạc + Audio Fade-in đầu video và Fade-out cuối video.
     """
     music_volume = _as_float(music_volume, "music_volume")
     voice_volume = _as_float(voice_volume, "voice_volume")
     fade_duration = _as_float(fade_duration, "fade_duration")
-    # Audit #11: vid_dur = 0.0 nghia la KHONG DO DUOC -> khong truyen -t
-    # (de ffmpeg chay het video, -shortest se dung o cuoi video vi nhac
-    # loop vo han); chi fade-out khi biet moc cuoi.
     vid_dur = get_media_duration(input_video)
     if vid_dur > 0:
         fade_out_start = max(0.0, vid_dur - fade_duration)
-        music_chain = (f"[1:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration},"
-                       f"afade=t=out:st={fade_out_start:.2f}:d={fade_duration}[music]")
+        music_chain = (
+            f"[1:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"volume={music_volume},afade=t=in:ss=0:d={fade_duration},"
+            f"afade=t=out:st={fade_out_start:.2f}:d={fade_duration}[music_raw]"
+        )
     else:
-        music_chain = f"[1:a]volume={music_volume},afade=t=in:ss=0:d={fade_duration}[music]"
+        music_chain = (
+            f"[1:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"volume={music_volume},afade=t=in:ss=0:d={fade_duration}[music_raw]"
+        )
 
-    filter_complex = (
+    def _build_cmd(fc: str) -> List[str]:
+        c = [
+            FFMPEG, "-y",
+            "-i", input_video,
+            "-stream_loop", "-1", "-i", music_file,
+            "-filter_complex", fc,
+            "-map", "0:v",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+        ]
+        if vid_dur > 0:
+            c += ["-t", f"{vid_dur:.3f}"]
+        c += [output_video]
+        return c
+
+    if auto_ducking:
+        duck_fc = (
+            f"[0:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"volume={voice_volume},asplit=2[voice_main][voice_sc];"
+            f"{music_chain};"
+            "[music_raw][voice_sc]sidechaincompress=threshold=0.03:ratio=5:attack=45:release=380:makeup=1[music_ducked];"
+            "[voice_main][music_ducked]amix=inputs=2:duration=first:normalize=0:dropout_transition=2,"
+            "alimiter=limit=0.95:level=false[aout]"
+        )
+        try:
+            _run(_build_cmd(duck_fc), "Mix nhạc nền Auto-Ducking", timeout=600)
+            return
+        except Exception as duck_err:
+            print(f"[composer] Auto-Ducking fallback sang static mix: {duck_err}")
+
+    static_fc = (
         f"[0:a]volume={voice_volume}[voice];"
         f"{music_chain};"
-        f"[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        "[voice][music_raw]amix=inputs=2:duration=first:dropout_transition=2[aout]"
     )
+    _run(_build_cmd(static_fc), "Mix nhạc nền với Audio Fade", timeout=600)
 
-    cmd = [
-        FFMPEG, "-y",
-        "-i", input_video,
-        "-stream_loop", "-1", "-i", music_file,
-        "-filter_complex", filter_complex,
-        "-map", "0:v",
-        "-map", "[aout]",
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
+
+def add_transition_sfx(
+    input_video: str,
+    transition_offsets: List[float],
+    output_video: str,
+    sfx_volume: float = 0.14,
+) -> str:
+    """Chèn hiệu ứng âm thanh chuyển cảnh nhẹ (soft cinema whoosh tổng hợp bằng FFmpeg, không cần file ngoài)."""
+    clean_offsets = [round(float(t), 3) for t in (transition_offsets or []) if float(t) > 0.4][:40]
+    if not clean_offsets:
+        shutil.copy2(input_video, output_video)
+        return output_video
+    vid_dur = get_media_duration(input_video)
+    sfx_volume = max(0.02, min(0.5, _as_float(sfx_volume, "sfx_volume")))
+    parts = [
+        "[0:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[base]",
+        f"anoisesrc=d=0.65:c=pink:r=44100:a={sfx_volume:.3f},"
+        "highpass=f=220,lowpass=f=1800,afade=t=in:st=0:d=0.28,afade=t=out:st=0.32:d=0.33,"
+        f"aformat=sample_fmts=fltp:channel_layouts=stereo,asplit={len(clean_offsets)}"
+        + "".join(f"[w{i}]" for i in range(len(clean_offsets))),
     ]
-    # Audit #11: chi gioi han -t khi biet chac thoi luong video.
+    mix_labels = ["[base]"]
+    for i, t in enumerate(clean_offsets):
+        delay_ms = max(0, int(round((t - 0.25) * 1000)))
+        parts.append(f"[w{i}]adelay={delay_ms}|{delay_ms}[d{i}]")
+        mix_labels.append(f"[d{i}]")
+    parts.append(
+        "".join(mix_labels)
+        + f"amix=inputs={len(mix_labels)}:duration=first:normalize=0,alimiter=limit=0.95:level=false[aout]"
+    )
+    cmd = [
+        FFMPEG, "-y", "-i", input_video,
+        "-filter_complex", ";".join(parts),
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+    ]
     if vid_dur > 0:
         cmd += ["-t", f"{vid_dur:.3f}"]
     cmd += [output_video]
-    _run(cmd, "Mix nhạc nền với Audio Fade", timeout=600)
+    try:
+        _run(cmd, "Chèn hiệu ứng âm thanh chuyển cảnh (Transition SFX)", timeout=300)
+    except Exception as exc:
+        print(f"[composer] Bỏ qua Transition SFX vì lỗi FFmpeg: {exc}")
+        shutil.copy2(input_video, output_video)
+    return output_video
+
+
+def generate_smart_thumbnail(
+    video_path: str,
+    output_path: str,
+    title: str = "",
+    aspect_ratio: str = "16:9",
+) -> str:
+    """Tự động chọn khung hình sắc nét và đủ sáng nhất trong video để xuất Thumbnail YouTube/TikTok kèm tiêu đề."""
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
+
+    dur = get_media_duration(video_path)
+    if dur <= 0.2:
+        raise ValueError("Video không đủ thời lượng để tạo thumbnail.")
+    sample_count = 7
+    ratios = [0.12 + i * (0.76 / max(1, sample_count - 1)) for i in range(sample_count)]
+    best_img = None
+    best_score = -1.0
+
+    with tempfile.TemporaryDirectory(prefix="smart_thumb_") as tmp:
+        for i, frac in enumerate(ratios):
+            ts = max(0.1, min(dur - 0.1, dur * frac))
+            cand = os.path.join(tmp, f"f_{i}.jpg")
+            try:
+                subprocess.run(
+                    [FFMPEG, "-y", "-ss", f"{ts:.2f}", "-i", video_path, "-frames:v", "1", "-q:v", "2", cand],
+                    capture_output=True, check=True, timeout=20,
+                )
+                with Image.open(cand) as im:
+                    rgb = im.convert("RGB")
+                    gray = rgb.convert("L")
+                    luma = ImageStat.Stat(gray).mean[0]
+                    edges = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).stddev[0]
+                    # Ưu tiên khung hình sắc nét (edges cao) và độ sáng cân bằng (không đen/cháy sáng)
+                    luma_penalty = 1.0 if 38 <= luma <= 215 else 0.45
+                    score = edges * luma_penalty
+                    if score > best_score:
+                        best_score = score
+                        best_img = rgb.copy()
+            except Exception:
+                continue
+
+    if best_img is None:
+        raise RuntimeError("Không trích được khung hình từ video để tạo thumbnail.")
+
+    ar_key = _normalize_aspect_key(aspect_ratio)
+    target_size = {"9:16": (1080, 1920), "1:1": (1080, 1080)}.get(ar_key, (1280, 720))
+    tw, th = target_size
+    sw, sh = best_img.size
+    scale = max(tw / sw, th / sh)
+    resized = best_img.resize((max(1, int(sw * scale)), max(1, int(sh * scale))), Image.Resampling.LANCZOS)
+    left = (resized.width - tw) // 2
+    top = (resized.height - th) // 2
+    canvas = resized.crop((left, top, left + tw, top + th)).convert("RGBA")
+
+    clean_title = re.sub(r"\s+", " ", (title or "").strip())
+    if clean_title:
+        overlay = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        draw_ov = ImageDraw.Draw(overlay)
+        grad_h = int(th * 0.36)
+        for y in range(grad_h):
+            alpha = int(205 * (y / max(1, grad_h)) ** 1.35)
+            draw_ov.rectangle([(0, th - grad_h + y), (tw, th - grad_h + y + 1)], fill=(8, 10, 18, alpha))
+        canvas = Image.alpha_composite(canvas, overlay)
+        draw = ImageDraw.Draw(canvas)
+        font_px = max(36, int(tw * 0.056))
+        font = None
+        for font_path in (
+            r"C:\Windows\Fonts\arialbd.ttf",
+            r"C:\Windows\Fonts\segoeuib.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ):
+            if os.path.isfile(font_path):
+                try:
+                    font = ImageFont.truetype(font_path, font_px)
+                    break
+                except Exception:
+                    pass
+        if font is None:
+            font = ImageFont.load_default()
+        words = clean_title.upper().split()
+        lines: List[str] = []
+        cur = ""
+        max_w = int(tw * 0.88)
+        for w_tok in words:
+            trial = (cur + " " + w_tok).strip()
+            bbox = draw.textbbox((0, 0), trial, font=font)
+            if (bbox[2] - bbox[0]) <= max_w or not cur:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = w_tok
+            if len(lines) >= 2:
+                break
+        if cur and len(lines) < 3:
+            lines.append(cur)
+        line_h = int(font_px * 1.24)
+        y_start = th - int(th * 0.06) - len(lines) * line_h
+        for li, line_txt in enumerate(lines):
+            bbox = draw.textbbox((0, 0), line_txt, font=font)
+            lw = bbox[2] - bbox[0]
+            x = max(24, (tw - lw) // 2)
+            y = y_start + li * line_h
+            draw.text((x + 3, y + 3), line_txt, font=font, fill=(0, 0, 0, 215))
+            draw.text((x, y), line_txt, font=font, fill=(255, 224, 92, 255) if li == 0 else (255, 255, 255, 255))
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    canvas.convert("RGB").save(output_path, "JPEG", quality=92)
+    return output_path
 
 
 def audit_movie_scenes(arg1: Any, arg2: Any = None) -> Dict[str, Any]:

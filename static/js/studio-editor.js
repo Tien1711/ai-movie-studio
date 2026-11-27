@@ -213,6 +213,26 @@ async function copyToReview(v) {
   studioState.filter = "all";
   await refreshMuseBoard();
 }
+const colorGradeLabels = {
+  none: "Nguyên bản (không phủ màu)",
+  cinema_teal_orange: "Điện ảnh Teal & Orange",
+  warm_epic: "Sử thi ấm (Warm Epic)",
+  vibrant_3d: "Hoạt hình 3D rực rỡ (Pixar/Disney)",
+  moody_noir: "Kịch tính tương phản sâu (Moody Noir)",
+  soft_film: "Phim nhựa cổ điển dịu mắt (Soft Film)",
+};
+const clipParallelModeLabels = {
+  sequential: "Tuần tự toàn bộ (1 mạch nối khung cuối liên tục — an toàn nhất)",
+  segment_parallel:
+    "⚡ Song song theo phân đoạn (nhanh gấp 2–5x trên nhiều Chrome / tài khoản)",
+};
+const clipParallelNoteHtml =
+  '<div class="ms-note-box">' +
+  "<strong>📌 Lưu ý về chế độ dựng video song song theo phân đoạn:</strong>" +
+  "<p>• <b>Tuần tự toàn bộ (mặc định):</b> Dựng từng cảnh 1 → 2 → 3… nối khung cuối liên tiếp toàn phim, mượt tuyệt đối ngay cả khi chỉ có 1 trình duyệt.</p>" +
+  "<p>• <b>Song song theo phân đoạn:</b> Tự chia phim thành các phân đoạn độc lập tại điểm <i>Bắt đầu phân đoạn mới</i>, khi <i>đổi bối cảnh</i>, hoặc mốc neo lại mỗi 8 cảnh. Các phân đoạn chạy <b>song song trên Chrome Pool / nhiều tài khoản</b> (trong từng phân đoạn vẫn nối khung cuối tuần tự) — rút ngắn 2–5 lần thời gian mà vẫn giữ đồng nhất.</p>" +
+  "</div>";
+
 async function chapterSettings(v) {
   const music = await editorApi("/api/music/list");
   const options = (items, value) =>
@@ -228,6 +248,14 @@ async function chapterSettings(v) {
           "</option>",
       )
       .join("");
+  const check = (name, label, checked) =>
+    '<label class="ms-check-row"><input type="checkbox" name="' +
+    name +
+    '" ' +
+    (checked ? "checked" : "") +
+    "><span>" +
+    esc(label) +
+    "</span></label>";
   dialog(
     "Thiết lập bản dựng",
     '<label>Giọng kể mặc định<select name="voice">' +
@@ -252,6 +280,9 @@ async function chapterSettings(v) {
         v.music || "",
       ) +
       "</select></label>" +
+      '<label>Âm lượng nhạc<input name="volume" type="range" min="0" max="1" step="0.05" value="' +
+      (v.volume ?? 0.15) +
+      '"></label>' +
       '<label>Ảnh đầu cảnh<select name="reference_mode">' +
       options(
         [
@@ -271,12 +302,61 @@ async function chapterSettings(v) {
         v.chain_fallback_mode || "fallback_image",
       ) +
       "</select></label>" +
-      '<label>Âm lượng nhạc<input name="volume" type="range" min="0" max="1" step="0.05" value="' +
-      (v.volume ?? 0.15) +
-      '"></label>',
+      '<div class="ms-cinema-section"><h5>🎬 Hậu kỳ điện ảnh & Tối ưu tốc độ</h5>' +
+      '<label>Bảng màu điện ảnh (Color LUT)<select name="color_grade">' +
+      options(Object.entries(colorGradeLabels), v.color_grade || "none") +
+      "</select></label>" +
+      '<label>Chế độ dựng video AI (Tính năng #6)<select name="clip_parallel_mode">' +
+      options(
+        Object.entries(clipParallelModeLabels),
+        v.clip_parallel_mode || "sequential",
+      ) +
+      "</select></label>" +
+      clipParallelNoteHtml +
+      check(
+        "smart_pacing",
+        "Tự làm chậm mượt khi lời kể dài hơn clip (Smart Pacing — bỏ giật vòng lặp)",
+        v.smart_pacing !== false,
+      ) +
+      check(
+        "smart_trim",
+        "Tự cắt 0.1–0.45s đen/đứng hình đầu clip AI (Smart Seam Trim)",
+        !!v.smart_trim,
+      ) +
+      check(
+        "auto_ducking",
+        "Nhạc nền tự hạ êm khi có lời kể (Auto-Ducking)",
+        v.auto_ducking !== false,
+      ) +
+      check(
+        "transition_sfx",
+        "Thêm tiếng chuyển cảnh điện ảnh nhẹ (Whoosh SFX khi hòa tan)",
+        !!v.transition_sfx,
+      ) +
+      check(
+        "vision_qc",
+        "AI Vision tự chấm đồng nhất & tự vẽ lại ảnh dưới 75 điểm",
+        !!v.vision_qc,
+      ) +
+      '<label>Watermark kênh (tùy chọn, tối đa 40 ký tự)<input name="watermark_text" maxlength="40" placeholder="Ví dụ: @TenKenhCuaBan" value="' +
+      esc(v.watermark_text || "") +
+      '"></label></div>',
     async (data) => {
       await editorApi("/api/muse-studio/" + v.id + "/chapter-settings", "PUT", {
-        ...Object.fromEntries(data),
+        voice: data.get("voice"),
+        subtitle_style: data.get("subtitle_style"),
+        subtitle_position: data.get("subtitle_position"),
+        music: data.get("music") || "",
+        reference_mode: data.get("reference_mode") || "chain",
+        chain_fallback_mode: data.get("chain_fallback_mode") || "fallback_image",
+        color_grade: data.get("color_grade") || "none",
+        clip_parallel_mode: data.get("clip_parallel_mode") || "sequential",
+        smart_pacing: data.has("smart_pacing"),
+        smart_trim: data.has("smart_trim"),
+        auto_ducking: data.has("auto_ducking"),
+        transition_sfx: data.has("transition_sfx"),
+        vision_qc: data.has("vision_qc"),
+        watermark_text: String(data.get("watermark_text") || "").trim(),
         version: v.updated_at,
         volume: Number(data.get("volume")),
       });
@@ -931,6 +1011,7 @@ function drawGuidedBoard(board, v) {
       needsPortrait || !scenes.some((s) => s.prompt && !s.frame),
     ) +
     action("Duyệt ảnh đã xong", "images-ok", frames === approvedFrames) +
+    action("👁️ Chấm đồng nhất", "vision-qc-all", !frames) +
     action(
       "Làm video",
       "clips",
@@ -946,9 +1027,11 @@ function drawGuidedBoard(board, v) {
     html += '<p role="status">' + esc(v.current_step || "Đang xử lý") + "</p>";
   if (v.continuity_warnings?.length)
     html +=
-      "<details><summary>Lưu ý đồng nhất · " +
+      '<details open><summary>Lưu ý đồng nhất · ' +
       v.continuity_warnings.length +
-      "</summary>" +
+      '</summary><div class="ms-warn-head"><span>Cảnh báo nhảy bối cảnh hoặc thời gian giữa các cảnh:</span>' +
+      action("✨ Chèn cảnh cầu nối tự động", "bridge", written !== total) +
+      "</div>" +
       v.continuity_warnings.map((t) => "<p>" + esc(t) + "</p>").join("") +
       "</details>";
   if (v.error) html += '<p class="studio-error">' + esc(v.error) + "</p>";
@@ -1075,6 +1158,18 @@ function drawGuidedBoard(board, v) {
           esc((s.qc.issues || []).join(" · ")) +
           "</p>"
         : "") +
+      (s.visual_qc && Number.isFinite(Number(s.visual_qc.score))
+        ? '<div class="ms-vqc-badge ' +
+          (s.visual_qc.passed !== false ? "ok" : "warn") +
+          '">' +
+          (s.visual_qc.passed !== false ? "👁️ Vision QC · " : "⚠️ Vision QC · ") +
+          Number(s.visual_qc.score) +
+          "/100" +
+          (s.visual_qc.issues?.length
+            ? " — " + esc(s.visual_qc.issues.join(" · "))
+            : "") +
+          "</div>"
+        : "") +
       (s.reference_source
         ? "<small>Ảnh đã gửi · " +
           esc(
@@ -1109,6 +1204,7 @@ function drawGuidedBoard(board, v) {
       action("Sửa", "edit", !s.prompt) +
       action(s.speech ? "Đọc lại" : "Đọc thử", "speech", !s.voiceover) +
       action("Thay ảnh", "replace", !s.prompt) +
+      action("👁️ Chấm đồng nhất", "vision_qc", !s.frame) +
       (s.frame_approved
         ? '<a class="btn btn-ghost btn-sm" download href="/api/muse-studio/' +
           encodeURIComponent(v.id) +
@@ -1140,9 +1236,19 @@ function drawGuidedBoard(board, v) {
         "/video?v=" +
         v.updated_at +
         '"></video>' +
+        '<div class="ms-thumb-box"><img loading="lazy" src="/api/muse-studio/' +
+        encodeURIComponent(v.id) +
+        "/thumbnail?v=" +
+        v.updated_at +
+        '" alt="Smart Thumbnail" onerror="this.closest(\'.ms-thumb-box\').hidden=true"></div>' +
         '<div class="studio-actions"><a class="btn btn-ghost" href="' +
         prefix +
         '/video" download>Tải MP4</a>' +
+        '<a class="btn btn-ghost" href="/api/muse-studio/' +
+        encodeURIComponent(v.id) +
+        '/thumbnail" download="' +
+        esc(v.id) +
+        '_thumbnail.jpg">Tải Thumbnail</a>' +
         (v.srt_url ? '<a class="btn btn-ghost" href="' + prefix + '/subtitles" download>Phụ đề SRT</a>' : "") +
         '<a class="btn btn-ghost" href="/api/factory/publish-pack/' +
         encodeURIComponent(v.id) +
@@ -1308,8 +1414,75 @@ async function guidedAction(v, b) {
           upload: await uploadStudioFile(data.get("file")),
         }),
     );
+  if (op === "bridge") {
+    b.disabled = true;
+    try {
+      const res = await editorApi(
+        "/api/muse-studio/" + encodeURIComponent(v.id) + "/bridge-shots",
+        "POST",
+        { version: v.updated_at },
+      );
+      await refreshMuseBoard();
+      if (res.inserted > 0)
+        showToast(
+          "Đã chèn " +
+            res.inserted +
+            " cảnh cầu nối tự động (tổng " +
+            res.scenes +
+            " cảnh).",
+          "success",
+        );
+      else
+        showToast("Không còn bước nhảy bối cảnh/thời gian cần chèn cầu nối.", "info");
+    } finally {
+      b.disabled = false;
+    }
+    return;
+  }
+  if (op === "clips") {
+    const pending = targets((s) => s.frame_approved && !s.clip);
+    if (!pending.length) return;
+    if (pending.length === 1) return stage(v, "clip", pending);
+    const defaultMode = v.clip_parallel_mode || "sequential";
+    const defaultWorkers = Math.max(
+      2,
+      Math.min(6, parseInt(el("cfgConcurrent")?.value, 10) || 3),
+    );
+    return dialog(
+      "Làm video AI (" + pending.length + " cảnh)",
+      '<label>Chế độ dựng video AI (Tính năng #6)<select name="clip_parallel_mode">' +
+        Object.entries(clipParallelModeLabels)
+          .map(
+            ([k, t]) =>
+              '<option value="' +
+              esc(k) +
+              '" ' +
+              (k === defaultMode ? "selected" : "") +
+              ">" +
+              esc(t) +
+              "</option>",
+          )
+          .join("") +
+        "</select></label>" +
+        clipParallelNoteHtml +
+        '<label>Số luồng phân đoạn song song (chỉ áp dụng khi chọn Song song theo phân đoạn)<input name="max_concurrent" type="number" min="1" max="12" value="' +
+        defaultWorkers +
+        '"></label>',
+      (data) =>
+        stage(v, "clip", pending, {
+          clip_parallel_mode:
+            data.get("clip_parallel_mode") || "sequential",
+          max_concurrent: Math.max(
+            1,
+            Math.min(12, Number(data.get("max_concurrent")) || defaultWorkers),
+          ),
+        }),
+      "Bắt đầu làm video",
+    );
+  }
   const multi = {
     emphasis: ["emphasis", targets((s) => s.voiceover)],
+    "vision-qc-all": ["vision_qc", targets((s) => !!s.frame)],
     images: ["image", targets((s) => s.prompt && !s.frame)],
     "images-ok": [
       "approve_image",

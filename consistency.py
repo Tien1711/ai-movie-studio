@@ -326,6 +326,119 @@ def opening_reference(scene, previous, last_frame, anchor, fallback="fallback_im
     return None, "independent"
 
 
+def partition_clip_segments(
+    scenes: List[Dict[str, Any]],
+    pending_indexes: List[int],
+    reference_mode: str = "chain",
+) -> List[List[int]]:
+    """Chia danh sách cảnh cần tạo clip thành các phân đoạn độc lập có thể chạy song song.
+
+    - Nếu reference_mode == "approved": mỗi cảnh dùng ảnh duyệt riêng -> mỗi cảnh là 1 phân đoạn độc lập.
+    - Nếu reference_mode == "chain": tách phân đoạn mới tại mọi mốc chắc chắn dùng ảnh neo gốc
+      (new_segment=True, đổi bối cảnh setting, hoặc mốc reset drift mỗi CONSISTENCY_ANCHOR_EVERY cảnh,
+      hoặc cảnh không liền kề index trước đó trong danh sách pending).
+      Bên trong mỗi phân đoạn, các cảnh vẫn giữ đúng thứ tự tuần tự để nối Last Frame 100%.
+    """
+    pending_set = set(pending_indexes)
+    ordered = [s for s in sorted(scenes, key=lambda item: item.get("index", 0)) if s.get("index") in pending_set]
+    if not ordered:
+        return []
+    if reference_mode == "approved":
+        return [[int(s["index"])] for s in ordered]
+
+    by_index = {int(s["index"]): s for s in scenes if "index" in s}
+    segments: List[List[int]] = []
+    current_seg: List[int] = []
+
+    for scene in ordered:
+        idx = int(scene["index"])
+        prev_scene = by_index.get(idx - 1)
+        cur_setting = str(scene.get("setting") or "").strip().casefold()
+        prev_setting = str((prev_scene or {}).get("setting") or "").strip().casefold()
+        setting_changed = bool(not cur_setting or cur_setting != prev_setting)
+        is_boundary = bool(
+            not current_seg
+            or idx != current_seg[-1] + 1
+            or scene.get("new_segment") is True
+            or setting_changed
+            or idx == 1
+            or idx % CONSISTENCY_ANCHOR_EVERY == 0
+            or scene.get("keep_reference") is True
+        )
+        if is_boundary:
+            if current_seg:
+                segments.append(current_seg)
+            current_seg = [idx]
+        else:
+            current_seg.append(idx)
+
+    if current_seg:
+        segments.append(current_seg)
+    return segments
+
+
+def build_bridge_scenes_for_jumps(video: Dict[str, Any]) -> tuple[List[Dict[str, Any]], int]:
+    """Tự động chèn các cảnh cầu nối (establishing/transition shot 4s) tại những vị trí nhảy thời gian/địa điểm."""
+    scenes = list(sorted(video.get("scenes") or [], key=lambda s: int(s.get("index", 0))))
+    if len(scenes) < 2:
+        return scenes, 0
+
+    report = run_consistency_checks({
+        "scenes": scenes,
+        "characters": video.get("cast") or [],
+        "chain_mode": "sequential",
+        "voice": video.get("voice"),
+    })
+    jump_targets = {}
+    for item in report.get("checks") or []:
+        if item.get("code") == "bridge" and item.get("scene_index") is not None:
+            jump_targets[int(item["scene_index"])] = str(item.get("message") or "")
+
+    if not jump_targets:
+        return scenes, 0
+
+    new_scenes: List[Dict[str, Any]] = []
+    inserted = 0
+    for i, scene in enumerate(scenes):
+        idx = int(scene.get("index", i + 1))
+        if idx in jump_targets and i > 0:
+            prev = scenes[i - 1]
+            # Tránh chèn trùng nếu cảnh trước đó đã là cầu nối
+            if not prev.get("is_bridge"):
+                target_setting = str(scene.get("setting") or "").strip()
+                prev_setting = str(prev.get("setting") or "").strip()
+                desc_change = (
+                    f"from {prev_setting} to {target_setting}"
+                    if prev_setting and target_setting
+                    else (target_setting or "the next location and time")
+                )
+                bridge_scene = {
+                    "index": 0,
+                    "title": f"Cầu nối → {scene.get('title') or f'Cảnh {idx}'}",
+                    "duration": 4,
+                    "prompt": (
+                        f"Wide atmospheric establishing transition shot moving smoothly {desc_change}, "
+                        "slow cinematic glide, bridging lighting and mood seamlessly, no text, no watermark."
+                    ),
+                    "direction": (
+                        f"Wide atmospheric establishing transition shot moving smoothly {desc_change}."
+                    ),
+                    "voiceover": f"Chuyển sang khung cảnh mới{': ' + target_setting if target_setting else ''}.",
+                    "characters": [],
+                    "setting": target_setting or prev_setting,
+                    "new_segment": True,
+                    "transition_out": "dissolve",
+                    "is_bridge": True,
+                }
+                new_scenes.append(bridge_scene)
+                inserted += 1
+        new_scenes.append(dict(scene))
+
+    for new_idx, sc in enumerate(new_scenes, 1):
+        sc["index"] = new_idx
+    return new_scenes, inserted
+
+
 def resolve_scene_cast(scene, registry):
     """Validate explicitly declared cast and resolve named dialogue without changing the words."""
     aliases = {str(alias).strip().casefold(): c for c in registry if c.get("kind", "character") == "character"

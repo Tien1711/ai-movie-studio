@@ -463,22 +463,57 @@ def _err_str(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
+def word_timings_path(audio_path: str) -> Path:
+    """Đường dẫn file sidecar lưu mốc thời gian từng từ (Edge-TTS WordBoundary)."""
+    return Path(f"{audio_path}.words.json")
+
+
 async def synthesize_edge_tts(text: str, voice: str, output_path: str,
                               timeout: Optional[float] = None) -> float:
-    """Sinh audio bằng edge_tts không đồng bộ.
+    """Sinh audio bằng edge_tts không đồng bộ kèm lưu mốc WordBoundary cho phụ đề Karaoke khớp từng chữ.
 
-    timeout: tran cho lan goi save() (mac dinh _tts_timeout_for(text));
+    timeout: tran cho lan goi stream/save (mac dinh _tts_timeout_for(text));
     het timeout thi raise TimeoutError de caller fallback / ghi tts_failed
     thay vi ket vinh vien (audit #7).
     """
+    import json as _json
     import edge_tts
+
     clean_text = text.strip()
     estimated_dur = max(2.0, len(clean_text) / 15.0)
     communicate = edge_tts.Communicate(clean_text, voice)
-    await asyncio.wait_for(
-        communicate.save(output_path),
-        timeout=timeout if timeout is not None else _tts_timeout_for(clean_text),
-    )
+    eff_timeout = timeout if timeout is not None else _tts_timeout_for(clean_text)
+
+    async def _stream_with_words():
+        words: List[Dict[str, Any]] = []
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "wb") as handle:
+            async for chunk in communicate.stream():
+                ctype = chunk.get("type")
+                if ctype == "audio":
+                    handle.write(chunk["data"])
+                elif ctype == "WordBoundary":
+                    offset_s = round(float(chunk.get("offset", 0)) / 1e7, 3)
+                    dur_s = round(float(chunk.get("duration", 0)) / 1e7, 3)
+                    word_txt = str(chunk.get("text") or "").strip()
+                    if word_txt and dur_s > 0:
+                        words.append({
+                            "start": offset_s,
+                            "end": round(offset_s + dur_s, 3),
+                            "word": word_txt,
+                        })
+        if words:
+            try:
+                word_timings_path(output_path).write_text(
+                    _json.dumps(words, ensure_ascii=False), encoding="utf-8"
+                )
+            except OSError:
+                pass
+
+    if hasattr(communicate, "stream") and callable(communicate.stream):
+        await asyncio.wait_for(_stream_with_words(), timeout=eff_timeout)
+    else:
+        await asyncio.wait_for(communicate.save(output_path), timeout=eff_timeout)
     actual_dur = await asyncio.to_thread(get_media_duration, output_path)
     return actual_dur if actual_dur and actual_dur > 0.3 else estimated_dur
 

@@ -19,7 +19,13 @@ import batch_engine as media
 import batch_video_engine as batch
 import composer
 import qc
-from consistency import opening_reference, resolve_scene_cast, run_consistency_checks
+from consistency import (
+    build_bridge_scenes_for_jumps,
+    opening_reference,
+    partition_clip_segments,
+    resolve_scene_cast,
+    run_consistency_checks,
+)
 from muse_connection import current_muse_affinity, muse_capacity_from_accounts
 
 BUSY = {"queued", "running"}
@@ -33,6 +39,7 @@ ASYNC = {
     "write",
     "emphasis",
     "portraits",
+    "vision_qc",
 }
 INVALID_FINAL = {"final_video_url": None, "srt_url": None, "inspection": None}
 
@@ -171,7 +178,7 @@ def can_act(s, action):
         return bool(s.get("prompt"))
     if action in ("speech", "emphasis"):
         return bool(s.get("voiceover"))
-    if action == "approve_image":
+    if action in ("approve_image", "vision_qc"):
         return bool(s.get("frame"))
     if action == "clip":
         return bool(s.get("frame") and s.get("frame_approved"))
@@ -271,6 +278,7 @@ def command(vid, req):
                     "allow_stills": req.allow_stills,
                     "include_subtitles": req.include_subtitles,
                     "max_concurrent": req.max_concurrent,
+                    "clip_parallel_mode": req.clip_parallel_mode or video.get("clip_parallel_mode", "sequential"),
                     "errors": [],
                 },
             )
@@ -868,10 +876,60 @@ async def produce(v, s, action, work, progress):
             )
         dest = new_asset(vid, "webp")
         image_to_webp(work / "generated", dest)
+        visual_report = None
+        if v.get("vision_qc") and batch.active_muse_provider() == "browser":
+            progress(idx, "AI Vision chấm điểm đồng nhất ảnh")
+            visual_report = await qc.evaluate_visual_consistency(
+                str(dest), ref, s.get("prompt", ""), ask_json
+            )
+            if not visual_report.get("passed"):
+                progress(
+                    idx,
+                    f"Ảnh đạt {visual_report.get('score')}/100 — tự vẽ lại tăng độ đồng nhất",
+                )
+                retry_path = work / "generated_retry"
+                issues_hint = "; ".join(visual_report.get("issues") or [])
+                reinforced = (
+                    f"{prompt}\nCRITICAL FIX: strictly match reference face, hairstyle, and costume; "
+                    f"fix these flaws: {issues_hint or 'character drift, distorted hands, stray text'}. No text, no watermark."
+                )
+                try:
+                    await media.generate_keyframe_image(
+                        reinforced, base, key, str(retry_path), v["aspect_ratio"], ref
+                    )
+                    retry_dest = new_asset(vid, "webp")
+                    image_to_webp(retry_path, retry_dest)
+                    retry_report = await qc.evaluate_visual_consistency(
+                        str(retry_dest), ref, s.get("prompt", ""), ask_json
+                    )
+                    if (retry_report.get("score") or 0) >= (visual_report.get("score") or 0):
+                        dest.unlink(missing_ok=True)
+                        dest = retry_dest
+                        visual_report = retry_report
+                    else:
+                        retry_dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
         set_image(s, dest.name)
         s["anchors"] = [c["name"] for c in cast if c.get("avatar")]
         s["image_prompt"] = prompt
         s["image_generations"] = s.get("image_generations", 0) + 1
+        if visual_report is not None:
+            s["visual_qc"] = visual_report
+    elif action == "vision_qc":
+        frame_path = asset_path(vid, s.get("frame"))
+        if not frame_path.is_file():
+            raise ValueError("Chưa có ảnh mở đầu để chấm điểm.")
+        cast = references(v, s)
+        ref, _ = await asyncio.to_thread(batch._cast_reference, cast)
+        if ref and ref.startswith(("http://", "https://")):
+            ref = await asyncio.to_thread(media._browser_image_from_url, ref)
+        elif ref:
+            ref = batch._resolve_character_ref_data_uri(ref)
+        progress(idx, "AI Vision đang chấm điểm đồng nhất")
+        s["visual_qc"] = await qc.evaluate_visual_consistency(
+            str(frame_path), ref, s.get("prompt", ""), ask_json
+        )
     elif action in ("speech", "emphasis"):
         if action == "emphasis":
             revised = await ask_json(
@@ -1025,6 +1083,10 @@ async def export(v, op, work, progress):
             aspect_ratio=v["aspect_ratio"],
             quality="1080p",
             ambience_volume=0.3 if batch.STORY_AMBIENCE_DIRECTION.rstrip(".") in (s.get("used_prompt") or "") and s.get("clip") else 0.0,
+            smart_pacing=v.get("smart_pacing", True),
+            smart_trim=v.get("smart_trim", False),
+            color_grade=v.get("color_grade", "none"),
+            watermark_text=v.get("watermark_text", ""),
         )
         speech_sources.append(str(speech or out))
         width, height = qc.expected_resolution_for_size(v["aspect_ratio"], "1080p")
@@ -1072,18 +1134,33 @@ async def export(v, op, work, progress):
             timeline_offsets=offsets,
         )
     final = merged
+    if narrated and v.get("transition_sfx", False) and len(offsets) > 1:
+        dissolve_offsets = [
+            offsets[i + 1]
+            for i, tr in enumerate(transitions)
+            if tr == "dissolve" and i + 1 < len(offsets)
+        ]
+        if dissolve_offsets:
+            with_sfx = work / "with_sfx.mp4"
+            await asyncio.to_thread(
+                composer.add_transition_sfx, str(final), dissolve_offsets, str(with_sfx)
+            )
+            final = with_sfx
     if narrated and include_subtitles:
-        final = work / "captioned.mp4"
+        word_timings = composer.collect_timeline_word_timings(speech_sources, offsets)
+        final_cap = work / "captioned.mp4"
         await asyncio.to_thread(
             composer.burn_subtitles,
-            str(merged),
-            str(srt),
             str(final),
+            str(srt),
+            str(final_cap),
             font_size=12,
             style=v.get("subtitle_style", "cinema"),
             position=v.get("subtitle_position", "bottom"),
             raise_on_error=True,
+            word_timings=word_timings or None,
         )
+        final = final_cap
     if narrated and v.get("music"):
         from studio_routes import music_file
 
@@ -1097,6 +1174,7 @@ async def export(v, op, work, progress):
             str(track),
             str(mixed),
             v.get("volume", 0.15),
+            auto_ducking=v.get("auto_ducking", True),
         )
         final = mixed
     inspection = await asyncio.to_thread(inspect_final, final)
@@ -1116,6 +1194,16 @@ async def export(v, op, work, progress):
             images.mkdir(exist_ok=True)
             shutil.copy2(asset_path(vid, s["frame"]), images / f"scene_{idx}.webp")
     os.replace(final, directory(vid) / "final.mp4")
+    try:
+        await asyncio.to_thread(
+            composer.generate_smart_thumbnail,
+            str(directory(vid) / "final.mp4"),
+            str(directory(vid) / "thumbnail.jpg"),
+            title=v.get("title") or "",
+            aspect_ratio=v.get("aspect_ratio") or "16:9",
+        )
+    except Exception:
+        pass
     target_srt = directory(vid) / "subtitles.srt"
     if include_subtitles:
         os.replace(srt, target_srt)
@@ -1138,7 +1226,7 @@ async def image_workers(max_concurrent=12):
             response.raise_for_status()
             data = response.json()
         return muse_capacity_from_accounts(provider, data, max_concurrent)
-    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+    except Exception:  # noqa: BLE001 — fallback cleanly when capacity probe is unavailable
         return 1
 
 
@@ -1211,6 +1299,71 @@ async def render_comic(video, operation, work, progress):
     return await export(video, {**operation, "action": "narrated"}, work, progress)
 
 
+async def produce_clip_segments(video, segments, workers, progress):
+    """Chạy song song nhiều phân đoạn clip độc lập (mỗi phân đoạn chạy tuần tự để giữ Last Frame)."""
+    sem = asyncio.Semaphore(max(1, workers))
+    errors: list[str] = []
+    vid = video["id"]
+
+    async def _run_segment(seg_indexes):
+        async with sem:
+            for idx in seg_indexes:
+                if batch._BatchCancellation(vid).is_set():
+                    return
+                scene = selected_scene(video, idx)
+                try:
+                    with tempfile.TemporaryDirectory(dir=directory(vid)) as tmp:
+                        await produce(video, scene, "clip", Path(tmp), progress)
+                except Exception as error:  # noqa: BLE001 — isolate segment errors
+                    scene["error"] = str(error)
+                    errors.append(f"Cảnh {idx}: {error}")
+                    if video.get("chain_fallback_mode") == "stop":
+                        break
+                finally:
+                    batch.BATCH_MANAGER.update_video(
+                        vid, {**INVALID_FINAL, "scenes": video["scenes"]}
+                    )
+
+    await asyncio.gather(*(_run_segment(seg) for seg in segments))
+    return errors
+
+
+def insert_bridge_shots(vid: str, version: float) -> dict:
+    """Tự động chèn các cảnh cầu nối 4s vào những vị trí nhảy thời gian/địa điểm."""
+    with batch._QUEUE_LOCK:
+        video = batch.BATCH_MANAGER.get_video(vid)
+        if not video or not video.get("guided"):
+            raise ValueError("Không tìm thấy bản dựng.")
+        if video["status"] in BUSY or video.get("operation"):
+            raise ValueError("Bản dựng đang xử lý. Hãy chờ hoàn tất trước khi chèn cảnh cầu nối.")
+        if version != video.get("updated_at"):
+            raise ValueError("Bản dựng đã thay đổi. Hãy tải lại trước khi chèn cảnh.")
+        updated_scenes, inserted = build_bridge_scenes_for_jumps(video)
+        if inserted == 0:
+            return {"inserted": 0, "scenes": len(updated_scenes)}
+        refresh_joins(updated_scenes)
+        warnings = [
+            c["message"] + " " + c.get("suggestion", "")
+            for c in run_consistency_checks({
+                "scenes": updated_scenes,
+                "characters": video.get("cast") or [],
+                "chain_mode": "sequential",
+                "voice": video.get("voice"),
+            })["checks"]
+            if c["level"] == "warning"
+        ]
+        batch.BATCH_MANAGER.update_video(
+            vid,
+            {
+                **INVALID_FINAL,
+                "scenes": updated_scenes,
+                "scenes_count": len(updated_scenes),
+                "continuity_warnings": list(dict.fromkeys(warnings)),
+            },
+        )
+        return {"inserted": inserted, "scenes": len(updated_scenes)}
+
+
 def run(video):
     vid = video["id"]
     op = video.get("operation")
@@ -1263,6 +1416,44 @@ def run(video):
             op["active"] = ["portraits"]
             manager.update_video(vid, {"operation": op})
             asyncio.run(draw_cast(video, progress))
+        if (
+            op["action"] == "clip"
+            and op["pending"]
+            and op.get("clip_parallel_mode", video.get("clip_parallel_mode", "sequential"))
+            == "segment_parallel"
+        ):
+            clip_workers = asyncio.run(image_workers(op.get("max_concurrent", 12)))
+            segments = partition_clip_segments(
+                video["scenes"],
+                op["pending"],
+                reference_mode=video.get("reference_mode", "chain"),
+            )
+            if clip_workers > 1 and len(segments) > 1:
+                op["active"] = list(op["pending"])
+                if not manager.update_video(
+                    vid,
+                    {
+                        "operation": op,
+                        "current_step": f"Đang dựng song song {len(segments)} phân đoạn ({clip_workers} luồng)",
+                    },
+                ):
+                    return
+                op["errors"].extend(
+                    asyncio.run(
+                        produce_clip_segments(video, segments, clip_workers, progress)
+                    )
+                )
+                op["pending"] = []
+                op["active"] = []
+                manager.update_video(
+                    vid,
+                    {
+                        **INVALID_FINAL,
+                        "operation": op,
+                        "cast": video.get("cast", []),
+                        "scenes": video["scenes"],
+                    },
+                )
         chunk_size = 6 if op["action"] == "write" else 1
         if op["action"] == "image":
             chunk_size = asyncio.run(image_workers(op.get("max_concurrent", 12)))

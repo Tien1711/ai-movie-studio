@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 import batch_engine as media
 import batch_video_engine as batch
+import composer
 import story_engine
 import studio_workflow as wf
 from studio_styles import GROUPS
@@ -50,6 +51,7 @@ class Command(BaseModel):
         "write",
         "emphasis",
         "portraits",
+        "vision_qc",
         "approve_image",
         "approve_clip",
         "replace",
@@ -63,6 +65,7 @@ class Command(BaseModel):
     allow_stills: bool = False
     include_subtitles: bool = True
     max_concurrent: int = Field(default=12, ge=1, le=12)
+    clip_parallel_mode: Literal["sequential", "segment_parallel"] | None = None
     accept_qc: bool = False
     characters: list[str] = Field(default_factory=list, max_length=30)
     dialogue: str = Field(default="", max_length=3000)
@@ -441,6 +444,56 @@ class ChapterSettings(BaseModel):
     chain_fallback_mode: Literal["fallback_image", "stop", "independent"] = (
         "fallback_image"
     )
+    color_grade: Literal[
+        "none",
+        "cinema_teal_orange",
+        "warm_epic",
+        "vibrant_3d",
+        "moody_noir",
+        "soft_film",
+    ] = "none"
+    smart_pacing: bool = True
+    smart_trim: bool = False
+    auto_ducking: bool = True
+    transition_sfx: bool = False
+    vision_qc: bool = False
+    clip_parallel_mode: Literal["sequential", "segment_parallel"] = "sequential"
+    watermark_text: str = Field(default="", max_length=40)
+
+
+class BridgeRequest(BaseModel):
+    version: float
+
+
+@router.post("/api/muse-studio/{vid}/bridge-shots")
+def bridge_shots(vid: str, req: BridgeRequest):
+    try:
+        return wf.insert_bridge_shots(vid, req.version)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@router.get("/api/muse-studio/{vid}/thumbnail")
+def smart_thumbnail(vid: str):
+    video = batch.BATCH_MANAGER.get_video(vid)
+    if not video:
+        raise HTTPException(404, "Không tìm thấy bản dựng.")
+    d = wf.directory(vid)
+    thumb = d / "thumbnail.jpg"
+    final_mp4 = d / "final.mp4"
+    if not thumb.is_file():
+        if not final_mp4.is_file():
+            raise HTTPException(404, "Thumbnail chỉ sẵn sàng sau khi dựng phim hoàn chỉnh.")
+        try:
+            composer.generate_smart_thumbnail(
+                str(final_mp4),
+                str(thumb),
+                title=video.get("title") or "",
+                aspect_ratio=video.get("aspect_ratio") or "9:16",
+            )
+        except Exception as e:
+            raise HTTPException(500, f"Không thể tạo thumbnail: {e}") from e
+    return FileResponse(thumb, media_type="image/jpeg")
 
 
 @router.put("/api/muse-studio/{vid}/chapter-settings")
@@ -527,6 +580,14 @@ def rebuild(vid: str):
             "music",
             "volume",
             "workshop",
+            "color_grade",
+            "smart_pacing",
+            "smart_trim",
+            "auto_ducking",
+            "transition_sfx",
+            "vision_qc",
+            "clip_parallel_mode",
+            "watermark_text",
         )
         if k in v
     }
