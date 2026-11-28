@@ -47,6 +47,11 @@ async function handle(message, sender) {
     }
     throw new Error('Thao tác extension không hợp lệ.');
   }
+  if (message.type === 'sleep') {
+    const ms = Math.min(5000, Math.max(0, Number(message.ms) || 0));
+    await new Promise(resolve => setTimeout(resolve, ms));
+    return { slept: ms };
+  }
   let { museTabId } = await chrome.storage.session.get('museTabId');
   if (link && sender.tab && sender.frameId === 0 && sender.url?.startsWith(MUSE_ORIGIN + '/')) {
     const tracked = Number.isInteger(museTabId)

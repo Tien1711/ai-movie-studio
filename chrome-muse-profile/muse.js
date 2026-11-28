@@ -7,7 +7,14 @@
   const ERR = '[data-testid="assistant-response-error-notice"]';
   const APPROVAL = '[data-hatch-composer-approval-stack]';
   const tab = crypto.randomUUID();
-  const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const delay = milliseconds => {
+    if (milliseconds >= 200 && document.visibilityState !== 'visible') {
+      return chrome.runtime.sendMessage({ type: 'sleep', ms: milliseconds })
+        .then(res => { if (!res?.ok) return new Promise(r => setTimeout(r, milliseconds)); })
+        .catch(() => new Promise(r => setTimeout(r, milliseconds)));
+    }
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+  };
   const visible = node => !!node && node.getClientRects().length > 0;
   const all = selector => Array.from(document.querySelectorAll(selector));
 
@@ -137,11 +144,28 @@
     }
   }
 
+  function isSmallUiIcon(element) {
+    if (element.closest(ATTACHMENT)) return false;
+    const attrW = Number(element.getAttribute('width')) || 0;
+    const attrH = Number(element.getAttribute('height')) || 0;
+    if ((attrW > 0 && attrW < 120) || (attrH > 0 && attrH < 120)) return true;
+    const rect = element.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0 && Math.max(rect.width, rect.height) < 96) return true;
+    if (element.naturalWidth > 0 && element.naturalHeight > 0
+        && Math.min(element.naturalWidth, element.naturalHeight) < 240) {
+      return true;
+    }
+    return false;
+  }
+
   function freshMediaSource(kind, previousSources, inCurrentTurn) {
     const candidates = all(kind === 'video' ? 'video' : 'img').filter(node => node.isConnected
       && !node.closest(USER) && node.closest(ASSISTANT + ', ' + ATTACHMENT) && inCurrentTurn(node));
     for (const element of candidates) {
-      if (kind === 'image' && Math.min(element.naturalWidth, element.naturalHeight) < 240) continue;
+      if (kind === 'image') {
+        if (element.loading === 'lazy') element.loading = 'eager';
+        if (isSmallUiIcon(element)) continue;
+      }
       const source = mediaSources(element).find(url => !previousSources.has(url) && allowedMediaSource(url));
       if (source) return source;
     }
@@ -191,7 +215,7 @@
     } finally {
       await reader.cancel().catch(() => {});
     }
-    if (offset < 100) throw new Error('Tab Muse trả về tệp media rỗng.');
+    if (offset < (kind === 'image' ? 4096 : 100)) throw new Error('Tab Muse trả về tệp media rỗng hoặc icon nhỏ.');
   }
 
   async function run({ id, prompt, files, timeoutMs, kind, chatMode }) {
@@ -292,7 +316,10 @@
         return owner ? !previousAnswerSet.has(owner) : true;
       };
       const answers = main ? all(ASSISTANT).filter(inCurrentTurn) : all(ASSISTANT).slice(previousAnswers.length);
-      if (answers.length) trackedAnswers = answers;
+      if (answers.length) {
+        trackedAnswers = answers;
+        try { answers.at(-1)?.scrollIntoView({ block: 'end' }); } catch {}
+      }
       const reply = answers.at(-1)?.innerText?.trim() || '';
       const media = latestMedia(answers).filter(url => !previousLinks.has(url));
       const hasAttachmentSlot = kind && all(ATTACHMENT).some(node => node.isConnected && !node.closest(USER) && inCurrentTurn(node));
