@@ -4912,11 +4912,40 @@ async def remove_muse_chrome_profile(profile_id: uuid.UUID, request: Request):
     return await _browser_profiles_request("DELETE", f"/{profile_id}")
 
 
+def _get_windows_desktop_name() -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        import ctypes
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        hdesk = u32.GetThreadDesktop(k32.GetCurrentThreadId())
+        if not hdesk:
+            return ""
+        buf = ctypes.create_unicode_buffer(256)
+        needed = ctypes.c_uint(0)
+        if u32.GetUserObjectInformationW(hdesk, 2, buf, 512, ctypes.byref(needed)):
+            return str(buf.value or "")
+    except Exception:
+        return ""
+    return ""
+
+
 @app.post("/api/settings/muse/chrome-profiles/launch-workers")
 async def launch_muse_chrome_workers(request: Request):
     _check_local_form_origin(request)
     if os.name != "nt":
         raise HTTPException(status_code=400, detail="Tính năng chạy file .bat chỉ hỗ trợ trên Windows.")
+    desktop_name = _get_windows_desktop_name()
+    if desktop_name and desktop_name.lower() != "default":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Server Studio đang chạy trong phiên nền ẩn ({desktop_name}), không thể mở Chrome ra màn hình chính từ đây. "
+                "Hãy mở trực tiếp file start_muse_browsers_silent.bat trong thư mục dự án, "
+                "hoặc khởi động Studio từ terminal Windows của bạn để dùng nút này."
+            ),
+        )
     bat_path = (Path(__file__).resolve().parent / "start_muse_browsers_silent.bat").resolve()
     if not bat_path.is_file():
         raise HTTPException(status_code=404, detail=f"Không tìm thấy {bat_path.name} trong thư mục ứng dụng.")

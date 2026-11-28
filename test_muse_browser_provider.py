@@ -268,6 +268,7 @@ def test_launch_muse_chrome_workers_invokes_explorer_on_bat(monkeypatch):
         return object()
 
     monkeypatch.setattr(studio.os, "name", "nt")
+    monkeypatch.setattr(studio, "_get_windows_desktop_name", lambda: "Default")
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
     client = TestClient(studio.app, base_url="http://127.0.0.1:8000")
@@ -282,3 +283,20 @@ def test_launch_muse_chrome_workers_invokes_explorer_on_bat(monkeypatch):
     assert len(calls) == 1
     assert calls[0][0] == "explorer.exe"
     assert calls[0][1].endswith("start_muse_browsers_silent.bat")
+
+
+def test_launch_muse_chrome_workers_refuses_hidden_desktop(monkeypatch):
+    import subprocess
+
+    calls = []
+    monkeypatch.setattr(studio.os, "name", "nt")
+    monkeypatch.setattr(studio, "_get_windows_desktop_name", lambda: "exebox-hidden")
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: calls.append(a))
+
+    client = TestClient(studio.app, base_url="http://127.0.0.1:8000")
+    response = client.post(
+        "/api/settings/muse/chrome-profiles/launch-workers",
+        headers={"Origin": "http://127.0.0.1:8000"},
+    )
+    assert response.status_code == 409
+    assert calls == []
