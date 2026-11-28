@@ -17,19 +17,35 @@ async function gateway(port, path, body, token) {
   return data;
 }
 
+async function preventDiscard(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+}
+
+async function wakeTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.url?.startsWith(MUSE_ORIGIN + '/')) return;
+  await chrome.tabs.update(tab.id, { active: true, autoDiscardable: false }).catch(() => {});
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  if (win) {
+    const update = win.state === 'minimized' ? { state: 'normal', focused: true } : { focused: true };
+    await chrome.windows.update(win.id, update).catch(() => {});
+  }
+}
+
 async function openMuse() {
   const { museTabId } = await chrome.storage.session.get('museTabId');
   if (Number.isInteger(museTabId)) {
     const tab = await chrome.tabs.get(museTabId).catch(() => null);
     if (tab?.url?.startsWith(MUSE_ORIGIN + '/')) {
-      await chrome.tabs.update(tab.id, { active: true });
-      await chrome.windows.update(tab.windowId, { focused: true });
+      await wakeTab(tab.id);
       return;
     }
   }
   const tab = await chrome.tabs.create({ url: MUSE_ORIGIN + '/', active: false });
   await chrome.storage.session.set({ museTabId: tab.id });
-  await chrome.tabs.update(tab.id, { active: true });
+  await wakeTab(tab.id);
 }
 
 async function handle(message, sender) {
@@ -47,6 +63,10 @@ async function handle(message, sender) {
     }
     throw new Error('Thao tác extension không hợp lệ.');
   }
+  if (message.type === 'wake') {
+    await wakeTab(sender.tab?.id);
+    return { woke: true };
+  }
   if (message.type === 'sleep') {
     const ms = Math.min(5000, Math.max(0, Number(message.ms) || 0));
     await new Promise(resolve => setTimeout(resolve, ms));
@@ -60,6 +80,7 @@ async function handle(message, sender) {
     if (!tracked?.url?.startsWith(MUSE_ORIGIN + '/')) {
       museTabId = sender.tab.id;
       await chrome.storage.session.set({ museTabId });
+      await preventDiscard(museTabId);
     }
   }
   if (!link || !sender.tab || sender.frameId !== 0 || sender.tab.id !== museTabId
@@ -72,6 +93,9 @@ async function handle(message, sender) {
       protocol: message.protocol, needsApproval: message.needsApproval === true,
       mainChat: message.mainChat === true,
     }, link.token);
+    if (result?.command) {
+      await wakeTab(sender.tab.id);
+    }
     return { enabled: true, ...result };
   }
   if (message.type === 'media-chunk' || message.type === 'video-chunk') {
@@ -91,6 +115,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   const target = tabs.find(tab => tab.active) || tabs[0];
   if (target?.id) {
     await chrome.storage.session.set({ museTabId: target.id });
+    await wakeTab(target.id);
     await chrome.tabs.reload(target.id).catch(() => {});
   }
 });

@@ -218,9 +218,17 @@
     if (offset < (kind === 'image' ? 4096 : 100)) throw new Error('Tab Muse trả về tệp media rỗng hoặc icon nhỏ.');
   }
 
+  async function wakeSelf() {
+    await chrome.runtime.sendMessage({ type: 'wake' }).catch(() => null);
+  }
+
   async function run({ id, prompt, files, timeoutMs, kind, chatMode }) {
     const deadline = Date.now() + timeoutMs;
-    const prepareBy = Math.min(deadline, Date.now() + 12000);
+    if (document.visibilityState !== 'visible' || !editor()) {
+      await wakeSelf();
+      await delay(350);
+    }
+    const prepareBy = Math.min(deadline, Date.now() + 15000);
     const main = chatMode === 'main';
     if (main) await openMainChat(prepareBy);
     else await newConversation(prepareBy);
@@ -272,7 +280,12 @@
     let changed = Date.now();
     let playerSource = null;
     let playerChanged = Date.now();
+    let lastWake = Date.now();
     while (Date.now() < deadline) {
+      if (kind && document.visibilityState !== 'visible' && !playerSource && Date.now() - lastWake >= 25000) {
+        lastWake = Date.now();
+        await wakeSelf();
+      }
       if (main && location.pathname !== '/') throw new Error('Tab Muse đã rời chat chính trong lúc xử lý.');
       if (main && !activeSent?.isConnected) {
         const remounted = findUserTurn();
