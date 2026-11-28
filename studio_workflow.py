@@ -565,7 +565,10 @@ async def write_beats(v, indexes):
         response
         + "Write a continuous film following the supplied creative brief and skill. "
         "Each scene object in order must contain index, title, "
-        "prompt (visual action, camera, matching named characters), voiceover (Vietnamese, fits the seconds). "
+        "prompt (purely visual silent physical action, camera, lighting, expressions matching named characters — "
+        "NEVER describe characters talking, telling stories, lecturing, or opening their mouths unless dialogue is non-empty), "
+        "voiceover (Vietnamese 3rd-person off-screen narrator line that fits the seconds), "
+        "dialogue (empty string '' for 3rd-person narration beats; or 'Character Name: short spoken line' ONLY when a character actually speaks on screen). "
         "Also return characters (names actually visible), setting (place and story time, repeated verbatim until it changes), "
         "new_segment (boolean), transition_out (cut or dissolve). Continue the preceding beats. "
         "Use exactly the supplied or newly registered character names.",
@@ -643,6 +646,18 @@ async def write_beats(v, indexes):
             for n in names
             if n.strip() and n.strip().casefold() in registered_aliases
         ]
+        raw_dialogue = str(r.get("dialogue") or "").strip()[:3000]
+        clean_dialogue = ""
+        if raw_dialogue:
+            valid_lines = []
+            for dl in raw_dialogue.splitlines():
+                dl = dl.strip()
+                if not dl:
+                    continue
+                spk, sep, words = dl.partition(":")
+                if sep and spk.strip().casefold() in registered_aliases and words.strip():
+                    valid_lines.append(f"{spk.strip()}: {words.strip()}")
+            clean_dialogue = "\n".join(valid_lines)
         resolve_scene_cast({"characters": names}, v.get("cast", []))
         target.update(
             characters=names,
@@ -653,6 +668,7 @@ async def write_beats(v, indexes):
             prompt=r["prompt"],
             direction=r["prompt"],
             voiceover=r["voiceover"],
+            dialogue=clean_dialogue,
             error=None,
         )
 
@@ -917,6 +933,10 @@ async def produce(v, s, action, work, progress):
         if visual_report is not None:
             s["visual_qc"] = visual_report
     elif action == "vision_qc":
+        if batch.active_muse_provider() != "browser":
+            raise ValueError(
+                "AI Vision QC cần chọn nhà cung cấp Muse Browser để đính kèm ảnh chấm điểm trực tiếp."
+            )
         frame_path = asset_path(vid, s.get("frame"))
         if not frame_path.is_file():
             raise ValueError("Chưa có ảnh mở đầu để chấm điểm.")
@@ -945,19 +965,52 @@ async def produce(v, s, action, work, progress):
         else:
             text = s["voiceover"]
         speech = new_asset(vid, "mp3")
-        _, segments = resolve_scene_cast(s, v.get("cast", []))
+        narrator_voice = s.get("voice") or v["voice"]
+        has_dialogue = bool((s.get("dialogue") or "").strip())
+        segments = []
+        if has_dialogue:
+            try:
+                _, segments = resolve_scene_cast(s, v.get("cast", []))
+            except ValueError:
+                # Cho phép thoại nhân vật fallback về giọng kể nếu nhân vật chưa khóa giọng riêng
+                for line in (s.get("dialogue") or "").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    marker, sep, words = line.partition(":")
+                    spoken = words.strip() if sep else line
+                    if spoken:
+                        segments.append({
+                            "character": marker.strip() if sep else "Character",
+                            "voice": narrator_voice,
+                            "text": spoken,
+                        })
         if segments:
-            text = " ".join(seg["text"] for seg in segments)
+            # Nếu cảnh có cả lời kể ngôi thứ 3 VÀ thoại nhân vật riêng biệt -> đọc nối tiếp: Giọng kể -> Giọng nhân vật
+            dlg_joined = " ".join(seg["text"] for seg in segments).strip()
+            narr_clean = (text or "").strip()
+            combined_segments = []
+            if narr_clean and narr_clean.casefold() != dlg_joined.casefold():
+                combined_segments.append({
+                    "character": "Narrator",
+                    "voice": narrator_voice,
+                    "text": narr_clean,
+                })
+            combined_segments.extend(segments)
             _, failed, why = await media.generate_multi_voice_tts_with_status(
-                segments, str(speech), str(work / "voices")
+                combined_segments, str(speech), str(work / "voices")
             )
+            if failed:
+                raise ValueError(why or "Không tạo được lời kể và thoại nhân vật.")
+            # Giữ nguyên s["voiceover"] (không ghi đè lời kể ngôi thứ 3 bằng thoại nhân vật)
+            s.update(speech=speech.name, voiceover=text or dlg_joined)
         else:
             _, failed, why = await media.generate_tts_with_status(
-                text, s.get("voice") or v["voice"], str(speech)
+                text, narrator_voice, str(speech)
             )
-        if failed:
-            raise ValueError(why or "Không tạo được lời kể.")
-        s.update(speech=speech.name, voiceover=text)
+            if failed:
+                raise ValueError(why or "Không tạo được lời kể.")
+            s.update(speech=speech.name, voiceover=text)
     elif action == "clip":
         if not can_act(s, "clip"):
             raise ValueError("Ảnh chưa duyệt.")
@@ -1082,7 +1135,20 @@ async def export(v, op, work, progress):
             target_duration=s["duration"],
             aspect_ratio=v["aspect_ratio"],
             quality="1080p",
-            ambience_volume=0.3 if batch.STORY_AMBIENCE_DIRECTION.rstrip(".") in (s.get("used_prompt") or "") and s.get("clip") else 0.0,
+            ambience_volume=(
+                0.0
+                if (s.get("dialogue") or "").strip()
+                else (
+                    0.18
+                    if s.get("clip")
+                    and (
+                        batch.STORY_AMBIENCE_DIRECTION.rstrip(".") in (s.get("used_prompt") or "")
+                        or "Pure environmental Foley" in (s.get("used_prompt") or "")
+                        or "Generate audible location ambience" in (s.get("used_prompt") or "")
+                    )
+                    else 0.0
+                )
+            ),
             smart_pacing=v.get("smart_pacing", True),
             smart_trim=v.get("smart_trim", False),
             color_grade=v.get("color_grade", "none"),
@@ -1126,8 +1192,26 @@ async def export(v, op, work, progress):
     srt = work / "subtitles.srt"
     include_subtitles = op.get("include_subtitles", True)
     if include_subtitles:
+        srt_scenes = []
+        for s in v["scenes"]:
+            vo = (s.get("voiceover") or "").strip()
+            dlg_raw = (s.get("dialogue") or "").strip()
+            if dlg_raw:
+                spoken_lines = []
+                for dl in dlg_raw.splitlines():
+                    dl = dl.strip()
+                    if not dl:
+                        continue
+                    _, sep, words = dl.partition(":")
+                    spoken = words.strip() if sep else dl
+                    if spoken:
+                        spoken_lines.append(spoken)
+                dlg_text = " ".join(spoken_lines).strip()
+                if dlg_text and dlg_text.casefold() not in vo.casefold():
+                    vo = f"{vo} {dlg_text}".strip() if vo else dlg_text
+            srt_scenes.append({**s, "voiceover": vo})
         composer.create_srt(
-            v["scenes"],
+            srt_scenes,
             str(srt),
             clip_durations=durations,
             media_paths=speech_sources,
@@ -1195,9 +1279,11 @@ async def export(v, op, work, progress):
             shutil.copy2(asset_path(vid, s["frame"]), images / f"scene_{idx}.webp")
     os.replace(final, directory(vid) / "final.mp4")
     try:
+        # Dùng merged.mp4 (trước bước burn_subtitles) để Smart Thumbnail sắc nét không bị dính chữ phụ đề ở chân khung hình
+        thumb_source = str(merged) if merged.is_file() else str(directory(vid) / "final.mp4")
         await asyncio.to_thread(
             composer.generate_smart_thumbnail,
-            str(directory(vid) / "final.mp4"),
+            thumb_source,
             str(directory(vid) / "thumbnail.jpg"),
             title=v.get("title") or "",
             aspect_ratio=v.get("aspect_ratio") or "16:9",

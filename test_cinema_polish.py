@@ -284,6 +284,8 @@ def test_partition_clip_segments_and_parallel_execution(tmp_path, monkeypatch):
 
     # Verify produce_clip_segments runs segments concurrently and keeps intra-segment order
     monkeypatch.setattr(batch, "BATCH_DIR", tmp_path / "batch_seg")
+    monkeypatch.setattr(batch, "QUEUE_FILE", tmp_path / "batch_seg" / "queue.json")
+    monkeypatch.setattr(batch, "QUEUE_BAK_FILE", tmp_path / "batch_seg" / "queue.bak.json")
     batch.BATCH_DIR.mkdir(parents=True, exist_ok=True)
     mgr = batch.BatchVideoManager()
     monkeypatch.setattr(batch, "BATCH_MANAGER", mgr)
@@ -322,6 +324,8 @@ def test_partition_clip_segments_and_parallel_execution(tmp_path, monkeypatch):
 def test_cinema_settings_bridge_shots_and_thumbnail_routes(tmp_path, monkeypatch):
     """Feature #6 & #7 routes: chapter-settings persistence, bridge-shots insertion, and thumbnail endpoint."""
     monkeypatch.setattr(batch, "BATCH_DIR", tmp_path / "batch")
+    monkeypatch.setattr(batch, "QUEUE_FILE", tmp_path / "batch" / "queue.json")
+    monkeypatch.setattr(batch, "QUEUE_BAK_FILE", tmp_path / "batch" / "queue.bak.json")
     batch.BATCH_DIR.mkdir(parents=True, exist_ok=True)
     mgr = batch.BatchVideoManager()
     monkeypatch.setattr(batch, "BATCH_MANAGER", mgr)
@@ -424,3 +428,65 @@ def test_cinema_settings_bridge_shots_and_thumbnail_routes(tmp_path, monkeypatch
     assert t200.status_code == 200
     assert t200.headers["content-type"].startswith("image/jpeg")
     assert len(t200.content) > 1000
+
+
+def test_third_person_narration_vs_character_dialogue_separation(tmp_path):
+    """Đảm bảo cảnh kể ngôi thứ 3 KHÔNG kích hoạt nhân vật mở miệng nói lời kể,
+    còn cảnh có dialogue nhân vật chỉ khớp môi đúng nhân vật đang thoại."""
+    import batch_engine
+
+    # 1. Cảnh kể ngôi thứ 3 (không có dialogue, chỉ có voiceover & danh sách nhân vật)
+    narr_scene = {
+        "index": 3,
+        "prompt": "Thi Sách sitting by a low table telling stories of the northern lands while Trưng Trắc pours tea",
+        "voiceover": "Bữa cơm chiều ấm áp, Thi Sách kể chuyện phương Bắc. Cả nhà lắng nghe.",
+        "characters": ["Thi Sách", "Trưng Trắc"],
+    }
+    built_tts = batch_engine.build_scene_prompt(narr_scene, None, "vi-VN-HoaiMyNeural", "tts")
+    assert built_tts["speech_mode"] == "offscreen_narration"
+    assert built_tts["has_dialogue"] is False
+    assert "closed mouths" in built_tts["prompt"].lower()
+    assert "lip articulation" not in built_tts["prompt"].lower()
+    assert "telling stories" not in built_tts["prompt"].lower()
+    assert "Bữa cơm chiều ấm áp" not in built_tts["prompt"]
+
+    # 2. Cảnh kể ngôi thứ 3 ở chế độ AI Voice: tách rõ giọng kể ngoài hình, nhân vật diễn câm
+    built_ai = batch_engine.build_scene_prompt(narr_scene, None, "ai_voice", "ai_voice")
+    assert built_ai["speech_mode"] == "offscreen_narration"
+    assert "off-screen third-person" in built_ai["prompt"].lower()
+    assert "closed mouths" in built_ai["prompt"].lower()
+    assert "the character speaking with natural voice" not in built_ai["prompt"].lower()
+
+    # 3. Cảnh CÓ thoại nhân vật trực tiếp: chỉ nhân vật thoại khớp môi, người còn lại giữ kín miệng
+    dlg_scene = {
+        "index": 4,
+        "prompt": "Trưng Trắc raises her sword by the Hát River while Trưng Nhị stands beside her",
+        "voiceover": "Trước ba quân, Trưng Trắc cất lời thề.",
+        "dialogue": "Trưng Trắc: Một xin rửa sạch nước thù!",
+        "characters": ["Trưng Trắc", "Trưng Nhị"],
+    }
+    built_dlg = batch_engine.build_scene_prompt(dlg_scene, None, "vi-VN-HoaiMyNeural", "tts")
+    assert built_dlg["speech_mode"] == "onscreen_dialogue"
+    assert built_dlg["has_dialogue"] is True
+    assert "Trưng Trắc" in built_dlg["prompt"]
+    assert "lip articulation" in built_dlg["prompt"].lower()
+    assert "non-speaking characters listen silently with closed mouths" in built_dlg["prompt"].lower()
+
+    # 4. Vocal-suppression ambience mix trong composer.compose_scene_video chạy mượt không lỗi FFmpeg
+    clip = tmp_path / "clip_amb.mp4"
+    voice = tmp_path / "narrator.mp3"
+    out = tmp_path / "mixed_narrated.mp4"
+    _make_video(clip, duration=3.0)
+    _make_audio(voice, duration=3.2)
+    composer.compose_scene_video(
+        str(clip),
+        str(voice),
+        str(out),
+        target_duration=3.2,
+        aspect_ratio="9:16",
+        quality="720p",
+        ambience_volume=0.18,
+    )
+    assert out.is_file() and out.stat().st_size > 1000
+    assert composer.get_media_duration(str(out)) >= 3.0
+

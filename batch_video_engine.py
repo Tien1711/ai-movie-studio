@@ -1620,10 +1620,10 @@ def _cast_reference(characters):
 
 
 STORY_AMBIENCE_DIRECTION = (
-    "Generate audible location ambience and natural Foley synchronized to the visible action, "
-    "such as footsteps, cloth, tools, wind and indistinct crowd murmur when appropriate. "
-    "Background voices are unintelligible. No spoken words, narration, singing or music. "
-    "On-screen characters do not speak or mouth sentences."
+    "Pure environmental Foley and location ambience synchronized to visible motion "
+    "(footsteps, cloth rustle, wind, nature, tools, distant atmosphere). "
+    "Silent physical acting: every on-screen character keeps their mouth closed and communicates "
+    "strictly through facial expressions, eyes, posture, and gestures."
 )
 
 
@@ -1649,10 +1649,13 @@ async def _render_story_clip(video, scene, index, directory, destination, cancel
             identity_guide = "Match the closing frame of the preceding shot: screen direction, lighting and positions."
     style = BATCH_VISUAL_STYLES.get(video.get("visual_style"), {}).get("prompt_suffix") or ""
 
-    sound_direction = "" if scene.get("dialogue") else STORY_AMBIENCE_DIRECTION
+    has_dialogue = bool((scene.get("dialogue") or "").strip())
+    sound_direction = "" if has_dialogue else STORY_AMBIENCE_DIRECTION
     shot = {
         **scene, "size": video["aspect_ratio"], "reference_image": reference,
-        "keep_reference": bool(reference), "require_narration": True, "offscreen_narration": not scene.get("dialogue"),
+        "keep_reference": bool(reference), "require_narration": True,
+        "offscreen_narration": not has_dialogue,
+        "voice_mode": "dialogue" if has_dialogue else "narration",
         "duration": scene["duration"] if scene.get("raw_studio") or scene.get("approved_frame") else min((5, 6, 8, 10), key=lambda d: abs(d - scene.get("duration", 6))),
         "prompt": (f"{scene['prompt']}\n{sound_direction}\n"
                    "One continuous moving shot. Show the action unfolding from its start to its consequence. "

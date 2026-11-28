@@ -1049,11 +1049,19 @@ def compose_scene_video(
         audio_mapping = ["-map", "1:a:0", "-af", speech_filter]
         if ambience_volume > 0 and check_video_has_audio(input_video):
             amb_tempo = f"atempo={1.0 / stretch_factor:.4f}," if stretch_factor > 1.005 else ""
+            # Scoop human speech formants (600–3500 Hz) & duck clip ambience under TTS narrator
+            # so any accidental AI-generated voice never fights 3rd-person narration.
+            vocal_notch = (
+                "highpass=f=80,"
+                "equalizer=f=1100:t=q:w=1.0:g=-14,"
+                "equalizer=f=2600:t=q:w=1.2:g=-12,"
+            )
             mix = (
-                f"[1:a]{speech_filter}[speech];"
+                f"[1:a]{speech_filter},asplit=2[speech_out][speech_sc];"
                 f"[0:a]{amb_tempo}aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                f"volume={ambience_volume},apad[ambience];"
-                "[speech][ambience]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=false[audio]"
+                f"{vocal_notch}volume={ambience_volume},apad[amb_raw];"
+                "[amb_raw][speech_sc]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=250[ambience];"
+                "[speech_out][ambience]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95:level=false[audio]"
             )
             audio_mapping = ["-filter_complex", mix, "-map", "[audio]"]
         # Có file lồng tiếng riêng (TTS voiceover / dialogue): ghép đè scene_audio vào video

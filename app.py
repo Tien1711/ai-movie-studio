@@ -6411,9 +6411,14 @@ def _selected_cast(ids):
 
 
 class StudioBeat(BaseModel):
+    title: str = Field(default="", max_length=200)
     setting: str = Field(default="", max_length=500)
     prompt: str = Field(min_length=1, max_length=3000)
     voiceover: str = Field(min_length=1, max_length=3000)
+    dialogue: str = Field(default="", max_length=3000)
+    characters: List[str] = Field(default_factory=list, max_length=30)
+    new_segment: bool = False
+    transition_out: Literal["dissolve", "cut", "match cut"] = "dissolve"
     duration: Literal[5, 6, 8, 10, 12] = 6
 
 

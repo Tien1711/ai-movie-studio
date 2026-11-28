@@ -419,6 +419,13 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str,
             dur_meta = cache_path.with_suffix(".dur")
             if cache_path.exists() and cache_path.stat().st_size > 0:
                 shutil.copy2(cache_path, output_path)
+                try:
+                    from tts_manager import word_timings_path as _wtp
+                    cached_words = _wtp(str(cache_path))
+                    if cached_words.is_file():
+                        shutil.copy2(cached_words, _wtp(output_path))
+                except Exception:
+                    pass
                 # Doc duration tu metadata de nhat quan (tranh sai lech do ffprobe encode overhead)
                 if dur_meta.exists():
                     try:
@@ -451,6 +458,13 @@ async def generate_tts_with_status(text: str, voice: str, output_path: str,
             try:
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     _tts_cache_store(cache_path, output_path)
+                    try:
+                        from tts_manager import word_timings_path as _wtp
+                        out_words = _wtp(output_path)
+                        if out_words.is_file():
+                            shutil.copy2(out_words, _wtp(str(cache_path)))
+                    except Exception:
+                        pass
                     # Luu kem duration metadata de cache hit tra duration nhat quan
                     try:
                         dur_meta = cache_path.with_suffix(".dur")
@@ -536,8 +550,34 @@ async def generate_multi_voice_tts_with_status(
 
     if len(seg_files) == 1:
         shutil.copy2(seg_files[0], output_path)
+        try:
+            from tts_manager import word_timings_path as _wtp
+            if _wtp(seg_files[0]).is_file():
+                shutil.copy2(_wtp(seg_files[0]), _wtp(output_path))
+        except Exception:
+            pass
         actual_dur = await get_media_duration_async(output_path)
         return (actual_dur if actual_dur > 0.3 else total_duration), tts_failed, tts_error
+
+    # Ghép mốc thời gian từng từ (.words.json) nếu có cho Karaoke khớp âm tiết
+    merged_words = []
+    try:
+        from tts_manager import word_timings_path as _wtp
+        cursor = 0.0
+        for fp, seg_dur in zip(seg_files, durations):
+            wp = _wtp(fp)
+            if wp.is_file():
+                raw_w = json.loads(wp.read_text(encoding="utf-8"))
+                for item in raw_w:
+                    if isinstance(item, dict) and item.get("word"):
+                        merged_words.append({
+                            "word": item["word"],
+                            "start": round(float(item.get("start", 0.0)) + cursor, 4),
+                            "end": round(float(item.get("end", 0.0)) + cursor, 4),
+                        })
+            cursor += max(0.0, float(seg_dur or 0.0))
+    except Exception:
+        merged_words = []
 
     # Ghép nhiều đoạn bằng ffmpeg concat (chống lỗi đường dẫn Windows)
     concat_list = os.path.join(tmp_dir, "concat.txt")
@@ -561,6 +601,17 @@ async def generate_multi_voice_tts_with_status(
     for fp in seg_files:
         try: os.remove(fp)
         except: pass
+        try:
+            from tts_manager import word_timings_path as _wtp
+            _wtp(fp).unlink(missing_ok=True)
+        except Exception:
+            pass
+    if merged_words:
+        try:
+            from tts_manager import word_timings_path as _wtp
+            _wtp(output_path).write_text(json.dumps(merged_words, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
     actual_dur = await get_media_duration_async(output_path)
     return (actual_dur if actual_dur > 0.3 else total_duration), tts_failed, tts_error
@@ -1161,6 +1212,61 @@ async def generate_keyframe_image(
         raise RuntimeError(f"Muse2API trả về HTTP {r.status_code}: {r.text[:300]}")
 
 
+_OFFSCREEN_SPEECH_VERB_REWRITES = (
+    (r"\btelling\s+stories\s+(?:of|about)\b", "gesturing warmly over a scroll illustrating"),
+    (r"\btelling\s+(?:a\s+)?stor(?:y|ies)\b", "gesturing warmly with expressive eyes"),
+    (r"\b(?:speaking|talking|chatting|conversing)\s+(?:to|with)\b", "facing with expressive glances toward"),
+    (r"\b(?:lecturing|explaining|addressing|declaring|proclaiming|announcing|shouting|yelling)\b", "gesturing intently with fierce resolve"),
+    (r"\b(?:kể\s+chuyện|nói\s+chuyện|trò\s+chuyện|giảng\s+giải|phát\s+biểu)\b", "ra hiệu ấm áp bằng ánh mắt và cử chỉ"),
+    (r"\b(?:hô\s+vang|thét\s+lớn|quát\s+lớn|tuyên\s+bố)\b", "vung tay dứt khoát đầy khí thế"),
+)
+
+
+def sanitize_offscreen_visual_prompt(prompt: str) -> str:
+    """Chuyển các động từ dễ kích hoạt AI mở miệng nói sang hành động hình thể im lặng cho cảnh kể ngôi thứ 3."""
+    out = prompt or ""
+    for pattern, repl in _OFFSCREEN_SPEECH_VERB_REWRITES:
+        out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
+    return out
+
+
+def _dialogue_speakers(dialogue: str) -> List[str]:
+    names: List[str] = []
+    for line in (dialogue or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        speaker, sep, words = line.partition(":")
+        if sep and speaker.strip() and words.strip():
+            cname = speaker.strip()
+            if cname not in names:
+                names.append(cname)
+    return names
+
+
+def classify_scene_speech_mode(
+    scene: Dict[str, Any],
+    voiceover: str = "",
+    voice_segments: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Phân loại rạch ròi vai trò âm thanh của cảnh:
+    - 'onscreen_dialogue': nhân vật thực sự thoại trên hình (có dialogue / voice_segments / voice_mode=dialogue / single speaker).
+    - 'offscreen_narration': giọng kể ngôi thứ 3 ngoài khung hình (nhân vật trên hình diễn im lặng, không mấp máy môi).
+    - 'ambient_only': cảnh thuần âm thanh môi trường, không thoại/không lời kể.
+    """
+    dialogue = (scene.get("dialogue") or "").strip()
+    explicit_mode = (scene.get("voice_mode") or "").strip().lower()
+    if scene.get("offscreen_narration") is True or explicit_mode == "narration":
+        return "offscreen_narration" if (voiceover or dialogue or voice_segments) else "ambient_only"
+    if dialogue or voice_segments or explicit_mode == "dialogue" or scene.get("speak_onscreen") is True:
+        return "onscreen_dialogue"
+    if scene.get("character") and voiceover:
+        return "onscreen_dialogue"
+    if voiceover:
+        return "offscreen_narration"
+    return "ambient_only"
+
+
 def build_scene_prompt(
     scene: Dict[str, Any],
     style_locks: Optional[Dict[str, str]] = None,
@@ -1180,6 +1286,7 @@ def build_scene_prompt(
     """
     raw_prompt = scene.get("prompt", "")
     voiceover = scene.get("voiceover", "")
+    dialogue_raw = (scene.get("dialogue") or "").strip()
     scene_voice = scene.get("voice") or voice
     scene_voice_mode = scene.get("voice_mode") or voice_mode or "tts"
     is_ai_voice = bool(
@@ -1207,37 +1314,66 @@ def build_scene_prompt(
             cname = (seg.get("character") or seg.get("speaker") or "").strip()
             if cname and cname not in spk_names:
                 spk_names.append(cname)
+    for cname in _dialogue_speakers(dialogue_raw):
+        if cname not in spk_names:
+            spk_names.append(cname)
     if not spk_names and scene.get("character"):
         spk_names.append(scene.get("character").strip())
 
+    speech_mode = classify_scene_speech_mode(scene, voiceover, voice_segments)
     p_lower = prompt.lower()
-    has_dialogue = bool(voiceover or voice_segments)
+    has_dialogue = speech_mode == "onscreen_dialogue"
+
+    if speech_mode == "offscreen_narration":
+        prompt = sanitize_offscreen_visual_prompt(prompt)
 
     if is_ai_voice:
-        # 🤖 CHẾ ĐỘ ĐƯA THOẠI VÀO PROMPT ĐỂ AI TỰ SINH TIẾNG NHÂN VẬT & ÂM THANH
-        if voice_segments and len(voice_segments) > 0:
-            dialogue_parts = []
-            for seg in voice_segments:
-                cname = (seg.get("character") or seg.get("speaker") or "").strip()
-                txt = (seg.get("text") or "").strip()
-                if cname and txt:
-                    dialogue_parts.append(f"{cname} says '{txt}'")
-                elif txt:
-                    dialogue_parts.append(f"character says '{txt}'")
-            dialogue_clause = ", ".join(dialogue_parts)
-            prompt = f"{prompt}, audible sound design and native speech: characters speaking naturally with synchronized realistic vocal audio and clear ambient atmosphere: {dialogue_clause}"
-        elif voiceover:
-            spk_clause = f"the character {spk_names[0]}" if spk_names else "the character"
-            prompt = f"{prompt}, audible sound design and native speech: {spk_clause} speaking with natural voice '{voiceover}', synchronized realistic vocal audio and clear ambient atmosphere"
+        # 🤖 CHẾ ĐỘ AI TỰ SINH ÂM THANH GỐC
+        if speech_mode == "onscreen_dialogue":
+            if voice_segments and len(voice_segments) > 0:
+                dialogue_parts = []
+                for seg in voice_segments:
+                    cname = (seg.get("character") or seg.get("speaker") or "").strip()
+                    txt = (seg.get("text") or "").strip()
+                    if cname and txt:
+                        dialogue_parts.append(f"{cname} says '{txt}'")
+                    elif txt:
+                        dialogue_parts.append(f"character says '{txt}'")
+                dialogue_clause = ", ".join(dialogue_parts)
+                prompt = (
+                    f"{prompt}, audible sound design and native speech: ONLY the speaking character(s) "
+                    f"move lips naturally with synchronized vocal audio ({dialogue_clause}); "
+                    "non-speaking characters listen silently with closed mouths; clear ambient atmosphere"
+                )
+            elif dialogue_raw:
+                prompt = (
+                    f"{prompt}, audible sound design and native speech: ONLY the named speaking character "
+                    f"delivers '{dialogue_raw}' with synchronized lip movement; other characters stay silent with closed mouths"
+                )
+            elif voiceover:
+                spk_clause = f"the character {spk_names[0]}" if spk_names else "the character"
+                prompt = f"{prompt}, audible sound design and native speech: {spk_clause} speaking with natural voice '{voiceover}', synchronized realistic vocal audio and clear ambient atmosphere"
+        elif speech_mode == "offscreen_narration" and voiceover:
+            prompt = (
+                f"{prompt}, off-screen third-person Vietnamese documentary voiceover reading '{voiceover}'; "
+                "all on-screen characters perform silent physical acting with closed mouths and never speak to camera; "
+                "pure environmental Foley and location ambience underneath"
+            )
         else:
             prompt = f"{prompt}, realistic synchronized sound design, clear natural ambient audio and Foley sound effects"
     else:
-        # 🎙️ CHẾ ĐỘ LỒNG TIẾNG TTS: Bổ sung chỉ thị khẩu hình (Lip-sync Articulation)
-        if scene.get("offscreen_narration"):
-            prompt += ", narration is off camera. Preserve the requested framing and natural action."
+        # 🎙️ CHẾ ĐỘ LỒNG TIẾNG TTS: Tách biệt tuyệt đối kể ngôi thứ 3 (im lặng trên hình) vs thoại nhân vật (khớp môi)
+        if speech_mode == "offscreen_narration":
+            if "closed mouth" not in p_lower and "silent physical acting" not in p_lower:
+                prompt += (
+                    ", silent physical acting with closed mouths and expressive eyes; "
+                    "characters act through movement, posture, and glances without speaking. "
+                    "Preserve the requested framing and natural action."
+                )
         elif has_dialogue and not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation", "talking with"]):
             spk_clause = f"the character {', '.join(spk_names)}" if spk_names else "the character"
-            prompt = f"{prompt}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue"
+            others_clause = " while non-speaking characters listen silently with closed mouths" if len(scene.get("characters") or []) > len(spk_names) else ""
+            prompt = f"{prompt}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue{others_clause}"
 
     return {
         "raw_prompt": raw_prompt,
@@ -1246,6 +1382,7 @@ def build_scene_prompt(
         "original_prompt": original_prompt,
         "prompt": prompt,
         "is_ai_voice": is_ai_voice,
+        "speech_mode": speech_mode,
         "scene_voice": scene_voice,
         "scene_voice_mode": scene_voice_mode,
         "voice_segments": voice_segments,
