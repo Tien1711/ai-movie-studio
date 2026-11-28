@@ -177,7 +177,7 @@ export class ChromeProfiles {
     return profile.id;
   }
 
-  poll(id, { tab, ready, protocol, needsApproval, mainChat }) {
+  poll(id, { tab, ready, protocol, needsApproval, mainChat, stage }) {
     if (typeof tab !== 'string' || !/^[a-f0-9-]{36}$/.test(tab)) {
       throw new RequestError(422, 'Tab Muse không hợp lệ.');
     }
@@ -186,7 +186,10 @@ export class ChromeProfiles {
       return { command: null };
     }
     this.online.set(id, { tab, ready: ready === true || !!existing?.leasedTo, protocol, mainChat: mainChat === true, seen: Date.now() });
-    if (existing?.leasedTo === tab) existing.needsApproval = needsApproval === true;
+    if (existing?.leasedTo === tab) {
+      existing.needsApproval = needsApproval === true;
+      if (typeof stage === 'string' && stage.trim()) existing.stage = stage.trim().slice(0, 140);
+    }
     if (!existing || existing.leasedTo || !this.readiness(id).ready) return { command: null };
     existing.leasedTo = tab;
     return { command: existing.command };
@@ -265,7 +268,12 @@ export class ChromeProfiles {
         const { online, ready, reload } = this.readiness(id);
         return { loggedIn: ready, composerReady: ready, browserRunning: online, reload };
       },
-      progress: () => this.pending.get(id)?.needsApproval ? 'Muse đang chờ bạn xác nhận trong tab Chrome.' : null,
+      progress: () => {
+        const job = this.pending.get(id);
+        if (!job) return null;
+        if (job.needsApproval) return 'Muse đang chờ bạn xác nhận trong tab Chrome.';
+        return job.stage || null;
+      },
       run: async (prompt, files, timeoutMs, kind) => {
         if (!this.readiness(id).ready) throw new RequestError(503, 'Mở tab Muse của Studio trong profile Chrome đã chọn.');
         if (this.pending.has(id)) throw new RequestError(409, 'Profile này đang xử lý yêu cầu Muse.');

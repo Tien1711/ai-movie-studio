@@ -92,6 +92,7 @@ async function handle(message, sender) {
       tab: message.tab, ready: message.ready === true,
       protocol: message.protocol, needsApproval: message.needsApproval === true,
       mainChat: message.mainChat === true,
+      ...(typeof message.stage === 'string' ? { stage: message.stage } : {}),
     }, link.token);
     if (result?.command) {
       await wakeTab(sender.tab.id);

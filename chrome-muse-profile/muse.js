@@ -218,12 +218,15 @@
     if (offset < (kind === 'image' ? 4096 : 100)) throw new Error('Tab Muse trả về tệp media rỗng hoặc icon nhỏ.');
   }
 
+  let liveStage = '';
+
   async function wakeSelf() {
     await chrome.runtime.sendMessage({ type: 'wake' }).catch(() => null);
   }
 
   async function run({ id, prompt, files, timeoutMs, kind, chatMode }) {
     const deadline = Date.now() + timeoutMs;
+    liveStage = 'Đang đánh thức tab Muse (' + document.visibilityState + ')';
     if (document.visibilityState !== 'visible' || !editor()) {
       await wakeSelf();
       await delay(350);
@@ -274,6 +277,7 @@
     );
     if (!sent) throw new Error('Muse chưa xác nhận đã gửi yêu cầu.');
 
+    liveStage = 'Đã gửi prompt, chờ Muse bắt đầu tạo ' + (kind || 'phản hồi');
     let activeSent = main ? sent : null;
     let trackedAnswers = [];
     let previous = '';
@@ -346,6 +350,8 @@
         && (!node.closest(MESSAGE) || inCurrentTurn(node)));
       if (notice) return { error: notice.innerText.trim() || 'Muse báo lỗi trong tab.' };
       const isGenerating = visible(document.querySelector(STOP));
+      liveStage = (isGenerating ? 'Muse đang tạo ' : 'Đang kiểm tra kết quả ') + (kind || 'chat')
+        + ' (vis=' + document.visibilityState + ', att=' + (hasAttachmentSlot ? 1 : 0) + ', src=' + (playerSource ? 1 : 0) + ')';
       const hasFile = kind && [...media, ...(reply.match(/https:\/\/muse\.ai\/files\/[^\s<>"'`()\[\]]+/g) || [])]
         .some(url => !previousLinks.has(url) && SHARE_EXTENSION[kind].test(new URL(url).pathname));
       if (kind) {
@@ -360,6 +366,7 @@
         }
         const settleMs = kind === 'image' ? 400 : 1200;
         if (playerSource && Date.now() - playerChanged >= settleMs) {
+          liveStage = 'Đang tải ' + kind + ' từ tab Muse về Studio...';
           try {
             await uploadMedia(id, playerSource, kind);
             return kind === 'video' ? { reply, media, videoUploaded: true } : { reply, media, mediaUploaded: true };
@@ -386,6 +393,7 @@
     return chrome.runtime.sendMessage({
       type: 'poll', tab, ready: !!editor(), protocol: 2, mainChat: true,
       needsApproval: visible(document.querySelector(APPROVAL)),
+      stage: liveStage,
     })
       .catch(() => null);
   }
@@ -405,6 +413,7 @@
       } catch (error) {
         result = { error: error.message };
       } finally {
+        liveStage = '';
         clearInterval(heartbeat);
       }
       for (let attempt = 0; attempt < 3; attempt++) {
