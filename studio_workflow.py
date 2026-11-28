@@ -1116,98 +1116,111 @@ def inspect_final(path):
 
 async def export(v, op, work, progress):
     vid = v["id"]
-    clips, durations, speech_sources, speed_factors = [], [], [], []
     narrated = op["action"] == "narrated"
     timing_mode = v.get("timing_mode") or "match_speech"
     strict_clip = timing_mode == "strict_clip"
-    for s in v["scenes"]:
-        if batch._BatchCancellation(vid).is_set():
-            raise asyncio.CancelledError()
-        idx = s["index"]
-        progress(idx, "Chuẩn hóa cảnh để ghép phim")
-        out = work / f"clip_{idx}.mp4"
-        speech = None
-        speech_dur = 0.0
-        if narrated:
-            if not s.get("speech"):
-                await produce(v, s, "speech", work, progress)
-            speech = asset_path(vid, s["speech"])
-            speech_dur = float(await asyncio.to_thread(media.get_media_duration, str(speech)) or 0.0)
-            if speech_dur > 0:
-                s["speech_duration"] = round(speech_dur, 2)
-        if (
-            s.get("approved")
-            and s.get("clip_frame") == s.get("frame")
-            and s.get("frame_approved")
-        ):
-            source = asset_path(vid, s["clip"])
-        elif (
-            narrated
-            and op["allow_stills"]
-            and s.get("frame_approved")
-            and not s.get("clip")
-        ):
-            dur = float(s["duration"]) if strict_clip else max(s["duration"], speech_dur)
-            source = work / f"still_{idx}.mp4"
-            if not batch._convert_image_and_audio_to_clip(
-                asset_path(vid, s["frame"]), None, dur, v["aspect_ratio"], source
+    scenes = v["scenes"]
+    width, height = qc.expected_resolution_for_size(v["aspect_ratio"], "1080p")
+    prep_workers = min(len(scenes) or 1, max(2, min(4, (os.cpu_count() or 4) // 2)))
+    sem = asyncio.Semaphore(prep_workers)
+    done_count = 0
+
+    async def _prepare_scene(s):
+        nonlocal done_count
+        async with sem:
+            if batch._BatchCancellation(vid).is_set():
+                raise asyncio.CancelledError()
+            idx = s["index"]
+            progress(idx, f"Chuẩn hóa cảnh {idx}/{len(scenes)} ({prep_workers} luồng song song)")
+            out = work / f"clip_{idx}.mp4"
+            speech = None
+            speech_dur = 0.0
+            if narrated:
+                if not s.get("speech"):
+                    await produce(v, s, "speech", work, progress)
+                speech = asset_path(vid, s["speech"])
+                speech_dur = float(await asyncio.to_thread(media.get_media_duration, str(speech)) or 0.0)
+                if speech_dur > 0:
+                    s["speech_duration"] = round(speech_dur, 2)
+            if (
+                s.get("approved")
+                and s.get("clip_frame") == s.get("frame")
+                and s.get("frame_approved")
             ):
-                raise ValueError(f"Lỗi dựng ảnh cảnh {idx}.")
-        else:
-            raise ValueError(f"Cảnh {idx} chưa được duyệt.")
-        spd = 1.0
-        if strict_clip and speech_dur > float(s["duration"]) * 1.01:
-            spd = min(1.35, speech_dur / float(s["duration"]))
-        speed_factors.append(spd)
-        await asyncio.to_thread(
-            composer.compose_scene_video,
-            str(source),
-            str(speech) if speech else None,
-            str(out),
-            target_duration=s["duration"],
-            aspect_ratio=v["aspect_ratio"],
-            quality="1080p",
-            ambience_volume=(
-                0.0
-                if (s.get("dialogue") or "").strip()
-                else (
-                    0.18
-                    if s.get("clip")
-                    and (
-                        batch.STORY_AMBIENCE_DIRECTION.rstrip(".") in (s.get("used_prompt") or "")
-                        or "Pure environmental Foley" in (s.get("used_prompt") or "")
-                        or "Generate audible location ambience" in (s.get("used_prompt") or "")
+                source = asset_path(vid, s["clip"])
+            elif (
+                narrated
+                and op["allow_stills"]
+                and s.get("frame_approved")
+                and not s.get("clip")
+            ):
+                dur = float(s["duration"]) if strict_clip else max(s["duration"], speech_dur)
+                source = work / f"still_{idx}.mp4"
+                if not await asyncio.to_thread(
+                    batch._convert_image_and_audio_to_clip,
+                    asset_path(vid, s["frame"]), None, dur, v["aspect_ratio"], source
+                ):
+                    raise ValueError(f"Lỗi dựng ảnh cảnh {idx}.")
+            else:
+                raise ValueError(f"Cảnh {idx} chưa được duyệt.")
+            spd = 1.0
+            if strict_clip and speech_dur > float(s["duration"]) * 1.01:
+                spd = min(1.35, speech_dur / float(s["duration"]))
+            await asyncio.to_thread(
+                composer.compose_scene_video,
+                str(source),
+                str(speech) if speech else None,
+                str(out),
+                target_duration=s["duration"],
+                aspect_ratio=v["aspect_ratio"],
+                quality="1080p",
+                ambience_volume=(
+                    0.0
+                    if (s.get("dialogue") or "").strip()
+                    else (
+                        0.18
+                        if s.get("clip")
+                        and (
+                            batch.STORY_AMBIENCE_DIRECTION.rstrip(".") in (s.get("used_prompt") or "")
+                            or "Pure environmental Foley" in (s.get("used_prompt") or "")
+                            or "Generate audible location ambience" in (s.get("used_prompt") or "")
+                        )
+                        else 0.0
                     )
-                    else 0.0
+                ),
+                smart_pacing=v.get("smart_pacing", True),
+                smart_trim=v.get("smart_trim", False),
+                color_grade=v.get("color_grade", "none"),
+                watermark_text=v.get("watermark_text", ""),
+                timing_mode=timing_mode,
+            )
+            target_duration = (
+                float(s["duration"])
+                if strict_clip
+                else max(s["duration"], speech_dur if speech else 0)
+            )
+            result = await asyncio.to_thread(
+                qc.qc_clip, str(out), target_duration, width, height, composer.TARGET_FPS
+            )
+            if not result["passed"] and not s.get("qc_accepted"):
+                s.update(qc=result, approved=False)
+                batch.BATCH_MANAGER.update_video(
+                    vid, {"scenes": v["scenes"], **INVALID_FINAL}
                 )
-            ),
-            smart_pacing=v.get("smart_pacing", True),
-            smart_trim=v.get("smart_trim", False),
-            color_grade=v.get("color_grade", "none"),
-            watermark_text=v.get("watermark_text", ""),
-            timing_mode=timing_mode,
-        )
-        speech_sources.append(str(speech or out))
-        width, height = qc.expected_resolution_for_size(v["aspect_ratio"], "1080p")
-        target_duration = (
-            float(s["duration"])
-            if strict_clip
-            else max(s["duration"], speech_dur if speech else 0)
-        )
-        result = await asyncio.to_thread(
-            qc.qc_clip, str(out), target_duration, width, height, composer.TARGET_FPS
-        )
-        if not result["passed"] and not s.get("qc_accepted"):
-            s.update(qc=result, approved=False)
-            batch.BATCH_MANAGER.update_video(
-                vid, {"scenes": v["scenes"], **INVALID_FINAL}
-            )
-            raise ValueError(
-                f"Cảnh {idx} không đạt QC trước khi ghép: "
-                + ", ".join(result["issues"])
-            )
-        clips.append(str(out))
-        durations.append(media.get_media_duration(str(out)))
+                raise ValueError(
+                    f"Cảnh {idx} không đạt QC trước khi ghép: "
+                    + ", ".join(result["issues"])
+                )
+            out_dur = await asyncio.to_thread(media.get_media_duration, str(out))
+            done_count += 1
+            progress(idx, f"Đã chuẩn hóa xong {done_count}/{len(scenes)} cảnh")
+            return str(out), out_dur, str(speech or out), spd
+
+    prepared = await asyncio.gather(*(_prepare_scene(s) for s in scenes))
+    clips = [item[0] for item in prepared]
+    durations = [item[1] for item in prepared]
+    speech_sources = [item[2] for item in prepared]
+    speed_factors = [item[3] for item in prepared]
     merged = work / "merged.mp4"
     transitions = [
         (s.get("transition_out") or "dissolve") if narrated else "cut"

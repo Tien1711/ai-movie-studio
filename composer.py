@@ -930,17 +930,17 @@ def compose_scene_video(
         preset = "veryfast"
     elif q == "1080p":
         w, h = QUALITY_PROFILES["1080p"]["res"][ar_key]
-        crf = "18"
-        preset = "medium"
+        crf = "19"
+        preset = "superfast"
     elif q == "4k":
         w, h = QUALITY_PROFILES["4k"]["res"][ar_key]
-        crf = "16"
-        preset = "slow"
+        crf = "17"
+        preset = "veryfast"
     else:
         # Default 720p
         w, h = QUALITY_PROFILES["720p"]["res"][ar_key]
-        crf = "22"
-        preset = "fast"
+        crf = "21"
+        preset = "superfast"
 
     # Tính toán thời lượng chuẩn: giữ ít nhất thời lượng đầy đủ của video gốc (không lãng phí AI render)
     vid_dur = get_media_duration(scene_video)
@@ -1868,7 +1868,7 @@ def burn_subtitles(
         "-vf", vf,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
         "-pix_fmt", "yuv420p",
-        "-threads", "4",
+        "-threads", "0",
         "-c:a", "copy",
         "-progress", "pipe:1",
         out_base,
