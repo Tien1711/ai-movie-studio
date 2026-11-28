@@ -252,6 +252,12 @@ async def lifespan(app: FastAPI):
         load_all_persisted_jobs()
     except Exception as exc:  # startup không được chết vì job_state hỏng
         logger.warning("Không load được persisted jobs lúc startup: %s", exc)
+    try:
+        from batch_video_engine import start_batch_runtime
+
+        await asyncio.to_thread(start_batch_runtime)
+    except Exception as exc:
+        logger.warning("Không thể khởi động lại hàng đợi Batch Video: %s", exc)
     yield
     client = getattr(app.state, "http_client", None)
     if client is not None:

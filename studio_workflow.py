@@ -28,7 +28,7 @@ from consistency import (
     resolve_scene_cast,
     run_consistency_checks,
 )
-from muse_connection import current_muse_affinity, muse_capacity_from_accounts
+from muse_connection import current_muse_affinity, muse_affinity_scope, muse_capacity_from_accounts
 from muse_voice import REMOTE_DELIVERY, narrator_text, remote_speaker_names, scene_voice_prompt, voice_turn_blocks
 
 BUSY = {"queued", "running"}
@@ -504,6 +504,10 @@ def parse_llm_json(raw: str):
     )
 
 
+class MuseChatUnavailable(ValueError):
+    """A temporary connection or capacity failure in Muse Chat."""
+
+
 async def ask_json(system, user, reference_image=None, response_parser=parse_llm_json):
     import httpx
 
@@ -529,9 +533,11 @@ async def ask_json(system, user, reference_image=None, response_parser=parse_llm
             )
             res.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise ValueError(
+            raise MuseChatUnavailable(
                 "Muse phản hồi quá thời gian chờ. Hãy bấm 'Viết tiếp kịch bản' để thử lại."
             ) from exc
+        except httpx.TransportError as exc:
+            raise MuseChatUnavailable("Mất kết nối với Muse. Hãy thử lại.") from exc
         except httpx.HTTPStatusError as exc:
             detail = ""
             try:
@@ -540,7 +546,8 @@ async def ask_json(system, user, reference_image=None, response_parser=parse_llm
                     detail = str(body.get("error") or body.get("detail") or "").strip()
             except ValueError:
                 detail = ""
-            raise ValueError(
+            error_type = MuseChatUnavailable if exc.response.status_code in (408, 429, 502, 503, 504) else ValueError
+            raise error_type(
                 detail
                 or f"Muse trả lỗi HTTP {exc.response.status_code}. Hãy kiểm tra tab Muse và thử lại."
             ) from exc
@@ -1541,6 +1548,26 @@ def comic_page_file(vid, number, url):
     return path
 
 
+async def ask_comic_vision(system, user, reference, number, progress, cancel, affinity):
+    for delay in (4, 10, None):
+        if cancel.is_set():
+            raise asyncio.CancelledError()
+        try:
+            with muse_affinity_scope(affinity):
+                result = await ask_json(
+                    system, user, reference_image=reference,
+                    response_parser=comic_pipeline.parse_vision_rows,
+                )
+            return result, affinity
+        except MuseChatUnavailable:
+            if delay is None:
+                raise
+            # A new affinity lets the gateway lease another idle profile.
+            affinity = uuid.uuid4().hex
+            progress(number, f"Muse chưa sẵn sàng. Thử lại sau {delay} giây.")
+            await asyncio.sleep(delay)
+
+
 async def analyze_comic_pages(video, progress):
     vid = video["id"]
     manager = batch.BATCH_MANAGER
@@ -1560,29 +1587,39 @@ async def analyze_comic_pages(video, progress):
     ]
     cast = video.get("cast", [])
     settings = video.get("comic_settings", {})
+    affinity = uuid.uuid4().hex
     for number, url in enumerate(pages[completed:], completed + 1):
         if cancel.is_set():
             raise asyncio.CancelledError()
         progress(number, f"Đọc và tách khung, tách thoại trang {number}/{len(pages)}")
         source = await asyncio.to_thread(comic_page_file, vid, number, url)
         reference = await asyncio.to_thread(comic_pipeline.load_reference, [source])
-        rows = await ask_json(
-            comic_pipeline.PAGE_INSTRUCTIONS,
-            comic_pipeline.page_context(number, video.get("title", ""), cast, settings),
-            reference_image=reference,
-            response_parser=comic_pipeline.parse_vision_rows,
-        )
+        detection = source.with_suffix(".panels.json")
+        try:
+            rows = json.loads(detection.read_text(encoding="utf-8")) if detection.is_file() else None
+        except (OSError, ValueError):
+            rows = None
+        if rows is None:
+            rows, affinity = await ask_comic_vision(
+                comic_pipeline.PAGE_INSTRUCTIONS,
+                comic_pipeline.page_context(number, video.get("title", ""), cast, settings),
+                reference, number, progress, cancel, affinity,
+            )
         if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+            detection.unlink(missing_ok=True)
             raise ValueError(f"Muse chưa xác định được đầy đủ các khung ở trang {number}.")
+        staged = detection.with_suffix(".tmp")
+        staged.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        os.replace(staged, detection)
         with Image.open(source) as page:
             requests = comic_pipeline.profiles_needed(rows, cast, settings, comic_pipeline.is_colored(page))
             profiles = []
             if any(requests.values()):
-                profiles = await ask_json(
+                progress(number, f"Đối chiếu nhân vật và hồ sơ màu trang {number}/{len(pages)}")
+                profiles, affinity = await ask_comic_vision(
                     comic_pipeline.PROFILE_INSTRUCTIONS,
                     json.dumps({"chapter": video.get("title", ""), **requests}, ensure_ascii=False),
-                    reference_image=reference,
-                    response_parser=comic_pipeline.parse_vision_rows,
+                    reference, number, progress, cancel, affinity,
                 )
                 if not isinstance(profiles, list) or any(not isinstance(profile, dict) for profile in profiles):
                     raise ValueError(f"Trang {number}: Muse chưa trả đúng hồ sơ màu.")
@@ -1591,9 +1628,13 @@ async def analyze_comic_pages(video, progress):
                 "characters": [profile for profile in profiles if profile.get("kind") == "character"],
                 "settings": [profile for profile in profiles if profile.get("kind") == "setting"],
             }
-            panels, cast, settings = comic_pipeline.parse_page(
-                response, page, number, cast, settings, video["voice"]
-            )
+            try:
+                panels, cast, settings = comic_pipeline.parse_page(
+                    response, page, number, cast, settings, video["voice"]
+                )
+            except ValueError:
+                detection.unlink(missing_ok=True)
+                raise
         for panel, scene in panels:
             panel_asset = new_asset(vid, "webp")
             panel.save(panel_asset, "WEBP", lossless=True)
@@ -1607,6 +1648,7 @@ async def analyze_comic_pages(video, progress):
         if cancel.is_set() or not manager.update_video(vid, updates):
             raise asyncio.CancelledError()
         video.update(updates)
+        detection.unlink(missing_ok=True)
 
 
 async def review_comic_image(paths, instruction, locks):

@@ -66,6 +66,43 @@ def test_chat_preserves_unescaped_dialogue_quotes_without_accepting_partial_page
         comic.parse_vision_rows(reply.rsplit(",", 1)[0])
 
 
+def test_comic_vision_retries_temporary_browser_failure_but_not_bad_content(monkeypatch):
+    panels = [panel([0, 0, 1, 1])]
+    replies = iter([wf.MuseChatUnavailable("browser disconnected"), panels])
+    affinities = []
+
+    async def reply(*args, **kwargs):
+        affinities.append(wf.current_muse_affinity())
+        result = next(replies)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    provider = AsyncMock(side_effect=reply)
+    sleep = AsyncMock()
+    monkeypatch.setattr(wf, "ask_json", provider)
+    monkeypatch.setattr(wf.asyncio, "sleep", sleep)
+    progress = []
+    cancel = SimpleNamespace(is_set=lambda: False)
+    with wf.muse_affinity_scope("bv_film"):
+        result, affinity = asyncio.run(wf.ask_comic_vision(
+            "read panels", "page 12", "reference", 12, lambda *step: progress.append(step), cancel, "first"
+        ))
+        assert result == panels
+        assert affinities == ["first", affinity] and affinity != "first"
+        assert wf.current_muse_affinity() == "bv_film"
+    assert provider.await_count == 2
+    assert provider.await_args_list[0] == provider.await_args_list[1]
+    assert progress[0][0] == 12
+    sleep.assert_awaited_once_with(4)
+
+    provider.reset_mock(side_effect=True)
+    provider.side_effect = ValueError("Invalid panel data")
+    with pytest.raises(ValueError, match="Invalid panel data"):
+        asyncio.run(wf.ask_comic_vision("read", "page 12", "reference", 12, lambda *_: None, cancel, "first"))
+    assert provider.await_count == 1
+
+
 def test_comic_worker_resumes_page_checkpoints_then_renders_every_panel(tmp_path, monkeypatch):
     vid = "bv_12345678"
     monkeypatch.setattr(wf.batch, "BATCH_DIR", tmp_path)
@@ -89,18 +126,23 @@ def test_comic_worker_resumes_page_checkpoints_then_renders_every_panel(tmp_path
 
     monkeypatch.setattr(wf.media, "_browser_image_from_url", download)
     first = page([panel([.5, 0, 1, 1]), panel([0, 0, .5, 1])], "red coat", "gray stone")
-    second = page([panel([0, 0, 1, 1])], "red coat", "gray stone")
+    second = page([dict(panel([0, 0, 1, 1]), setting="Market")], "red coat", "gray stone")
     profiles = [
         *(dict(profile, kind="character") for profile in first["characters"]),
         *(dict(profile, kind="setting") for profile in first["settings"]),
     ]
-    provider = AsyncMock(side_effect=[first["panels"], profiles, ValueError("Vision timed out"), second["panels"]])
+    provider = AsyncMock(side_effect=[
+        first["panels"], profiles, second["panels"], ValueError("Vision timed out"),
+        [{"kind": "setting", "name": "Market", "colors": "red stalls"}],
+    ])
     monkeypatch.setattr(wf, "ask_json", provider)
     progress = lambda *_: None
     with pytest.raises(ValueError, match="timed out"):
         asyncio.run(wf.analyze_comic_pages(video, progress))
     assert video["comic_pages_done"] == 1
     assert len(video["scenes"]) == 2
+    detection = tmp_path / vid / "comic_pages" / "002.panels.json"
+    assert detection.is_file()
 
     async def color(_, shot, *args):
         assert wf.asset_path(vid, shot["comic_panel"]).is_file()
@@ -116,6 +158,8 @@ def test_comic_worker_resumes_page_checkpoints_then_renders_every_panel(tmp_path
     monkeypatch.setattr(wf, "export", export)
     assert asyncio.run(wf.render_comic(video, {}, tmp_path, progress)) == {"ok": True}
     assert receipts == ["first", "second"]
+    assert not detection.exists()
+    assert provider.await_count == 5
     assert [(s["comic_page"], s["comic_panel_number"]) for s in video["scenes"]] == [(1, 1), (1, 2), (2, 1)]
     assert all(s["approved"] for s in video["scenes"])
     assert export.await_args.args[1]["action"] == "narrated"

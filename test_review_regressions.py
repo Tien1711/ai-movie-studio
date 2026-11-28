@@ -1,5 +1,8 @@
 import asyncio
+import json
+import os
 import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -123,10 +126,33 @@ def test_manual_compose_blocks_resume_and_cancels_active_process(jobs, monkeypat
 
 def test_batch_startup_starts_existing_queued_jobs(monkeypatch):
     started = []
+    monkeypatch.setattr(batch, "_UNDER_PYTEST", False)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "_recover_interrupted_jobs", lambda: started.append("recover") or 1)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "recovered_on_init", 0)
     monkeypatch.setattr(batch.BATCH_MANAGER, "_read_queue", lambda: [{"status": "queued"}])
-    monkeypatch.setattr(batch, "start_batch_worker", lambda: started.append(True))
-    batch.start_pending_batch_worker()
-    assert started == [True]
+    monkeypatch.setattr(batch, "start_batch_worker", lambda: started.append("worker"))
+    batch.start_batch_runtime()
+    assert started == ["recover", "worker"]
+    assert batch.BATCH_MANAGER.recovered_on_init == 1
+
+
+def test_importing_batch_engine_does_not_recover_a_running_comic(tmp_path):
+    source = Path(batch.__file__)
+    shutil.copyfile(source, tmp_path / source.name)
+    queue = tmp_path / "workspace" / "_batch_videos" / "batch_queue.json"
+    queue.parent.mkdir(parents=True)
+    active = {
+        "videos": [{"id": "bv_runningcomic", "status": "running", "guided": True,
+                    "operation": {"action": "comic", "active": ["comic"]}}],
+    }
+    queue.write_text(json.dumps(active), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(source.parent)}
+    env.pop("PYTEST_CURRENT_TEST", None)
+    subprocess.run(
+        [sys.executable, "-c", "import batch_video_engine"],
+        cwd=tmp_path, env=env, check=True, capture_output=True, timeout=15,
+    )
+    assert json.loads(queue.read_text(encoding="utf-8")) == active
 
 
 def test_burn_in_failure_does_not_publish_a_video(tmp_path, monkeypatch):

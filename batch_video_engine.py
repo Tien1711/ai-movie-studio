@@ -2105,10 +2105,13 @@ def start_pending_batch_worker():
 
 
 _UNDER_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
-BATCH_MANAGER = BatchVideoManager(recover_on_init=not _UNDER_PYTEST)
-if not _UNDER_PYTEST:
-    try:
-        start_pending_batch_worker()
-    except Exception as _e_rec:
-        logger.warning("Không thể tự động khởi động worker sau recovery: %s", _e_rec)
+BATCH_MANAGER = BatchVideoManager(recover_on_init=False)
+
+
+def start_batch_runtime():
+    """Recover and start work when Studio serves requests, never on a module import."""
+    if _UNDER_PYTEST:
+        return
+    BATCH_MANAGER.recovered_on_init = BATCH_MANAGER._recover_interrupted_jobs()
+    start_pending_batch_worker()
 
