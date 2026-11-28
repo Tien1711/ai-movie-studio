@@ -22,15 +22,19 @@ async function preventDiscard(tabId) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
 }
 
-async function wakeTab(tabId) {
+async function wakeTab(tabId, { focusWindow = false } = {}) {
   if (!Number.isInteger(tabId)) return;
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab?.url?.startsWith(MUSE_ORIGIN + '/')) return;
+  // Luôn kích hoạt tab Muse bên trong cửa sổ của chính nó & khóa chống ngủ đông,
+  // KHÔNG tự bật cửa sổ lên đè màn hình làm việc của người dùng trừ khi user chủ động bấm Mở tab Muse.
   await chrome.tabs.update(tab.id, { active: true, autoDiscardable: false }).catch(() => {});
-  const win = await chrome.windows.get(tab.windowId).catch(() => null);
-  if (win) {
-    const update = win.state === 'minimized' ? { state: 'normal', focused: true } : { focused: true };
-    await chrome.windows.update(win.id, update).catch(() => {});
+  if (focusWindow) {
+    const win = await chrome.windows.get(tab.windowId).catch(() => null);
+    if (win) {
+      const update = win.state === 'minimized' ? { state: 'normal', focused: true } : { focused: true };
+      await chrome.windows.update(win.id, update).catch(() => {});
+    }
   }
 }
 
@@ -39,13 +43,13 @@ async function openMuse() {
   if (Number.isInteger(museTabId)) {
     const tab = await chrome.tabs.get(museTabId).catch(() => null);
     if (tab?.url?.startsWith(MUSE_ORIGIN + '/')) {
-      await wakeTab(tab.id);
+      await wakeTab(tab.id, { focusWindow: true });
       return;
     }
   }
   const tab = await chrome.tabs.create({ url: MUSE_ORIGIN + '/', active: false });
   await chrome.storage.session.set({ museTabId: tab.id });
-  await wakeTab(tab.id);
+  await wakeTab(tab.id, { focusWindow: true });
 }
 
 async function handle(message, sender) {
