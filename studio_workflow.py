@@ -699,12 +699,22 @@ _VI_SAFE_VISUAL_REPLACEMENTS = (
 )
 
 
+_EN_SAFE_VISUAL_REPLACEMENTS = (
+    (r"\b(?:jeweled\s+|bronze\s+|long\s+)?swords?\b|\bblades?\b|\bspears?\b|\bweapons?\b", "ornate golden ceremonial scroll"),
+    (r"\b(?:crimson\s+silk\s+|ancient\s+|bronze\s+)?armor\b", "embroidered crimson and gold royal silk tunic"),
+    (r"\b(?:woman\s+)?warriors?\b|\bsoldiers?\b", "noble traditional heroine"),
+    (r"\bdrawing\s+her\s+ornate\s+golden\s+ceremonial\s+scroll\b", "unfurling her ornate golden ceremonial scroll"),
+)
+
+
 def sanitize_visual_traits(text: str, *, aggressive: bool = False) -> str:
     """Soften weapon/violence & ID-portrait triggers while keeping visual traits intact."""
     cleaned = (text or "").strip()
     for pattern, repl in _VI_SAFE_VISUAL_REPLACEMENTS:
         cleaned = re.sub(pattern, repl, cleaned, flags=re.IGNORECASE)
     if aggressive:
+        for pattern, repl in _EN_SAFE_VISUAL_REPLACEMENTS:
+            cleaned = re.sub(pattern, repl, cleaned, flags=re.IGNORECASE)
         cleaned = media.sanitize_prompt_heuristics(cleaned, "refused", aggressive=True)
     return re.sub(r"\s+", " ", cleaned).strip(" .")
 
