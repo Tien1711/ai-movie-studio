@@ -1170,8 +1170,8 @@ async def generate_keyframe_image(
             if task_id:
                 # Poll cho tới khi hoàn tất (tối đa 180s)
                 start_t = time.time()
-                while time.time() - start_t < 180:
-                    await asyncio.sleep(4)
+                while time.time() - start_t < 240:
+                    await asyncio.sleep(1.5)
                     poll_res = await client.get(f"{base_url}/v1/images/tasks/{task_id}", headers=headers)
                     # Audit §1.11: không poll lặng lẽ khi server trả lỗi.
                     if poll_res.status_code in TRANSIENT_HTTP_STATUSES:

@@ -281,8 +281,9 @@
     let playerSource = null;
     let playerChanged = Date.now();
     let lastWake = Date.now();
+    const wakeIntervalMs = kind === 'image' ? 6000 : 18000;
     while (Date.now() < deadline) {
-      if (kind && document.visibilityState !== 'visible' && !playerSource && Date.now() - lastWake >= 25000) {
+      if (kind && document.visibilityState !== 'visible' && !playerSource && Date.now() - lastWake >= wakeIntervalMs) {
         lastWake = Date.now();
         await wakeSelf();
       }
@@ -353,7 +354,12 @@
           playerSource = source;
           playerChanged = Date.now();
         }
-        if (playerSource && Date.now() - playerChanged >= 1200) {
+        if (!playerSource && !isGenerating && hasAttachmentSlot && document.visibilityState !== 'visible' && Date.now() - lastWake >= 2500) {
+          lastWake = Date.now();
+          await wakeSelf();
+        }
+        const settleMs = kind === 'image' ? 400 : 1200;
+        if (playerSource && Date.now() - playerChanged >= settleMs) {
           try {
             await uploadMedia(id, playerSource, kind);
             return kind === 'video' ? { reply, media, videoUploaded: true } : { reply, media, mediaUploaded: true };
@@ -389,7 +395,7 @@
       const response = await poll();
       const command = response?.data?.command;
       if (!command) {
-        await delay(response?.data?.enabled ? 1800 : 10000);
+        await delay(response?.data?.enabled ? 800 : 10000);
         continue;
       }
       const heartbeat = setInterval(() => { void poll(); }, 4000);
