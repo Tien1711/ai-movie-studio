@@ -3,9 +3,9 @@ chcp 65001 >nul
 setlocal
 
 echo ================================================================
-echo  AI Movie Studio - Mo 5 Chrome Worker DOC LAP chay ngam
-echo  - KHONG tat, KHONG anh huong trinh duyet Chrome ca nhan!
-echo  - Luon nap du 4 co chong dong bang (full toc do khi chay nen)
+echo  AI Movie Studio - Mo 5 Chrome Profile cu da dang nhap san
+echo  - KHONG tat trinh duyet Chrome ca nhan dang mo!
+echo  - Mo 5 profile: Profile 26 (1230), 27 (1231), 13 (a), 29 (1232), 30 (1233)
 echo ================================================================
 echo.
 
@@ -17,24 +17,23 @@ if not exist "%CHROME%" (
     exit /b 1
 )
 
-set "BASE_DIR=%~dp0"
-set "WORKER_DATA=%BASE_DIR%data\muse_chrome_workers"
-if not exist "%WORKER_DATA%" mkdir "%WORKER_DATA%"
+set "FLAGS=--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion --window-size=1100,800"
 
-set "FLAGS=--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion --no-first-run --no-default-browser-check --window-size=1100,800"
-
-echo [1/2] Dang mo 5 Chrome Worker doc lap (Worker1 .. Worker5)...
-start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker1" "https://muse.ai/"
+echo [1/2] Dang mo 5 profile Muse da dang nhap san (khong dong Chrome ca nhan)...
+start "" "%CHROME%" %FLAGS% --profile-directory="Profile 26" "https://muse.ai/"
 ping -n 3 127.0.0.1 >nul
-start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker2" "https://muse.ai/"
+start "" "%CHROME%" %FLAGS% --profile-directory="Profile 27" "https://muse.ai/"
 ping -n 2 127.0.0.1 >nul
-start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker3" "https://muse.ai/"
+start "" "%CHROME%" %FLAGS% --profile-directory="Profile 13" "https://muse.ai/"
 ping -n 2 127.0.0.1 >nul
-start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker4" "https://muse.ai/"
+start "" "%CHROME%" %FLAGS% --profile-directory="Profile 29" "https://muse.ai/"
 ping -n 2 127.0.0.1 >nul
-start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker5" "https://muse.ai/"
+start "" "%CHROME%" %FLAGS% --profile-directory="Profile 30" "https://muse.ai/"
+ping -n 3 127.0.0.1 >nul
+
+echo [2/2] Dang dua cua so Chrome ca nhan (Studio) len tren cung...
+start "" "%CHROME%" --profile-directory="Default" "http://127.0.0.1:8000"
 
 echo.
-echo [OK] Da mo 5 Chrome Worker doc lap tai: %WORKER_DATA%
-echo      (Lan dau tien: cai extension chrome-muse-profile + dang nhap muse.ai o moi Worker 1 lan duy nhat.)
+echo [OK] Da mo xong 5 profile Muse cu ma khong tat Chrome ca nhan!
 endlocal
