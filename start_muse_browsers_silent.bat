@@ -3,8 +3,9 @@ chcp 65001 >nul
 setlocal
 
 echo ================================================================
-echo  AI Movie Studio - Mo 5 Chrome Profile chay ngam FULL TOC DO
-echo  (Khong bi Windows Chrome dong bang khi thu nho / nam sau)
+echo  AI Movie Studio - Mo 5 Chrome Worker DOC LAP chay ngam
+echo  - KHONG tat, KHONG anh huong trinh duyet Chrome ca nhan!
+echo  - Luon nap du 4 co chong dong bang (full toc do khi chay nen)
 echo ================================================================
 echo.
 
@@ -16,28 +17,24 @@ if not exist "%CHROME%" (
     exit /b 1
 )
 
-set "FLAGS=--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion --window-size=1100,800"
+set "BASE_DIR=%~dp0"
+set "WORKER_DATA=%BASE_DIR%data\muse_chrome_workers"
+if not exist "%WORKER_DATA%" mkdir "%WORKER_DATA%"
 
-echo [1/3] Dang dong nhe nhang Chrome mac dinh de nap 4 co chong dong bang...
-powershell -NoProfile -Command "$procs = Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -notlike '*--type=*' -and $_.CommandLine -notlike '*muse2api-profiles*' }; foreach ($p in $procs) { $proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue; if ($proc) { $null = $proc.CloseMainWindow() } }; Start-Sleep -Seconds 3; $left = Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object { $_.CommandLine -notlike '*muse2api-profiles*' }; if ($left) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }"
+set "FLAGS=--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion --no-first-run --no-default-browser-check --window-size=1100,800"
 
+echo [1/2] Dang mo 5 Chrome Worker doc lap (Worker1 .. Worker5)...
+start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker1" "https://muse.ai/"
 ping -n 3 127.0.0.1 >nul
-
-echo [2/3] Dang mo 5 profile Muse o lop nen sau cung (1230, 1231, a, 1232, 1233)...
-start "" "%CHROME%" %FLAGS% --profile-directory="Profile 26" "https://muse.ai/"
-ping -n 3 127.0.0.1 >nul
-start "" "%CHROME%" %FLAGS% --profile-directory="Profile 27" "https://muse.ai/"
+start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker2" "https://muse.ai/"
 ping -n 2 127.0.0.1 >nul
-start "" "%CHROME%" %FLAGS% --profile-directory="Profile 13" "https://muse.ai/"
+start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker3" "https://muse.ai/"
 ping -n 2 127.0.0.1 >nul
-start "" "%CHROME%" %FLAGS% --profile-directory="Profile 29" "https://muse.ai/"
+start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker4" "https://muse.ai/"
 ping -n 2 127.0.0.1 >nul
-start "" "%CHROME%" %FLAGS% --profile-directory="Profile 30" "https://muse.ai/"
-ping -n 4 127.0.0.1 >nul
-
-echo [3/3] Dang dua cua so Chrome ca nhan (Studio http://127.0.0.1:8000) len tren cung...
-start "" /max "%CHROME%" %FLAGS% --restore-last-session --profile-directory="Default" "http://127.0.0.1:8000"
+start "" "%CHROME%" --user-data-dir="%WORKER_DATA%" %FLAGS% --profile-directory="Worker5" "https://muse.ai/"
 
 echo.
-echo [OK] Da mo xong 5 trinh duyet Muse chay ngam full toc do!
+echo [OK] Da mo 5 Chrome Worker doc lap tai: %WORKER_DATA%
+echo      (Lan dau tien: cai extension chrome-muse-profile + dang nhap muse.ai o moi Worker 1 lan duy nhat.)
 endlocal

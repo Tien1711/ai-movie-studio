@@ -4957,7 +4957,7 @@ async def launch_muse_chrome_workers(request: Request):
     return {
         "ok": True,
         "script": bat_path.name,
-        "message": "Đang chạy start_muse_browsers_silent.bat để mở 5 Chrome chạy nền (Studio sẽ tự mở lại sau vài giây)...",
+        "message": "Đang mở 5 Chrome Worker độc lập chạy nền (không tắt trình duyệt cá nhân của bạn)...",
     }
 
 
