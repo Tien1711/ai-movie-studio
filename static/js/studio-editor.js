@@ -317,6 +317,9 @@ async function chapterSettings(v) {
       '<label>Bảng màu điện ảnh (Color LUT)<select name="color_grade">' +
       options(Object.entries(colorGradeLabels), v.color_grade || "none") +
       "</select></label>" +
+      '<label>Âm thanh khi tạo clip Muse<select name="clip_audio_mode">' +
+      options([["auto", "Theo cấu hình hiện tại"], ["narrated", "Lồng tiếng · tạo bản đọc trước"], ["native", "Dùng giọng và âm thanh của Muse"]], v.clip_audio_mode || "auto") +
+      "</select></label>" +
       '<label>Khớp thời lượng clip & lời đọc<select name="timing_mode">' +
       options(
         Object.entries(timingModeLabels),
@@ -367,6 +370,7 @@ async function chapterSettings(v) {
         reference_mode: data.get("reference_mode") || "chain",
         chain_fallback_mode: data.get("chain_fallback_mode") || "fallback_image",
         color_grade: data.get("color_grade") || "none",
+        clip_audio_mode: data.get("clip_audio_mode") || "auto",
         timing_mode: data.get("timing_mode") || "match_speech",
         clip_parallel_mode: data.get("clip_parallel_mode") || "sequential",
         smart_pacing: data.has("smart_pacing"),
@@ -1114,6 +1118,7 @@ function drawGuidedBoard(board, v) {
       .join("") +
     "</div>";
   const shot = (s) => {
+    const previous = scenes[scenes.indexOf(s) - 1];
     const index = Number(s.index),
       state = s.error
         ? "error"
@@ -1200,6 +1205,15 @@ function drawGuidedBoard(board, v) {
         : "") +
       action(s.clip ? "Tạo lại" : "Làm video", "clip", !s.frame_approved) +
       "</div></div></div>" +
+      (s.clip && v.clip_audio_mode === "native"
+        ? "<details><summary>Nghe đối chiếu trước khi duyệt</summary><p>" +
+          esc(s.dialogue || "Cảnh chỉ có tiếng môi trường và chuyển động.") +
+          "</p>" +
+          (previous?.clip
+            ? '<a target="_blank" rel="noopener" href="' + mediaUrl(v, previous, "clip") + '">Xem và nghe cảnh trước</a>'
+            : "") +
+          "</details>"
+        : "") +
       (s.stale_join
         ? '<p class="studio-error">Khung cuối cảnh trước đã đổi. Xem lại mối nối.</p>'
         : "") +

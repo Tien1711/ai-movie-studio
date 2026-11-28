@@ -585,3 +585,58 @@ def test_full_parallel_clip_mode_skips_tail_chaining():
 
 
 
+
+def test_narrated_clip_measures_speech_before_muse(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    vid = "bv_12345678"
+    monkeypatch.setattr(batch, "BATCH_DIR", tmp_path)
+    frame = "a" * 32 + ".webp"
+    assets = tmp_path / vid / "media"
+    assets.mkdir(parents=True)
+    (assets / frame).write_bytes(b"frame")
+    scene = dict(index=1, duration=5, frame=frame, frame_approved=True, voiceover="Xin chào.", prompt="Reading a letter")
+    video = dict(id=vid, voice="Narrator", scenes=[scene], clip_audio_mode="narrated")
+    async def tts(text, voice, path):
+        Path(path).write_bytes(b"speech")
+        return 7.37, False, ""
+    monkeypatch.setattr(wf.media, "generate_tts_with_status", tts)
+    monkeypatch.setattr(wf.media, "get_media_duration", lambda _: 7.37)
+    render = AsyncMock(side_effect=RuntimeError("reached Muse"))
+    monkeypatch.setattr(batch, "_render_story_clip", render)
+    video["timing_mode"] = "strict_clip"
+    with pytest.raises(ValueError, match="7.37"):
+        asyncio.run(wf.produce(video, scene, "clip", tmp_path, lambda *_: None))
+    render.assert_not_called()
+    video["timing_mode"] = "match_speech"
+    with pytest.raises(RuntimeError, match="reached Muse"):
+        asyncio.run(wf.produce(video, scene, "clip", tmp_path, lambda *_: None))
+    assert render.await_args.args[1]["duration"] == 8
+
+def test_native_clip_prompts_keep_speaker_and_foley_across_three_beats(tmp_path, monkeypatch):
+    import batch_engine
+
+    monkeypatch.setattr(batch, "muse_connection", lambda _: ("browser", "http://localhost", "fixture"))
+    prompts = []
+    async def provider(client, shot, *args, **kwargs):
+        built = batch_engine.build_scene_prompt(shot, None, "Narrator", "tts")
+        prompts.append(built)
+        path = tmp_path / "fixture.mp4"
+        path.write_bytes(b"fixture")
+        return {"status": "done", "video_path": path}
+
+    monkeypatch.setattr(batch_engine, "process_scene", provider)
+    video = dict(clip_audio_mode="native", voice="Narrator", aspect_ratio="9:16")
+    for index, (beat, dialogue) in enumerate([
+        ("Linh reads a letter silently.", ""),
+        ("Linh looks up.", "Linh: Tôi sẽ đi."),
+        ("Linh walks along the river.", "Linh: Hẹn gặp lại."),
+    ], 1):
+        shot = dict(index=index, prompt=beat, dialogue=dialogue, voiceover="", duration=5,
+                    approved_frame="approved.webp", raw_studio=True)
+        asyncio.run(batch._render_story_clip(video, shot, index, tmp_path, tmp_path / f"{index}.mp4",
+                                             batch._BatchCancellation("bv_12345678"), lambda *_: None))
+    assert prompts[0]["speech_mode"] == "ambient_only"
+    for built, line in zip(prompts[1:], ("Tôi sẽ đi.", "Hẹn gặp lại.")):
+        assert built["is_ai_voice"] and built["has_dialogue"]
+        assert line in built["prompt"] and "cadence consistent" in built["prompt"]

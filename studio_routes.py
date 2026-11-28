@@ -458,6 +458,7 @@ class ChapterSettings(BaseModel):
     transition_sfx: bool = False
     vision_qc: bool = False
     clip_parallel_mode: Literal["sequential", "segment_parallel", "full_parallel"] = "sequential"
+    clip_audio_mode: Literal["auto", "narrated", "native"] = "auto"
     timing_mode: Literal["match_speech", "strict_clip", "auto_expand_clip"] = "match_speech"
     watermark_text: str = Field(default="", max_length=40)
 
@@ -522,6 +523,7 @@ def chapter_settings(vid: str, req: ChapterSettings):
             for s in video["scenes"]:
                 if not s.get("voice"):
                     s["speech"] = None
+                    s["speech_duration"] = None
         batch.BATCH_MANAGER.update_video(
             vid,
             {
@@ -597,6 +599,7 @@ def rebuild(vid: str):
             "vision_qc",
             "clip_parallel_mode",
             "timing_mode",
+            "clip_audio_mode",
             "watermark_text",
         )
         if k in v

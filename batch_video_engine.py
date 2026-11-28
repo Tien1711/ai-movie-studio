@@ -1651,11 +1651,17 @@ async def _render_story_clip(video, scene, index, directory, destination, cancel
 
     has_dialogue = bool((scene.get("dialogue") or "").strip())
     sound_direction = "" if has_dialogue else STORY_AMBIENCE_DIRECTION
+    if video.get("clip_audio_mode") == "native" and has_dialogue:
+        sound_direction = (
+            "Only the named speaker delivers each scripted line in Vietnamese. Keep each returning "
+            "speaker's accent, vocal age, pitch and cadence consistent. Other characters listen silently. "
+            "Keep location ambience continuous and footsteps and prop sounds synchronized beneath speech."
+        )
     shot = {
         **scene, "size": video["aspect_ratio"], "reference_image": reference,
         "keep_reference": bool(reference), "require_narration": True,
         "offscreen_narration": not has_dialogue,
-        "voice_mode": "dialogue" if has_dialogue else "narration",
+        "voice_mode": ("native" if video.get("clip_audio_mode") == "native" else "dialogue") if has_dialogue else "narration",
         "duration": scene["duration"] if scene.get("raw_studio") or scene.get("approved_frame") else min((5, 6, 8, 10), key=lambda d: abs(d - scene.get("duration", 6))),
         "prompt": (f"{scene['prompt']}\n{sound_direction}\n"
                    "One continuous moving shot. Show the action unfolding from its start to its consequence. "
