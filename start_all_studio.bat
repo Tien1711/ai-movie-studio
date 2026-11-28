@@ -45,6 +45,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+set "CHROME=C:\Program Files\Google\Chrome\Application\chrome.exe"
+if not exist "%CHROME%" set "CHROME=C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+set "CHROME_FLAGS=--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --disable-features=CalculateNativeWinOcclusion"
+
 echo [OK] Studio da san sang! Dang mo http://127.0.0.1:8000 ...
-start "" "http://127.0.0.1:8000"
+if exist "%CHROME%" (
+    start "" "%CHROME%" %CHROME_FLAGS% --profile-directory="Default" "http://127.0.0.1:8000"
+) else (
+    start "" "http://127.0.0.1:8000"
+)
 endlocal
