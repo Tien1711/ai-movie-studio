@@ -69,6 +69,8 @@ from composer import (
 )
 from muse_connection import browser_media_headers
 from batch_engine import generate_tts_with_status, poll_video_task, sanitize_prompt_heuristics, extract_last_frame
+from consistency import NATIVE_VOICE_MODES
+from muse_voice import plan_muse_speech
 
 
 SHOT_DESK_DIR = (Path(__file__).parent / "workspace" / "_shot_desk_projects").resolve()
@@ -434,6 +436,7 @@ def import_shot_desk_zip(zip_bytes: bytes, filename: str = "project.zip") -> Dic
                 "aspect_ratio": aspect_ratio,
                 "default_voice": manifest.get("default_voice", "vi-VN-HoaiMyNeural"),
                 "default_voice_mode": manifest.get("default_voice_mode", "narration"),
+                "muse_narrator": manifest.get("muse_narrator"),
                 "total_duration": _parse_shot_duration(manifest.get("total_duration", len(shots_data) * 10), default=len(shots_data) * 10),
                 "shot_duration": _parse_shot_duration(manifest.get("shot_duration", 10), default=10),
                 "characters": characters, "style_locks":manifest.get("style_locks") or {},
@@ -726,22 +729,34 @@ async def render_single_shot_desk(
     active_prompt = custom_prompt or (shot.get("compliance_prompt") if use_compliance and shot.get("compliance_prompt") else shot.get("prompt", ""))
     from batch_engine import apply_style_locks, character_block_of
     from consistency import opening_reference, resolve_scene_cast
-    cast, _ = resolve_scene_cast(shot, proj.get("characters") or [])
+    registry = proj.get("characters") or []
+    voice_mode = shot.get("voice_mode", proj.get("default_voice_mode", "narration"))
+    is_ai_voice = voice_mode in NATIVE_VOICE_MODES
+    speaker = (shot.get("speaker") or "").strip()
+    lip_sync = bool(shot.get("lip_sync", False) or voice_mode == "dialogue")
+    assigned_speaker = speaker or next(iter(shot.get("characters") or []), "")
+    speech = plan_muse_speech(
+        {**shot, "speaker": assigned_speaker, "speak_onscreen": lip_sync},
+        registry, proj.get("muse_narrator"), native=is_ai_voice, freeform=is_ai_voice,
+    )
+    cast, segments = resolve_scene_cast(shot, registry, require_tts_voice=not is_ai_voice)
     for ch in cast:
+        if ch["name"] in speech.remote:
+            continue
         block = character_block_of(ch)
         if block not in active_prompt:
             active_prompt += "\n" + block
     active_prompt = apply_style_locks(active_prompt, proj.get("style_locks"))
     if shot.get("setting"):
         active_prompt += "\nSetting: " + shot["setting"]
-    shot["used_prompt"] = active_prompt
+    shot["used_prompt"] = speech.append_to(active_prompt)
     shot["used_compliance"] = bool(use_compliance or (custom_prompt == shot.get("compliance_prompt")))
 
     proj_dir = SHOT_DESK_DIR / project_id
     await update_shot_state(project_id, shot_index, {
         "status": "rendering",
         "error": None,
-        "used_prompt": active_prompt,
+        "used_prompt": shot["used_prompt"],
         "used_compliance": shot["used_compliance"]
     })
 
@@ -759,19 +774,14 @@ async def render_single_shot_desk(
     # Bước 1: Xác định chế độ giọng đọc
     voice = shot.get("voice") or proj.get("default_voice", "vi-VN-HoaiMyNeural")
     voiceover = shot.get("voiceover", "").strip()
-    voice_mode = shot.get("voice_mode", proj.get("default_voice_mode", "narration"))
-    speaker = (shot.get("speaker") or "").strip()
-    segments = []
-    if shot.get("dialogue"):
-        _, segments = resolve_scene_cast(shot,proj.get("characters") or [])
+    if segments:
+        if not is_ai_voice and voiceover and voiceover.casefold() != " ".join(item["text"] for item in segments).casefold():
+            segments.insert(0, {"character": "Narrator", "text": voiceover, "voice": voice})
         voiceover = " ".join(item["text"] for item in segments)
-    elif voice_mode == "dialogue" and voiceover and (speaker or shot.get("characters")):
+    elif not is_ai_voice and voice_mode == "dialogue" and voiceover and (speaker or shot.get("characters")):
         _, lines = resolve_scene_cast({"characters":shot.get("characters") or [],
-            "dialogue": (speaker+": " if speaker else "")+voiceover},proj.get("characters") or [])
+            "dialogue": (speaker+": " if speaker else "")+voiceover},registry)
         voice = lines[0]["voice"]
-        speaker = lines[0]["character"]
-    lip_sync = bool(shot.get("lip_sync", False) or (voice_mode == "dialogue"))
-    is_ai_voice = (voice_mode in ("ai_voice", "native", "none", "no_dub"))
 
     # Audit #8: tts_ok=True chi khi TTS lan nay thanh cong that — buoc
     # compose chi duoc dung file audio khi co nay (file ton tai tren dia
@@ -863,24 +873,8 @@ async def render_single_shot_desk(
         if end_ref_path and end_ref_path.exists():
             clean_p = f"{clean_p}, camera smoothly tracks and seamlessly resolves into the destination closing keyframe composition matching the final target frame pose (End Frame target closing pose)"
 
-        p_lower = clean_p.lower()
-        if is_ai_voice:
-            if voiceover:
-                spk_clause = f"character {speaker}" if speaker and speaker.lower() not in ("narrator", "thuyết minh", "người kể chuyện", "none", "") else "character"
-                clean_p = f"{clean_p}, audible sound design and native speech: {spk_clause} speaking with natural voice '{voiceover}', synchronized realistic vocal audio and clear ambient atmosphere"
-            else:
-                clean_p = f"{clean_p}, realistic synchronized sound design, clear natural ambient audio and Foley sound effects"
-        elif (lip_sync or voice_mode == "dialogue") and voiceover:
-            if not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation"]):
-                spk_clause = f"character {speaker}" if speaker and speaker.lower() not in ("narrator", "thuyết minh", "người kể chuyện", "none", "") else "character"
-                clean_p = f"{clean_p}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue"
-            clean_p += "\nVerbatim dialogue: " + (shot.get("dialogue") or voiceover)
-        elif voice_mode == "narration" and not lip_sync:
-            if not any(k in p_lower for k in ["no mouth movement", "calm acting", "no lip movement"]):
-                clean_p = f"{clean_p}, cinematic calm acting expression, natural subtle breathing, no extraneous mouth flapping"
-
         payload = {
-            "prompt": clean_p,
+            "prompt": speech.append_to(clean_p),
             "duration": dur,
             "size": aspect_ratio,
             "timeout": 600,
@@ -1177,7 +1171,7 @@ def edit_shot_desk_shot(project_id: str, shot_index: int, updates: Dict[str, Any
         if not target:
             raise ValueError("Không tìm thấy shot")
 
-        for k in ["prompt", "compliance_prompt", "voiceover", "duration", "transition_note", "voice_mode", "speaker", "voice", "lip_sync"]:
+        for k in ["prompt", "compliance_prompt", "voiceover", "dialogue", "duration", "transition_note", "voice_mode", "speaker", "voice", "lip_sync"]:
             if k in updates:
                 target[k] = updates[k]
 
@@ -1201,6 +1195,8 @@ def update_shot_desk_project_settings(project_id: str, settings: Dict[str, Any])
             proj["default_voice"] = settings["default_voice"]
         if "default_voice_mode" in settings and settings["default_voice_mode"]:
             proj["default_voice_mode"] = settings["default_voice_mode"]
+        if "muse_narrator" in settings:
+            proj["muse_narrator"] = settings["muse_narrator"]
 
         if settings.get("apply_to_all_shots"):
             new_voice = proj.get("default_voice", "vi-VN-HoaiMyNeural")

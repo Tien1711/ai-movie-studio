@@ -419,7 +419,7 @@ def test_ask_json_parses_browser_dom_prose_and_favicon_not_404(monkeypatch):
         "json\nCopy\n"
         '{\u00a0"characters": [{"name": "Trưng Trắc", "description": "Áo giáp đồng, tóc búi cao"}],\n'
         '  "scenes": [\n'
-        '    {"index": "1", "title": "Mê Linh rực lửa", "prompt": "Wide shot", "voiceover": "Mùa xuân năm 40.", "characters": ["Trưng Trắc", "Nghĩa quân quần chúng"],},\n'
+        '    {"index": "1", "title": "Mê Linh rực lửa", "prompt": "Wide shot", "voiceover": "Mùa xuân năm 40.", "dialogue": "Trưng Trắc [offscreen]: Ta lên đường.", "characters": ["Trưng Trắc", "Nghĩa quân quần chúng"],},\n'
         "  ]\n"
         "}\n"
         "Bạn có muốn viết tiếp cảnh sau không?"
@@ -466,6 +466,7 @@ def test_ask_json_parses_browser_dom_prose_and_favicon_not_404(monkeypatch):
         "id": "bv_test01",
         "visual_style": "cinematic",
         "workshop": {"topic": "Khởi nghĩa Hai Bà Trưng"},
+        "clip_audio_mode": "native",
         "cast": [],
         "scenes": [{"index": 1, "duration": 8, "prompt": "", "voiceover": ""}],
     }
@@ -473,6 +474,7 @@ def test_ask_json_parses_browser_dom_prose_and_favicon_not_404(monkeypatch):
     assert video["cast"][0]["name"] == "Trưng Trắc"
     assert video["scenes"][0]["characters"] == ["Trưng Trắc"]
     assert video["scenes"][0]["title"] == "Mê Linh rực lửa"
+    assert video["scenes"][0]["dialogue"] == "Trưng Trắc [offscreen]: Ta lên đường."
 
 
 def test_draw_cast_avoids_portrait_filter_and_retries_scenic_fallback(

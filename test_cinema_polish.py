@@ -620,13 +620,19 @@ def test_native_clip_prompts_keep_speaker_and_foley_across_three_beats(tmp_path,
     prompts = []
     async def provider(client, shot, *args, **kwargs):
         built = batch_engine.build_scene_prompt(shot, None, "Narrator", "tts")
-        prompts.append(built)
+        prompts.append((built, shot["muse_voice_direction"]))
         path = tmp_path / "fixture.mp4"
         path.write_bytes(b"fixture")
         return {"status": "done", "video_path": path}
 
     monkeypatch.setattr(batch_engine, "process_scene", provider)
-    video = dict(clip_audio_mode="native", voice="Narrator", aspect_ratio="9:16")
+    video = dict(
+        clip_audio_mode="native", voice="Narrator", aspect_ratio="9:16",
+        cast=[{
+            "name": "Linh", "description": "Short hair and a yellow coat.",
+            "muse_voice": {"voice_id": "avocado_v2:MAI_01", "language": "vi", "speed": 1.0},
+        }],
+    )
     for index, (beat, dialogue) in enumerate([
         ("Linh reads a letter silently.", ""),
         ("Linh looks up.", "Linh: Tôi sẽ đi."),
@@ -636,7 +642,317 @@ def test_native_clip_prompts_keep_speaker_and_foley_across_three_beats(tmp_path,
                     approved_frame="approved.webp", raw_studio=True)
         asyncio.run(batch._render_story_clip(video, shot, index, tmp_path, tmp_path / f"{index}.mp4",
                                              batch._BatchCancellation("bv_12345678"), lambda *_: None))
-    assert prompts[0]["speech_mode"] == "ambient_only"
-    for built, line in zip(prompts[1:], ("Tôi sẽ đi.", "Hẹn gặp lại.")):
+    assert prompts[0][0]["speech_mode"] == "ambient_only" and not prompts[0][1]
+    for (built, direction), words in zip(prompts[1:], ("Tôi sẽ đi.", "Hẹn gặp lại.")):
         assert built["is_ai_voice"] and built["has_dialogue"]
-        assert line in built["prompt"] and "cadence consistent" in built["prompt"]
+        assert "voice profiles below" in built["prompt"]
+        assert "avocado_v2:MAI_01 | language: vi | speed: 1.0" in direction
+        assert f'Linh: "{words}"' in direction
+
+
+def test_muse_voice_uses_the_speaker_alias_and_keeps_tts_separate(monkeypatch):
+    from muse_voice import scene_voice_prompt
+    from consistency import resolve_scene_cast
+    from studio_routes import CastLocksRequest, save_cast_locks
+
+    linh = dict(
+        name="Linh", aliases=["Chị Linh"], description="Yellow coat", voice="vi-VN-HoaiMyNeural",
+        muse_voice={"voice_id": "avocado_v2:MAI_01", "language": "vi", "speed": 1.0},
+    )
+    nam = dict(
+        name="Nam", description="Blue coat", voice="vi-VN-NamMinhNeural",
+        muse_voice={"voice_id": "avocado_v2:MAI_03", "language": "vi", "speed": 0.9},
+    )
+    cast = [linh, nam]
+    scenes = [
+        dict(index=1, prompt="Linh and Nam are at the river", voiceover="", characters=["Linh", "Nam"],
+             dialogue="Chị Linh: Ai ở đó?", clip="linh.mp4", speech="tts.mp3"),
+        dict(index=2, prompt="Linh and Nam leave", voiceover="", characters=["Linh", "Nam"],
+             dialogue="Nam: Tôi đây.", clip="nam.mp4"),
+    ]
+    direction = scene_voice_prompt(scenes[0], cast)
+    assert 'Linh: "Ai ở đó?"' in direction
+    assert "avocado_v2:MAI_01" in direction and "avocado_v2:MAI_03" not in direction
+    assert resolve_scene_cast(scenes[0], cast)[1][0]["voice"] == "vi-VN-HoaiMyNeural"
+    v = dict(id="bv_12345678", guided=True, status="review", updated_at=1.0, cast=cast,
+             clip_audio_mode="native", scenes=scenes)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "get_video", lambda _: v)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "update_video", lambda _, patch: v.update(patch))
+    req = CastLocksRequest(version=1.0, entries=[{
+        "name": "Linh", "muse_voice": {"voice_id": "avocado_v2:vd2_smoky_teacup"},
+    }])
+    assert save_cast_locks(v["id"], req)["ok"]
+    assert scenes[0]["clip"] is None and scenes[0]["speech"] == "tts.mp3"
+    assert scenes[1]["clip"] == "nam.mp4"
+    assert "avocado_v2:vd2_smoky_teacup" in scene_voice_prompt(scenes[0], cast)
+    linh.pop("muse_voice")
+    with pytest.raises(ValueError, match="chưa khóa"):
+        scene_voice_prompt(scenes[0], cast)
+    v.update(clip_audio_mode="narrated", final_video_url="/already-dubbed.mp4", status="completed")
+    assert save_cast_locks(v["id"], req)["ok"]
+    assert v["final_video_url"] == "/already-dubbed.mp4" and v["status"] == "completed"
+
+
+def test_muse_video_request_includes_exact_voice_and_reference_image(tmp_path):
+    import base64
+    import httpx
+    from batch_engine import process_scene
+    from muse_voice import scene_voice_prompt
+
+    cast = [{
+        "name": "An", "description": "A yellow coat and short hair.",
+        "muse_voice": {"voice_id": "avocado_v2:MAI_01", "speed": 1.0},
+    }]
+    reference = "data:image/png;base64," + base64.b64encode(b"fixture").decode()
+    shot = dict(index=1, prompt="Medium shot at the river", voiceover="", dialogue="An: Tôi ở đây.",
+                voice_mode="native", duration=5, reference_image=reference, keep_reference=True)
+    shot["muse_voice_direction"] = scene_voice_prompt(shot, cast)
+    requests = []
+
+    async def capture(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(401)
+
+    async def submit():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(capture)) as client:
+            return await process_scene(
+                client, shot, asyncio.Semaphore(1), "http://muse.test", "test-key",
+                str(tmp_path), "vi-VN-NamMinhNeural", characters=cast, raw_only=True,
+            )
+
+    result = asyncio.run(submit())
+    assert len(requests) == 1
+    assert requests[0]["reference_image"] == reference
+    assert requests[0]["prompt"].endswith(shot["muse_voice_direction"])
+    assert requests[0]["prompt"] == result["used_prompt"]
+    assert requests[0]["prompt"].count("Tôi ở đây.") == 1
+
+
+def test_muse_narrator_keeps_one_profile_across_solo_and_mixed_scenes(tmp_path, monkeypatch):
+    import batch_engine
+
+    narrator = {
+        "voice_id": "avocado_v2:vd2_smoky_teacup", "language": "vi", "speed": 0.93,
+        "description": "Nam trung niên, âm vực trầm, nhịp kể điềm tĩnh.",
+    }
+    v = {
+        "clip_audio_mode": "native", "muse_narrator": narrator, "voice": "vi-VN-NamMinhNeural",
+        "aspect_ratio": "16:9",
+        "cast": [{
+            "name": "An", "description": "Yellow raincoat",
+            "muse_voice": {"voice_id": "avocado_v2:MAI_01"},
+        }],
+    }
+    monkeypatch.setattr(batch, "muse_connection", lambda _: ("browser", "http://muse.test", "fixture"))
+    prompts = []
+
+    async def provider(_, shot, *__args, **__kwargs):
+        built = batch_engine.build_scene_prompt(shot, None, v["voice"], "tts")
+        prompts.append((built, shot["muse_voice_direction"]))
+        path = tmp_path / "fixture.mp4"
+        path.write_bytes(b"fixture")
+        return {"status": "done", "video_path": path}
+
+    monkeypatch.setattr(batch_engine, "process_scene", provider)
+    lines = [("An nhìn ra biển.", ""), ("Con đò đã đến gần.", "An: Tôi thấy rồi."), ("", "")]
+    for i, (voiceover, dialogue) in enumerate(lines, 1):
+        shot = dict(index=i, prompt="An looks seaward", voiceover=voiceover, dialogue=dialogue,
+                    duration=5, approved_frame="approved.webp", raw_studio=True)
+        asyncio.run(batch._render_story_clip(v, shot, i, tmp_path, tmp_path / f"{i}.mp4",
+                                             batch._BatchCancellation("bv_12345678"), lambda *_: None))
+
+    solo, mixed, quiet = prompts
+    shared = f"Off-screen narrator | voice_id: {narrator['voice_id']} | language: vi | speed: 0.93"
+    assert solo[0]["is_ai_voice"] and solo[0]["speech_mode"] == "offscreen_narration"
+    assert mixed[0]["speech_mode"] == "onscreen_dialogue"
+    for built, direction in (solo, mixed):
+        assert shared in direction and narrator["description"] in direction
+        assert "never move their lips to the narration" in direction
+        assert "An nhìn ra biển." not in built["prompt"]
+    assert mixed[1].index('Off-screen narrator: "Con đò đã đến gần."') < mixed[1].index('An: "Tôi thấy rồi."')
+    assert quiet[0]["speech_mode"] == "ambient_only" and not quiet[1]
+
+
+def test_saving_muse_narrator_rebuilds_only_scenes_with_narration(monkeypatch):
+    from studio_routes import CastLocksRequest, save_cast_locks
+
+    clips = [
+        dict(index=1, voiceover="An đi xuống bến.", clip="narrated.mp4", speech="studio-tts.mp3"),
+        dict(index=2, voiceover="", clip="quiet.mp4"),
+    ]
+    v = dict(id="bv_12345678", guided=True, status="review", updated_at=1, clip_audio_mode="native", scenes=clips)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "get_video", lambda _: v)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "update_video", lambda _, patch: v.update(patch))
+    req = CastLocksRequest(version=1, muse_narrator={"voice_id": "avocado_v2:MAI_03", "description": "Giọng kể trung trầm."})
+    assert save_cast_locks(v["id"], req)["ok"]
+    assert v["muse_narrator"]["description"] == "Giọng kể trung trầm."
+    assert clips[0]["clip"] is None and clips[0]["speech"] == "studio-tts.mp3"
+    assert clips[1]["clip"] == "quiet.mp4"
+
+
+@pytest.mark.parametrize(("delivery", "channel"), [("radio", "two-way radio"), ("phone", "phone earpiece")])
+def test_remote_muse_speech_keeps_listener_silent(tmp_path, monkeypatch, delivery, channel):
+    import batch_engine
+
+    cast = [
+        {"name": "An", "description": "Yellow raincoat", "muse_voice": {"voice_id": "avocado_v2:MAI_01"}},
+        {"name": "Hải", "description": "Boat pilot", "muse_voice": {"voice_id": "avocado_v2:MAI_03", "delivery": delivery}},
+    ]
+    video = dict(clip_audio_mode="native", voice="Narrator", aspect_ratio="16:9", cast=cast)
+    monkeypatch.setattr(batch, "muse_connection", lambda _: ("browser", "http://muse.test", "fixture"))
+    packets = []
+
+    async def capture(_, scene, *_args, characters, **_kwargs):
+        built = batch_engine.build_scene_prompt(scene, None, "Narrator", "tts")
+        image_prompt = batch_engine.apply_film_characters(built["prompt"], scene, characters)
+        packets.append((scene, built, image_prompt))
+        path = tmp_path / "fixture.mp4"
+        path.write_bytes(b"fixture")
+        return {"status": "done", "video_path": path}
+
+    monkeypatch.setattr(batch_engine, "process_scene", capture)
+    for i, dialogue in enumerate(["Hải: Tôi nghe.", "Hải: Tôi nghe.\nAn: Cậu ở đâu?"], 1):
+        scene = dict(index=i, prompt="An listens to Hải by the sea", voiceover="", dialogue=dialogue,
+                     characters=["An"], duration=5, approved_frame="reference.jpg", raw_studio=True)
+        assert [person["name"] for person in wf.references(video, scene)] == ["An"]
+        asyncio.run(batch._render_story_clip(video, scene, i, tmp_path, tmp_path / f"{i}.mp4",
+                                             batch._BatchCancellation("bv_12345678"), lambda *_: None))
+
+    offscreen, mixed = packets
+    assert offscreen[1]["speech_mode"] == "offscreen_narration"
+    assert mixed[1]["speech_mode"] == "onscreen_dialogue"
+    for shot, _, visual in packets:
+        direction = shot["muse_voice_direction"]
+        assert f"[OFF-SCREEN · {channel} ONLY · ALL VISIBLE LIPS CLOSED] Hải:" in direction
+        assert "every visible person keeps their lips closed" in direction
+        assert "Character [Hải]" not in visual
+        assert "Character [An]" in visual
+    assert 'An: "Cậu ở đâu?"' in mixed[0]["muse_voice_direction"]
+
+
+def test_muse_turn_split_preserves_words_sources_and_original_take(monkeypatch):
+    from muse_voice import remote_speaker_names, scene_voice_prompt, voice_turn_blocks
+
+    cast = [
+        {"name": "An", "description": "Áo mưa vàng", "voice": "vi-VN-HoaiMyNeural",
+         "muse_voice": {"voice_id": "avocado_v2:MAI_01"}},
+        {"name": "Hải", "description": "Áo khoác xanh", "voice": "vi-VN-NamMinhNeural",
+         "muse_voice": {"voice_id": "avocado_v2:MAI_03", "delivery": "phone"}},
+    ]
+    dialogue = "Hải [speaker]: Rời cầu cảng.\nAn [thought]: Mình phải nhanh lên.\nHải [on_screen]: Tôi đi cùng cô."
+    scene = dict(index=1, title="Ở bến", prompt="A harbor under rain", voiceover="Trời vừa tạnh.",
+                 dialogue=dialogue, characters=["An", "Hải"], duration=8, frame="kept.webp",
+                 frame_approved=True, clip="old.mp4", transition_out="dissolve")
+    narrator = {"voice_id": "avocado_v2:vd2_smoky_teacup"}
+    directions = scene_voice_prompt(scene, cast, narrator)
+    assert "public-address speaker ONLY" in directions and "INNER MONOLOGUE" in directions
+    assert remote_speaker_names(cast, scene) == set()  # Hải is visible for his last turn.
+    assert remote_speaker_names(cast, {**scene, "dialogue": ""}) == set()
+    assert [line["text"] for line in consistency.resolve_scene_cast(scene, cast)[1]] == [
+        "Rời cầu cảng.", "Mình phải nhanh lên.", "Tôi đi cùng cô.",
+    ]
+    assert [block["delivery"] for block in voice_turn_blocks(scene, cast, narrator)] == [
+        "narrator", "speaker", "thought", "on_screen",
+    ]
+
+    video = dict(id="bv_12345678", guided=True, status="completed", updated_at=1.0,
+                 clip_audio_mode="native", muse_narrator=narrator, cast=cast,
+                 scenes=[scene, dict(index=2, frame="next.webp", clip="next.mp4")])
+    monkeypatch.setattr(batch.BATCH_MANAGER, "get_video", lambda _: video)
+    monkeypatch.setattr(batch.BATCH_MANAGER, "update_video", lambda _, patch: video.update(patch))
+    assert wf.split_muse_voice_turns(video["id"], 1, 1.0) == {"turns": 4, "scenes": 5}
+    narration, speaker, thought, reply, rest = video["scenes"]
+    assert narration["voiceover"] == scene["voiceover"] and narration["dialogue"] == ""
+    assert narration["previous_take"]["dialogue"] == dialogue
+    assert narration["previous_take"]["before_voice_split"]
+    assert speaker["turn_reference"] == "kept.webp" and speaker["frame"] is None
+    assert "Keep every mouth outside the frame" in speaker["prompt"]
+    assert "All visible mouths stay closed" in thought["prompt"]
+    assert reply["dialogue"] == "Hải [on_screen]: Tôi đi cùng cô."
+    assert reply["characters"] == ["Hải"] and reply["frame"] is None
+    assert "Keep other people's faces outside the frame" in reply["prompt"]
+    assert reply["transition_out"] == "dissolve"
+    assert rest["index"] == 5 and rest["clip"] == "next.mp4"
+
+
+def test_batch_prefetch_and_render_preserve_native_and_dubbed_speech(monkeypatch, tmp_path):
+    import batch_engine
+
+    cast = [
+        {"name": "Hải", "aliases": ["Anh Hải"], "description": "Áo khoác xanh",
+         "muse_voice": {"voice_id": "avocado_v2:MAI_03"}},
+        {"name": "An", "description": "Áo mưa vàng", "muse_voice": {"voice_id": "avocado_v2:MAI_01"}},
+    ]
+    segments = [
+        {"character": "Anh Hải", "text": "Nghe rõ!", "voice": "vi-VN-NamMinhNeural", "delivery": "radio"},
+        {"character": "An", "text": "Tôi nghe.", "voice": "vi-VN-HoaiMyNeural", "delivery": "on_screen"},
+    ]
+    scene = {"index": 1, "duration": 5, "prompt": "An on a dock", "voiceover": "Nghe rõ! Tôi nghe.",
+             "voice_segments": segments}
+    assert asyncio.run(batch_engine.prefetch_scene(
+        scene, str(tmp_path), voice_mode="ai_voice", characters=cast
+    ))["prefetched"]
+    captured = []
+
+    class Client:
+        async def post(self, _, json, **kwargs):
+            captured.append(json["prompt"])
+            raise RuntimeError("fixture stopped after video submit")
+
+    for planned in (scene, {key: value for key, value in scene.items() if key != "_prefetched_prompt"}):
+        asyncio.run(batch_engine.process_scene(
+            Client(), planned, asyncio.Semaphore(1), "http://muse.test", "fixture",
+            str(tmp_path), "vi-VN-HoaiMyNeural", voice_mode="ai_voice", characters=cast,
+        ))
+    assert len(captured) == 2 and captured[0] == captured[1]
+    assert "avocado_v2:MAI_03" in captured[0] and "Character [Hải]" not in captured[0]
+    assert captured[0].count("Nghe rõ!") == 1 and "THIRD-PERSON NARRATION" not in captured[0]
+    assert 'ONLY THIS SPEAKER MOVES THEIR LIPS] An: "Tôi nghe."' in captured[0]
+    dubbed = batch_engine._prepare_scene_prompt(scene, None, "fixture", "tts", cast)
+    direction = dubbed["speech_context"]["muse_voice_direction"]
+    assert "DUBBED PERFORMANCE" in direction and "avocado_v2" not in direction
+    assert "Nghe rõ!" not in direction and '"Tôi nghe."' in direction
+    assert dubbed["voice_segments"] == segments
+
+
+def test_shot_desk_sends_narrator_separately_from_radio(monkeypatch):
+    import shot_desk as desk
+
+    project = {
+        "characters": [{"name": "Hải", "description": "Áo khoác xanh",
+                        "muse_voice": {"voice_id": "avocado_v2:MAI_03"}}],
+        "muse_narrator": {"voice_id": "avocado_v2:vd2_smoky_teacup"},
+        "shots": [{"index": 1, "prompt": "A quiet pier", "voice_mode": "ai_voice",
+                   "voiceover": "Trời vừa tạnh.", "dialogue": "Hải [radio]: Tôi nghe rõ."}],
+    }
+    monkeypatch.setattr(desk, "get_shot_desk_project", lambda _: project)
+
+    async def update(*_, **__):
+        pass
+
+    monkeypatch.setattr(desk, "update_shot_state", update)
+    payloads = []
+
+    class Client:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def post(self, _, json, **kwargs):
+            payloads.append(json)
+            raise RuntimeError("fixture stopped after video submit")
+
+    monkeypatch.setattr(desk.httpx, "AsyncClient", Client)
+    with pytest.raises(RuntimeError, match="fixture stopped after video submit"):
+        asyncio.run(desk.render_single_shot_desk("sd_fixture", 1, "http://muse.test", "fixture"))
+
+    prompt = payloads[0]["prompt"]
+    assert "avocado_v2:vd2_smoky_teacup" in prompt
+    assert 'Off-screen narrator: "Trời vừa tạnh."' in prompt
+    assert 'two-way radio ONLY · ALL VISIBLE LIPS CLOSED] Hải: "Tôi nghe rõ."' in prompt
+    assert "Áo khoác xanh" not in prompt

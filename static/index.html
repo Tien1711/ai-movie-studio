@@ -1201,6 +1201,10 @@
               <option value="tts" selected>🎙️ Lồng tiếng thuyết minh (Edge-TTS)</option>
               <option value="ai_voice">🤖 Đưa thoại vào Prompt (AI tạo tiếng)</option>
             </select>
+            <label id="movieMuseNarratorRow" class="studio-field" hidden>
+              Voice ID người kể Muse
+              <input id="movieMuseNarratorId" list="museVoiceCatalog" maxlength="160" placeholder="avocado_v2:…">
+            </label>
           </div>
           <div>
             <div class="u-row-between">
@@ -2631,7 +2635,7 @@
         <div class="form-row cols-2 u-mt10">
           <div>
             <div class="u-row-between">
-              <label class="u-mb0">Giọng nói riêng của nhân vật</label>
+              <label class="u-mb0">Giọng lồng tiếng của Studio</label>
               <button type="button" class="btn btn-ghost btn-sm u-fs11 u-p-1-6 u-c-accent" onclick="testPlayVoice(document.getElementById('charVoice').value)">🔊 Nghe thử</button>
             </div>
             <select class="u-mt4" id="charVoice">
@@ -2650,6 +2654,37 @@
               <input type="file" id="charUploadInput" accept="image/*" style="display:none;" onchange="handleCharAvatarUpload(this)">
             </div>
           </div>
+        </div>
+        <div class="form-row cols-2 u-mt10">
+          <label>Voice ID của Muse
+            <input id="charMuseVoiceId" list="museVoiceCatalog" maxlength="160" placeholder="Chọn hoặc dán avocado_v2:…">
+          </label>
+          <div class="form-row cols-2">
+            <label>Ngôn ngữ <input id="charMuseVoiceLanguage" value="vi" maxlength="24"></label>
+            <label>Tốc độ <input id="charMuseVoiceSpeed" value="1" type="number" min="0.01" step="any"></label>
+          </div>
+        </div>
+        <datalist id="museVoiceCatalog">
+          <option value="avocado_v2:vd2_r8_rep1k_a131_v068_28k_g5k" label="Breathless Rosette · Nữ · Tiếng Việt">
+          <option value="avocado_v2:vd3_vd2_r8_rep5k_3492_v068_28k_g5k" label="Glad Kite · Nữ · Tiếng Việt">
+          <option value="avocado_v2:vd2_r8_rep5k_3492_v068_28k_g5k" label="Sparkling Whistle · Nữ · Tiếng Việt">
+          <option value="avocado_v2:vd2_r8_rep5k_3491_v068_28k_g5k" label="Kindhearted Jetty · Nam · Tiếng Việt">
+          <option value="avocado_v2:vd2_smoky_teacup" label="Questioning Satchel · Nam · Tiếng Việt">
+          <option value="avocado_v2:vd2_r8_rep5k_3497_v068_28k_g5k" label="Tenacious Mooring · Nam · Tiếng Việt">
+          <option value="avocado_v2:vd2_r8_rep5k_3494_v068_28k_g5k" label="Zealous Harbor · Nam · Tiếng Việt">
+          <option value="avocado_v2:MAI_01" label="Aria">
+        </datalist>
+        <div class="form-row u-mt10">
+          <label>Nguồn thoại Muse
+            <select id="charMuseVoiceDelivery">
+              <option value="on_screen">Nhân vật nói trên hình</option>
+              <option value="offscreen">Người nói ngoài khung</option>
+              <option value="radio">Ngoài hình · qua bộ đàm</option>
+              <option value="phone">Ngoài hình · qua điện thoại</option>
+              <option value="speaker">Qua loa phát thanh</option>
+              <option value="thought">Độc thoại nội tâm</option>
+            </select>
+          </label>
         </div>
         <div class="form-row u-mt10">
           <div>
@@ -2852,6 +2887,16 @@
             placeholder="Nhập prompt tiếng Việt (vd: cô gái mukbang đồ ăn) hoặc tiếng Anh..."></textarea>
           <div data-cast-picker="quick"></div><label class="studio-field">Phong cách<select id="qvStyle"><option value="cinematic">Điện ảnh chân thực</option></select></label><div data-style-cards="qvStyle"></div>
         </div>
+        <details class="form-group">
+          <summary>Thoại và giọng kể Muse</summary>
+          <label for="qvDialogue">Thoại từng nhân vật</label>
+          <textarea id="qvDialogue" class="form-control" rows="3" maxlength="3000" placeholder="Hải [radio]: Tôi nghe rõ."></textarea>
+          <small>Chọn nhân vật ở trên. Mỗi dòng ghi tên, nguồn tiếng và câu nói. Nguồn tiếng gồm on_screen, offscreen, radio, phone, speaker và thought.</small>
+          <label for="qvNarration">Lời kể ngoài hình</label>
+          <textarea id="qvNarration" class="form-control" rows="2" maxlength="3000"></textarea>
+          <label for="qvNarratorId">Voice ID người kể (tùy chọn)</label>
+          <input id="qvNarratorId" class="form-control" list="museVoiceCatalog" maxlength="160" placeholder="avocado_v2:…">
+        </details>
 
 
         <!-- Size + Duration row -->
@@ -3427,9 +3472,9 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js?v=20261128_launch_bat" defer></script>
+<script src="static/js/app.js?v=20261128_muse_voice_shared" defer></script>
 <script src="static/js/muse-studio.js?v=20261126_perf" defer></script>
-<script src="static/js/studio-editor.js?v=20261128_clip_audio" defer></script>
+<script src="static/js/studio-editor.js?v=20261128_muse_voice_shared" defer></script>
 <script src="static/js/ui.js?v=20261126_perf" defer></script>
 
 <!-- Floating Multi-Shot Batch Action Bar -->

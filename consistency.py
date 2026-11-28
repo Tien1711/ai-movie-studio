@@ -439,7 +439,11 @@ def build_bridge_scenes_for_jumps(video: Dict[str, Any]) -> tuple[List[Dict[str,
     return new_scenes, inserted
 
 
-def resolve_scene_cast(scene, registry):
+DIALOGUE_SOURCES = ("on_screen", "offscreen", "radio", "phone", "speaker", "thought")
+NATIVE_VOICE_MODES = ("ai_voice", "native", "none", "no_dub")
+
+
+def resolve_scene_cast(scene, registry, *, require_tts_voice=True):
     """Validate explicitly declared cast and resolve named dialogue without changing the words."""
     aliases = {str(alias).strip().casefold(): c for c in registry if c.get("kind", "character") == "character"
                for alias in [c.get("id"), c.get("name"), *(c.get("aliases") or [])] if alias}
@@ -461,7 +465,13 @@ def resolve_scene_cast(scene, registry):
         if not line.strip():
             continue
         marker, sep, words = line.partition(":")
+        delivery = None
         if sep:
+            source = re.fullmatch(r"(.+?)\s*\[([a-z_]+)\]\s*", marker, re.I)
+            if source and marker.strip().casefold() not in aliases:
+                marker, delivery = source[1], source[2].lower()
+                if delivery not in DIALOGUE_SOURCES:
+                    raise ValueError(f"Nguồn thoại [{delivery}] không hợp lệ.")
             c = lookup(marker)
         elif names:
             c, words = lookup(names[0]), line
@@ -470,9 +480,12 @@ def resolve_scene_cast(scene, registry):
         voice = c.get("voice_id") or c.get("voice")
         if isinstance(voice, dict):
             voice = voice.get("voice_id") or voice.get("id")
-        if not voice or not words.strip():
+        if (require_tts_voice and not voice) or not words.strip():
             raise ValueError(f"Thiếu lời thoại hoặc giọng đã khóa cho {c['name']}.")
-        segments.append({"character":c["name"], "voice":voice, "text":words.strip()})
+        segment = {"character": c["name"], "voice": voice, "text": words.strip()}
+        if delivery:
+            segment["delivery"] = delivery
+        segments.append(segment)
     return cast, segments
 
 
@@ -498,10 +511,12 @@ def run_consistency_checks(req: Dict[str, Any],
 
     for scene in scenes:
         try:
-            _, segments = resolve_scene_cast(scene, req.get("characters") or [])
+            native = ((scene.get("voice_mode") or req.get("voice_mode")) in NATIVE_VOICE_MODES
+                      or (scene.get("voice") or default_voice) in NATIVE_VOICE_MODES)
+            _, segments = resolve_scene_cast(scene, req.get("characters") or [], require_tts_voice=not native)
             if segments:
                 scene = {**scene, "voice_segments": segments}
-                if len({s["character"] for s in segments}) > len({s["voice"] for s in segments}):
+                if not native and len({s["character"] for s in segments}) > len({s["voice"] for s in segments}):
                     checks.append(_check("warning","duplicate_voice","Hai nhân vật đang dùng cùng một giọng.",scene_index=scene.get("index")))
         except ValueError as error:
             checks.append(_check("error", "cast_registry", str(error), scene_index=scene.get("index")))

@@ -258,6 +258,45 @@ def test_quick_video_proxy_authenticates_private_browser_video_and_forwards_rang
     assert muse_config.browser_media_headers("https://muse.ai" + video_path, studio.MUSE_API_URL, studio.MUSE_API_KEY) == {}
 
 
+@pytest.mark.parametrize("provider", ["browser", "muse2api"])
+def test_quick_video_sends_locked_speakers_and_sources(monkeypatch, provider):
+    from contextlib import asynccontextmanager
+
+    cast = [
+        {"name": "Hải", "description": "Áo khoác xanh", "muse_voice": {"voice_id": "avocado_v2:MAI_03"}},
+        {"name": "An", "description": "Áo mưa vàng", "muse_voice": {"voice_id": "avocado_v2:MAI_01"}},
+    ]
+    monkeypatch.delenv("STUDIO_API_KEY", raising=False)
+    monkeypatch.setattr(studio, "MUSE_API_KEY", "fixture-key")
+    monkeypatch.setattr(studio, "MUSE_PROVIDER", provider)
+    monkeypatch.setattr(studio, "_selected_cast", lambda _: cast)
+    captured = []
+
+    class VideoClient:
+        async def post(self, url, **kwargs):
+            assert url.endswith("/v1/videos")
+            captured.append(kwargs["json"]["prompt"])
+            return studio.httpx.Response(202, json={"id": f"speech-{provider}"})
+
+    @asynccontextmanager
+    async def client():
+        yield VideoClient()
+
+    monkeypatch.setattr(studio, "_shared_client_ctx", client)
+    res = TestClient(studio.app).post("/api/quick-video", json={
+        "prompt": "A cinematic close shot with dramatic lighting on a dock at dusk in the rain",
+        "dialogue": "Hải [radio]: Tôi nghe rõ.\nAn [thought]: Mình phải nhanh lên.",
+        "voiceover": "Trời vừa tạnh.",
+        "muse_narrator": {"voice_id": "avocado_v2:vd2_smoky_teacup"},
+    })
+    assert res.is_success, res.text
+    visual, voice = captured[0].split("\n\n", 1)
+    assert "Áo khoác xanh" not in visual and "Áo mưa vàng" in visual
+    assert "avocado_v2:MAI_03" in voice and "avocado_v2:vd2_smoky_teacup" in voice
+    assert voice.index('Off-screen narrator: "Trời vừa tạnh."') < voice.index('Hải: "Tôi nghe rõ."')
+    assert "[INNER MONOLOGUE · ALL VISIBLE LIPS CLOSED] An:" in voice
+
+
 def test_launch_muse_chrome_workers_invokes_explorer_on_bat(monkeypatch):
     import subprocess
 

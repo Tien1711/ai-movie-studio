@@ -1883,7 +1883,8 @@ async def generate_affiliate_script_ai(
         "Quy tắc bắt buộc:\n"
         "1. Phải có đúng 5 cảnh: Scene 1 (Hook 3s), Scene 2 (Pain point/Vấn đề), Scene 3 (Demo sản phẩm/Giải pháp), Scene 4 (Proof/Deal hời), Scene 5 (CTA giỏ hàng góc trái).\n"
         f"2. Prompt cho mỗi cảnh phải là TIẾNG ANH thương mại điện ảnh cực kỳ chi tiết, tỷ lệ {_ar_en}, studio lighting, 8k, photorealistic, no text, no watermark.\n"
-        "3. Voiceover phải là tiếng Việt tự nhiên, có dấu chấm câu ngắt nghỉ rõ ràng để máy đọc TTS chuẩn xác.\n"
+        "3. Voiceover là giọng kể ngoài hình bằng tiếng Việt tự nhiên, có dấu câu và ngắt nghỉ rõ ràng để lồng tiếng. "
+        "Prompt hình ảnh chỉ mô tả hành động, sản phẩm và phản ứng im lặng. Người xuất hiện trên hình không đọc lời kể.\n"
         "4. Trả về DUY NHẤT một khối JSON hợp lệ theo schema:\n"
         "{\n"
         '  "title": "Tên kịch bản giật tít",\n'

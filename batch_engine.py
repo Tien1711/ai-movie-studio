@@ -15,6 +15,7 @@ Mỗi Worker độc lập: Sinh TTS + Gửi Muse2API + Poll + Tải video.
 import asyncio
 import base64
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -32,6 +33,7 @@ from urllib.parse import urljoin
 
 # ── Giới hạn / timeout (audit §1.11, §1.12, §3.6-3.8) ─────────────────────────
 from muse_connection import browser_media_headers, current_muse_affinity
+from muse_voice import append_muse_speech, plan_muse_speech
 
 MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024          # video tải về tối đa 500 MB
 MAX_KEYFRAME_BYTES = 50 * 1024 * 1024           # ảnh keyframe tối đa 50 MB
@@ -43,7 +45,7 @@ TRANSIENT_HTTP_STATUSES = {408, 429, 502, 503, 504}
 # Neo lại nhân vật trong chuỗi sequential: lỗi nhỏ tích lũy theo chuỗi nên
 # cứ mỗi N scene thì dùng ảnh nhân vật/keyframe thay cho prev_last_frame
 # để reset drift (consistency.py — chế độ Đồng nhất tối đa).
-from consistency import CONSISTENCY_ANCHOR_EVERY, consistency_anchor_reference, opening_reference, resolve_scene_cast  # noqa: E402
+from consistency import CONSISTENCY_ANCHOR_EVERY, NATIVE_VOICE_MODES, consistency_anchor_reference, opening_reference, resolve_scene_cast  # noqa: E402
 
 # Cache duration theo (path, mtime, size) — tránh spawn ffmpeg lặp lại (§3.5).
 _DURATION_CACHE: Dict[Tuple[str, float, int], float] = {}
@@ -1110,7 +1112,14 @@ def apply_film_characters(prompt: str, scene: Dict[str, Any],
         parts.append(str(scene.get("character") or ""))
     parts.append(prompt)
     scene_text = " ".join(p for p in parts if p)
-    matched = resolve_scene_cast(scene, characters)[0] if scene.get("characters") else match_film_characters(scene_text, characters)
+    if "muse_visible_cast" in scene:
+        matched = resolve_scene_cast({"characters": scene["muse_visible_cast"]}, characters)[0]
+    elif scene.get("characters"):
+        matched = resolve_scene_cast(scene, characters, require_tts_voice=not scene.get("muse_voice_direction"))[0]
+    else:
+        matched = match_film_characters(scene_text, characters)
+    remote = set(scene.get("muse_offscreen_speakers") or [])
+    matched = [person for person in matched if person["name"] not in remote]
     if not matched:
         return prompt
     out = prompt.rstrip()
@@ -1256,7 +1265,7 @@ def classify_scene_speech_mode(
     """
     dialogue = (scene.get("dialogue") or "").strip()
     explicit_mode = (scene.get("voice_mode") or "").strip().lower()
-    if scene.get("offscreen_narration") is True or explicit_mode == "narration":
+    if scene.get("offscreen_narration") is True or (explicit_mode == "narration" and not scene.get("muse_voice_direction")):
         return "offscreen_narration" if (voiceover or dialogue or voice_segments) else "ambient_only"
     if dialogue or voice_segments or explicit_mode == "dialogue" or scene.get("speak_onscreen") is True:
         return "onscreen_dialogue"
@@ -1290,8 +1299,8 @@ def build_scene_prompt(
     scene_voice = scene.get("voice") or voice
     scene_voice_mode = scene.get("voice_mode") or voice_mode or "tts"
     is_ai_voice = bool(
-        scene_voice_mode in ("ai_voice", "native", "none", "no_dub")
-        or scene_voice in ("ai_voice", "native", "none", "no_dub")
+        scene_voice_mode in NATIVE_VOICE_MODES
+        or scene_voice in NATIVE_VOICE_MODES
     )
     voice_segments = scene.get("voice_segments") or []
 
@@ -1330,7 +1339,9 @@ def build_scene_prompt(
     if is_ai_voice:
         # 🤖 CHẾ ĐỘ AI TỰ SINH ÂM THANH GỐC
         if speech_mode == "onscreen_dialogue":
-            if voice_segments and len(voice_segments) > 0:
+            if scene.get("muse_voice_direction"):
+                prompt += ", native dialogue with natural lip synchronization, using the voice profiles below"
+            elif voice_segments:
                 dialogue_parts = []
                 for seg in voice_segments:
                     cname = (seg.get("character") or seg.get("speaker") or "").strip()
@@ -1353,6 +1364,8 @@ def build_scene_prompt(
             elif voiceover:
                 spk_clause = f"the character {spk_names[0]}" if spk_names else "the character"
                 prompt = f"{prompt}, audible sound design and native speech: {spk_clause} speaking with natural voice '{voiceover}', synchronized realistic vocal audio and clear ambient atmosphere"
+        elif speech_mode == "offscreen_narration" and scene.get("muse_voice_direction"):
+            prompt += ", all speech comes from the off-screen voice sources specified below; on-screen characters act silently"
         elif speech_mode == "offscreen_narration" and voiceover:
             prompt = (
                 f"{prompt}, off-screen third-person Vietnamese documentary voiceover reading '{voiceover}'; "
@@ -1370,7 +1383,7 @@ def build_scene_prompt(
                     "characters act through movement, posture, and glances without speaking. "
                     "Preserve the requested framing and natural action."
                 )
-        elif has_dialogue and not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation", "talking with"]):
+        elif has_dialogue and not scene.get("muse_voice_direction") and not any(k in p_lower for k in ["lip movement", "mouth movement", "speaking dialogue", "lip sync", "khớp môi", "articulation", "talking with"]):
             spk_clause = f"the character {', '.join(spk_names)}" if spk_names else "the character"
             others_clause = " while non-speaking characters listen silently with closed mouths" if len(scene.get("characters") or []) > len(spk_names) else ""
             prompt = f"{prompt}, medium shot of {spk_clause} talking with expressive natural synchronized mouth movement and realistic lip articulation speaking Vietnamese dialogue{others_clause}"
@@ -1391,6 +1404,44 @@ def build_scene_prompt(
     }
 
 
+def _prepare_scene_prompt(scene, style_locks, voice, voice_mode, characters):
+    native = ((scene.get("voice_mode") or voice_mode) in NATIVE_VOICE_MODES
+              or (scene.get("voice") or voice) in NATIVE_VOICE_MODES)
+    prepared = dict(scene)
+    if not scene.get("muse_voice_direction"):
+        if not (scene.get("voiceover") or scene.get("dialogue") or scene.get("voice_segments") or scene.get("raw_studio")):
+            _, extracted = clean_script_prompt(scene.get("prompt") or "")
+            if extracted:
+                prepared["voiceover"] = extracted
+        speech = plan_muse_speech(
+            prepared, characters, scene.get("muse_narrator"), native=native,
+            freeform=native and not scene.get("raw_studio"),
+        )
+        prepared.update(muse_voice_direction=speech.direction,
+                        muse_offscreen_speakers=sorted(speech.remote))
+        if speech.direction:
+            prepared["offscreen_narration"] = speech.offscreen
+    if scene.get("characters") or scene.get("dialogue"):
+        cast, segments = resolve_scene_cast(scene, characters or [], require_tts_voice=not native)
+        if segments:
+            remote = set(prepared.get("muse_offscreen_speakers") or [])
+            if not native:
+                narration = (scene.get("voiceover") or "").strip()
+                spoken = " ".join(seg["text"] for seg in segments)
+                if narration and narration.casefold() != spoken.casefold():
+                    segments.insert(0, {"character": "Narrator", "text": narration, "voice": scene.get("voice") or voice})
+                prepared["voiceover"] = " ".join(seg["text"] for seg in segments)
+            prepared.update(muse_visible_cast=[person["name"] for person in cast if person["name"] not in remote],
+                            voice_segments=segments)
+    built = build_scene_prompt(prepared, style_locks, voice, voice_mode)
+    built["speech_context"] = {
+        name: prepared[name] for name in ("characters", "voice_segments", "muse_voice_direction",
+                                          "muse_offscreen_speakers", "muse_visible_cast", "offscreen_narration")
+        if name in prepared
+    }
+    return built
+
+
 async def prefetch_scene(
     scene: Dict[str, Any],
     output_dir: str,
@@ -1398,6 +1449,7 @@ async def prefetch_scene(
     style_locks: Optional[Dict[str, str]] = None,
     voice_mode: str = "tts",
     cancel_event: Optional[asyncio.Event] = None,
+    characters: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Chuẩn bị trước cho 1 cảnh trong lúc cảnh khác đang chờ API video.
 
@@ -1424,7 +1476,7 @@ async def prefetch_scene(
     if cancel_event is not None and cancel_event.is_set():
         return cancelled_result
     try:
-        built = build_scene_prompt(scene, style_locks, voice, voice_mode)
+        built = _prepare_scene_prompt(scene, style_locks, voice, voice_mode, characters)
     except Exception as pref_err:
         return {
             "index": idx, "prefetched": False, "cancelled": False,
@@ -1527,11 +1579,8 @@ async def process_scene(
             if _prefetched is not None:
                 built = _prefetched
             else:
-                if scene.get("characters") or scene.get("dialogue"):
-                    _, segments = resolve_scene_cast(scene, characters or [])
-                    if segments:
-                        scene = {**scene, "voice_segments": segments, "voiceover": " ".join(seg["text"] for seg in segments)}
-                built = build_scene_prompt(scene, style_locks, voice, voice_mode)
+                built = _prepare_scene_prompt(scene, style_locks, voice, voice_mode, characters)
+            scene = {**scene, **built["speech_context"]}
             raw_prompt = built["raw_prompt"]
             voiceover = built["voiceover"]
             scene_voice = built["scene_voice"]
@@ -1589,7 +1638,8 @@ async def process_scene(
                 prompt += "\nSetting: " + scene["setting"]
             if scene.get("world_description") and scene["world_description"] not in prompt:
                 prompt += "\n" + scene["world_description"]
-            if scene.get("dialogue"):
+            muse_voice_direction = scene.get("muse_voice_direction")
+            if scene.get("dialogue") and not muse_voice_direction:
                 prompt += "\nSpoken dialogue, match lip movement verbatim:\n" + scene["dialogue"]
 
             if prompt != raw_prompt:
@@ -1681,7 +1731,9 @@ async def process_scene(
                 if tts_task is not None and not tts_task_is_prefetch:
                     tts_started = time.monotonic()
 
-                payload = {"prompt": prompt, "duration": duration, "size": size, "timeout": 600}
+                outgoing_prompt = append_muse_speech(prompt, muse_voice_direction)
+                result["used_prompt"] = outgoing_prompt
+                payload = {"prompt": outgoing_prompt, "duration": duration, "size": size, "timeout": 600}
                 affinity = current_muse_affinity()
                 if affinity:
                     payload["affinity"] = affinity
@@ -2325,7 +2377,7 @@ async def run_batch(
                     ):
                         pending_prefetch[nxt_idx] = asyncio.create_task(
                             prefetch_scene(nxt, output_dir, voice, style_locks=style_locks,
-                                           voice_mode=voice_mode, cancel_event=cancel_event)
+                                           voice_mode=voice_mode, cancel_event=cancel_event, characters=characters)
                         )
                 pf_task = pending_prefetch.pop(idx, None)
                 if idx < start_scene_idx and s.get("status") == "done" and s.get("video_path"):
@@ -2414,7 +2466,7 @@ async def run_batch(
             # vẫn đúng: render chỉ bắt đầu sau khi nhận last frame trước.
             pf_task = asyncio.create_task(
                 prefetch_scene(s, output_dir, voice, style_locks=style_locks,
-                               voice_mode=voice_mode, cancel_event=cancel_event)
+                               voice_mode=voice_mode, cancel_event=cancel_event, characters=characters)
             )
             try:
                 return await _worker_with_chain_inner(s, order_idx, pf_task)

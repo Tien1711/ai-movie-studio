@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import os
+import shutil
 import threading
 import uuid
 import zipfile
@@ -19,7 +20,9 @@ import batch_video_engine as batch
 import composer
 import story_engine
 import studio_workflow as wf
+from consistency import resolve_scene_cast
 from studio_styles import GROUPS
+from muse_voice import MuseNarratorProfile, MuseVoiceProfile, narrator_text, scene_voice_prompt
 
 router = APIRouter()
 _storage_lock = threading.RLock()
@@ -92,7 +95,7 @@ def action(vid: str, req: Command):
 def scene_media(
     vid: str,
     index: int,
-    kind: Literal["frame", "speech", "clip", "previous_clip", "last_frame"],
+    kind: Literal["frame", "speech", "clip", "previous_clip", "last_frame", "comic_panel"],
 ):
     video = batch.BATCH_MANAGER.get_video(vid)
     try:
@@ -111,6 +114,7 @@ def scene_media(
         path,
         media_type={
             "frame": "image/webp",
+            "comic_panel": "image/webp",
             "clip": "video/mp4",
             "previous_clip": "video/mp4",
             "last_frame": "image/jpeg",
@@ -467,12 +471,101 @@ class BridgeRequest(BaseModel):
     version: float
 
 
+class CastLock(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    muse_voice: MuseVoiceProfile | None = None
+    upload: str = Field(default="", max_length=300)
+
+
+class CastLocksRequest(BaseModel):
+    version: float
+    entries: list[CastLock] = Field(default_factory=list, max_length=200)
+    muse_narrator: MuseNarratorProfile | None = None
+
+
+@router.put("/api/muse-studio/{vid}/cast-locks")
+def save_cast_locks(vid: str, req: CastLocksRequest):
+    with batch._QUEUE_LOCK:
+        video = batch.BATCH_MANAGER.get_video(vid)
+        if (
+            not video or not video.get("guided") or video.get("operation")
+            or video["status"] in wf.BUSY or video["updated_at"] != req.version
+        ):
+            raise HTTPException(409, "Bản dựng đang chạy hoặc đã thay đổi.")
+        cast = video.get("cast", [])
+        entries = {entry.name: entry for entry in req.entries}
+        names = {person["name"] for person in cast if person.get("kind", "character") == "character"}
+        if len(entries) != len(req.entries) or not entries.keys() <= names:
+            raise HTTPException(422, "Danh sách nhân vật của bản dựng đã thay đổi.")
+        for entry in req.entries:
+            if entry.upload and (not entry.upload.startswith("/api/uploads/") or not media._resolve_safe_reference(entry.upload)):
+                raise HTTPException(422, f"Ảnh tham chiếu của {entry.name} chưa được tải lên Studio.")
+
+        saved_narrator = video.get("muse_narrator")
+        if saved_narrator:
+            saved_narrator = {"delivery": "on_screen", **saved_narrator}
+        narrator = saved_narrator
+        if "muse_narrator" in req.model_fields_set:
+            narrator = req.muse_narrator.model_dump() if req.muse_narrator else None
+        narrator_changed = narrator != saved_narrator
+        photo_changed, voice_changed = set(), set()
+        for person in cast:
+            entry = entries.get(person["name"])
+            if not entry:
+                continue
+            if entry.upload and entry.upload != person.get("avatar"):
+                person["avatar"] = entry.upload
+                photo_changed.add(person["name"])
+            profile = entry.muse_voice.model_dump() if entry.muse_voice else None
+            old_profile = person.get("muse_voice")
+            if old_profile:
+                old_profile = {"delivery": "on_screen", **old_profile}
+            if profile != old_profile:
+                voice_changed.add(person["name"])
+                if profile:
+                    person["muse_voice"] = profile
+                else:
+                    person.pop("muse_voice", None)
+        if photo_changed or voice_changed or narrator_changed:
+            invalidated = False
+            native_audio = video.get("clip_audio_mode") == "native"
+            for shot in video["scenes"]:
+                used = {person["name"] for person in wf.references(video, shot)} if photo_changed or voice_changed else set()
+                if used & photo_changed:
+                    wf.set_image(shot, None)
+                    invalidated = True
+                elif native_audio and narrator_changed and shot.get("clip") and (shot.get("voiceover") or "").strip():
+                    wf.invalidate_clip(shot)
+                    invalidated = True
+                elif native_audio and voice_changed and shot.get("dialogue"):
+                    _, lines = resolve_scene_cast(shot, cast, require_tts_voice=False)
+                    if any(line["character"] in voice_changed for line in lines):
+                        wf.invalidate_clip(shot)
+                        invalidated = True
+            updates = {"cast": cast, "scenes": video["scenes"]}
+            if narrator_changed:
+                updates["muse_narrator"] = narrator
+            if invalidated:
+                wf.refresh_joins(video["scenes"])
+                updates.update(**wf.INVALID_FINAL, status="draft" if video["status"] == "draft" else "review")
+            batch.BATCH_MANAGER.update_video(vid, updates)
+    return {"ok": True}
+
+
 @router.post("/api/muse-studio/{vid}/bridge-shots")
 def bridge_shots(vid: str, req: BridgeRequest):
     try:
         return wf.insert_bridge_shots(vid, req.version)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
+
+
+@router.post("/api/muse-studio/{vid}/scenes/{index}/split-voice-turns")
+def split_voice_turns(vid: str, index: int, req: BridgeRequest):
+    try:
+        return wf.split_muse_voice_turns(vid, index, req.version)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
 
 
 @router.post("/api/muse-studio/{vid}/fit-durations")
@@ -524,6 +617,17 @@ def chapter_settings(vid: str, req: ChapterSettings):
                 if not s.get("voice"):
                     s["speech"] = None
                     s["speech_duration"] = None
+        if req.clip_audio_mode == "native" and video.get("clip_audio_mode") != "native":
+            narrator = video.get("muse_narrator")
+            for s in video["scenes"]:
+                if s.get("clip") and (s.get("dialogue") or narrator_text(s, narrator)):
+                    try:
+                        current_voice = scene_voice_prompt(s, video.get("cast", []), narrator)
+                    except ValueError:
+                        current_voice = ""
+                    if not current_voice or current_voice not in (s.get("used_prompt") or ""):
+                        wf.invalidate_clip(s)
+            wf.refresh_joins(video["scenes"])
         batch.BATCH_MANAGER.update_video(
             vid,
             {
@@ -571,6 +675,15 @@ def rebuild(vid: str):
                 "duration",
                 "voiceover",
                 "voice",
+                "page_url",
+                "comic_page",
+                "comic_panel_number",
+                "comic_panel_box",
+                "comic_panel",
+                "comic_source_color",
+                "comic_lines",
+                "muse_voice_turn",
+                "turn_reference",
             )
             if k in s
         }
@@ -600,10 +713,21 @@ def rebuild(vid: str):
             "clip_parallel_mode",
             "timing_mode",
             "clip_audio_mode",
+            "muse_narrator",
             "watermark_text",
+            "comic",
+            "comic_pages",
+            "comic_pages_done",
+            "comic_settings",
         )
         if k in v
     }
+    source_assets = {
+        s[field]: wf.asset_path(vid, s[field])
+        for s in scenes for field in ("comic_panel", "turn_reference") if s.get(field)
+    }
+    if any(not path.is_file() for path in source_assets.values()):
+        raise HTTPException(409, "Bản dựng thiếu ảnh tham chiếu gốc.")
     item = batch.BATCH_MANAGER.add_batch(
         [v["title"]],
         aspect_ratio=v["aspect_ratio"],
@@ -614,6 +738,10 @@ def rebuild(vid: str):
         auto_run=False,
         extra={**meta, "guided": True, "render_mode": "ai_video"},
     )[0]
+    if source_assets:
+        (wf.directory(item["id"]) / "media").mkdir(exist_ok=True)
+        for token, source in source_assets.items():
+            shutil.copy2(source, wf.asset_path(item["id"], token))
     return {"id": item["id"]}
 
 

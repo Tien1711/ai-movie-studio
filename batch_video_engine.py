@@ -1290,7 +1290,7 @@ class BatchVideoManager:
                 "compliance_prompt": None,
                 "risk_level": "low",
                 "voiceover": s.get("voiceover", ""),
-                "voice_mode": "dialogue" if s.get("dialogue") else "narration",
+                "voice_mode": "native" if v.get("clip_audio_mode") == "native" else "dialogue" if s.get("dialogue") else "narration",
                 "dialogue":s.get("dialogue") or "",
                 "speaker": "",
                 "voice": s.get("voice") or default_voice,
@@ -1333,7 +1333,8 @@ class BatchVideoManager:
             "aspect_ratio": aspect_ratio,
             "visual_style": v.get("visual_style", "anime"),
             "default_voice": default_voice,
-            "default_voice_mode": "narration",
+            "default_voice_mode": "native" if v.get("clip_audio_mode") == "native" else "narration",
+            "muse_narrator": v.get("muse_narrator"),
             "total_duration": sum(sh["duration"] for sh in shots),
             "shot_duration": 6,
             "shots": shots,
@@ -1588,6 +1589,13 @@ class _BatchCancellation:
             return self.video_id in _CANCELLED_VIDEOS
 
 
+def character_portrait(character):
+    sheet = character.get("character_sheet")
+    if not isinstance(sheet, dict):
+        sheet = {}
+    return character.get("avatar") or sheet.get("front") or sheet.get("closeup") or sheet.get("fullbody")
+
+
 def _cast_reference(characters):
     """Muse accepts one attachment. For an ensemble, put named portraits in reading order."""
     from batch_engine import _browser_image_from_url
@@ -1595,7 +1603,7 @@ def _cast_reference(characters):
     import io
     from PIL import Image, ImageOps
 
-    portraits = [(c["name"], c["avatar"]) for c in characters if c.get("avatar")]
+    portraits = [(c["name"], portrait) for c in characters if (portrait := character_portrait(c))]
     if len(portraits) < 2:
         return (portraits[0][1] if portraits else None), ""
     cols = min(3, len(portraits))
@@ -1630,11 +1638,26 @@ STORY_AMBIENCE_DIRECTION = (
 async def _render_story_clip(video, scene, index, directory, destination, cancel, progress):
     import httpx
     import batch_engine
+    from consistency import NATIVE_VOICE_MODES
+    from muse_voice import narrator_text, plan_muse_speech
 
     provider, base_url, key = muse_connection(active_muse_provider())
     cast = video.get("cast") or ([video["character"]] if video.get("character") else [])
     content = f"{scene['prompt']}\n{scene['voiceover']}"
-    present = batch_engine.match_film_characters(content, cast)
+    has_dialogue = bool((scene.get("dialogue") or "").strip())
+    audio_mode = video.get("clip_audio_mode")
+    strict_voice = audio_mode == "native"
+    native_audio = strict_voice or (not audio_mode and video.get("voice") in NATIVE_VOICE_MODES)
+    narrator = video.get("muse_narrator")
+    speech = plan_muse_speech(scene, cast, narrator, native=native_audio, strict=strict_voice)
+    narration = narrator_text(scene, narrator) if strict_voice else scene["voiceover"]
+    visible_dialogue = not speech.offscreen if speech.direction else has_dialogue
+    if scene.get("characters") or has_dialogue:
+        from consistency import resolve_scene_cast
+        present, _ = resolve_scene_cast(scene, cast, require_tts_voice=False)
+    else:
+        present = batch_engine.match_film_characters(content, cast)
+    present = [person for person in present if person["name"] not in speech.remote]
     if scene.get("raw_studio") or scene.get("approved_frame"):
         reference = scene.get("approved_frame")
         identity_guide = "Use the attached image as the exact first frame. Match position, lighting and screen direction." if reference else ""
@@ -1648,20 +1671,23 @@ async def _render_story_clip(video, scene, index, directory, destination, cancel
         if source == "last_frame":
             identity_guide = "Match the closing frame of the preceding shot: screen direction, lighting and positions."
     style = BATCH_VISUAL_STYLES.get(video.get("visual_style"), {}).get("prompt_suffix") or ""
-
-    has_dialogue = bool((scene.get("dialogue") or "").strip())
-    sound_direction = "" if has_dialogue else STORY_AMBIENCE_DIRECTION
-    if video.get("clip_audio_mode") == "native" and has_dialogue:
-        sound_direction = (
-            "Only the named speaker delivers each scripted line in Vietnamese. Keep each returning "
-            "speaker's accent, vocal age, pitch and cadence consistent. Other characters listen silently. "
-            "Keep location ambience continuous and footsteps and prop sounds synchronized beneath speech."
+    if scene.get("comic_panel"):
+        style = ""
+        identity_guide += (
+            " Animate the approved colored manga frame as drawn. Preserve its linework, framing, background, "
+            "and original palette. Keep each visible face, hairstyle, garment, accessory and base garment color "
+            "unchanged throughout the clip."
         )
+
+    sound_direction = "" if speech.direction or has_dialogue else STORY_AMBIENCE_DIRECTION
     shot = {
         **scene, "size": video["aspect_ratio"], "reference_image": reference,
         "keep_reference": bool(reference), "require_narration": True,
-        "offscreen_narration": not has_dialogue,
-        "voice_mode": ("native" if video.get("clip_audio_mode") == "native" else "dialogue") if has_dialogue else "narration",
+        "offscreen_narration": not visible_dialogue,
+        "muse_offscreen_speakers": sorted(speech.remote),
+        "voice_mode": "native" if native_audio else "dialogue" if has_dialogue else "narration",
+        "voiceover": narration,
+        "muse_voice_direction": speech.direction,
         "duration": scene["duration"] if scene.get("raw_studio") or scene.get("approved_frame") else min((5, 6, 8, 10), key=lambda d: abs(d - scene.get("duration", 6))),
         "prompt": (f"{scene['prompt']}\n{sound_direction}\n"
                    "One continuous moving shot. Show the action unfolding from its start to its consequence. "

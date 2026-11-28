@@ -3,6 +3,27 @@
    polling dung khi tab an, img loading=lazy. Xem static/README.md. */
 // ── Config & State ──────────────────────────────────────────────────────
 const CFG_KEY = 'aiMovieStudio_cfg';
+const museDialogueSources = [
+  ["on_screen", "Nhân vật nói trên hình"],
+  ["offscreen", "Người nói ngoài khung"],
+  ["radio", "Qua bộ đàm"],
+  ["phone", "Qua điện thoại"],
+  ["speaker", "Qua loa phát thanh"],
+  ["thought", "Độc thoại nội tâm"],
+];
+
+function parseMuseSpeakerMarker(marker) {
+  const source = marker.match(/\s*\[([a-z_]+)\]\s*$/i);
+  const delivery = source?.[1].toLowerCase();
+  return museDialogueSources.some(([id]) => id === delivery)
+    ? {character: marker.slice(0, source.index).trim(), delivery}
+    : {character: marker.trim()};
+}
+
+function museNarratorFromInput(id, profile = {}) {
+  const voice_id = document.getElementById(id)?.value.trim();
+  return voice_id ? {...(profile || {}), voice_id} : null;
+}
 let cfg = {
   concurrent: 12,
   aspectRatio: '16:9',
@@ -724,6 +745,8 @@ function onGlobalVoiceModeChanged() {
   const notice = document.getElementById('aiVoiceNoticeBar');
   const vSel = document.getElementById('voiceSelect');
   const vLbl = document.getElementById('voiceSelectLabel');
+  const narratorRow = document.getElementById('movieMuseNarratorRow');
+  if (narratorRow) narratorRow.hidden = mode !== 'ai_voice';
   if (notice) notice.style.display = (mode === 'ai_voice') ? 'flex' : 'none';
   if (mode === 'ai_voice') {
     if (vSel && vSel.value !== 'ai_voice') vSel.value = 'ai_voice';
@@ -815,6 +838,7 @@ function getSceneFromDOM(id) {
       character: seg.querySelector('.seg-char-name')?.value || '',
       text: seg.querySelector('.seg-text')?.value || '',
       voice: seg.querySelector('.seg-voice')?.value || '',
+      delivery: seg.querySelector('.seg-delivery')?.value || null,
     });
   });
 
@@ -864,6 +888,10 @@ function renderSceneItemHtml(s, i) {
             </div>
             <input class="seg-char-name" style="width:100%;background:var(--bg0);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:12px;"
               value="${esc(seg.character)}" placeholder="Ten nhan vat...">
+            <select class="seg-delivery form-control" aria-label="Nguồn tiếng">
+              <option value="">Theo hồ sơ nhân vật</option>
+              ${museDialogueSources.map(([source, label]) => `<option value="${source}" ${seg.delivery === source ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
           </div>
           <div>
             <textarea class="seg-text" rows="2" style="width:100%;background:var(--bg0);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 6px;font-size:12px;resize:vertical;"
@@ -1697,7 +1725,9 @@ function parseUniversalScript(text) {
     }
 
     // Xóa các tag cấu trúc [...]
-    const withoutTags = clean.replace(/\[[^\]]+\]/g, ' ').replace(/\s+/g, ' ').trim();
+    const withoutTags = clean.replace(/\[([^\]]+)\]/g, (tag, name) =>
+      museDialogueSources.some(([source]) => source === name.toLowerCase()) ? tag : ' '
+    ).replace(/\s+/g, ' ').trim();
 
     // 3. Bóc tách câu thoại & tên nhân vật theo mệnh đề cận kề
     const quoteMatches = [...withoutTags.matchAll(/["“]([^"”\n\r]+)["”]/g)];
@@ -1713,6 +1743,7 @@ function parseUniversalScript(text) {
       const spkMatch = before.match(/(?:^|[,\.!\?;\n])\s*([^,.\n:"]*?)\s*(?:nói|bảo|hỏi|đáp|thì thầm|gào thét|gầm lên|ngắt quãng|lẩm bẩm|hô|quát)?[^,.\n:"]*:\s*$/i);
 
       let speaker = "Nhân vật";
+      let delivery;
       let leadInStart = qIdx;
 
       if (spkMatch) {
@@ -1723,9 +1754,11 @@ function parseUniversalScript(text) {
         leadInStart = matchIndexInBefore + sepLen;
 
         const clause = before.substring(leadInStart);
-        const nameM = clause.match(/([A-ZÀ-Ỹ][a-zà-ỹ\w]+(?:\s+[A-ZÀ-Ỹ][a-zà-ỹ\w]+){0,3})/);
+        const marked = parseMuseSpeakerMarker(clause.replace(/:\s*$/, ''));
+        delivery = marked.delivery;
+        const nameM = marked.character.match(/([A-ZÀ-Ỹ][a-zà-ỹ\w]+(?:\s+[A-ZÀ-Ỹ][a-zà-ỹ\w]+){0,3})/);
         if (nameM) {
-          speaker = nameM[1].trim();
+          speaker = delivery ? marked.character : nameM[1].trim();
         }
       }
 
@@ -1738,7 +1771,8 @@ function parseUniversalScript(text) {
       voiceSegments.push({
         character: charName,
         text: speech,
-        voice: voice
+        voice,
+        delivery,
       });
     }
 
@@ -1869,14 +1903,15 @@ function parseProfessionalMarkdownScript(text) {
         const clean = line.replace(/^[>\s*-]+/, '').trim();
         const lineM = clean.match(/^\*{0,2}([^:*"\n]+?)(?:\([^\)]*\))?\*{0,2}\s*:\s*["“]?([^"”\n\r]+)["”]??$/);
         if (lineM) {
-          const charName = lineM[1].replace(/[*_]/g, '').trim();
+          const {character: charName, delivery} = parseMuseSpeakerMarker(lineM[1].replace(/\*/g, ''));
           const speech = lineM[2].trim();
           if (speech && !charName.toLowerCase().includes("hội thoại") && !charName.toLowerCase().includes("duration")) {
             const charVoice = detectCharacterVoice(charName, block, characterVoiceRegistry);
             voiceSegments.push({
               character: charName,
               text: speech,
-              voice: charVoice
+              voice: charVoice,
+              delivery,
             });
           }
         }
@@ -1943,6 +1978,7 @@ function buildMoviePayload() {
     title: document.getElementById('projectTitle').value.trim() || 'movie',
     voice: globalVoice,
     voice_mode: globalVoiceMode,
+    muse_narrator: museNarratorFromInput('movieMuseNarratorId'),
     font_size: parseInt(document.getElementById('fontSize').value) || 22,
     aspect_ratio: document.getElementById('globalAspectRatio')?.value || cfg.aspectRatio || '16:9',
     export_mode: document.getElementById('exportMode').value,
@@ -1973,6 +2009,9 @@ function buildMoviePayload() {
       voice: s.voice || '',
       voice_mode: s.voice_mode || (s.voice === 'ai_voice' ? 'ai_voice' : globalVoiceMode),
       reference_image: s.reference_image || null,
+      dialogue: s.dialogue || '',
+      characters: s.characters || [],
+      offscreen_narration: !!s.offscreen_narration,
       voice_segments: (s.voiceMode === 'multi' && s.voiceSegments && s.voiceSegments.length > 0)
         ? s.voiceSegments
         : [],
@@ -3406,6 +3445,19 @@ function renderCharacterGrid() {
   }).join('');
 }
 
+function museVoiceProfile(voiceId, language, speed, delivery = "on_screen") {
+  const voice_id = String(voiceId || "").trim();
+  if (!voice_id) return null;
+  return { voice_id, language: String(language || "").trim() || "vi", speed: Number(speed || 1), delivery };
+}
+
+function fillCharacterMuseVoice(profile) {
+  document.getElementById('charMuseVoiceId').value = profile?.voice_id || '';
+  document.getElementById('charMuseVoiceLanguage').value = profile?.language || 'vi';
+  document.getElementById('charMuseVoiceSpeed').value = profile?.speed ?? 1;
+  document.getElementById('charMuseVoiceDelivery').value = profile?.delivery || 'on_screen';
+}
+
 function openNewCharModal() {
   document.getElementById('charFormTitle').textContent = '➕ Thêm nhân vật mới';
   document.getElementById('charEditId').value = '';
@@ -3415,6 +3467,7 @@ function openNewCharModal() {
   document.getElementById('charDescription').value = '';
   updateCharAvatarPreview('');
   populateCharVoiceDropdown();
+  fillCharacterMuseVoice(null);
   document.getElementById('charFormCard').style.display = 'block';
   document.getElementById('charName').focus();
 }
@@ -3468,6 +3521,7 @@ function editCharacter(charId) {
   document.getElementById('charName').value = c.name || '';
   document.getElementById('charAliases').value = (c.aliases || []).join(', ');
   document.getElementById('charVoice').value = c.voice || 'vi-VN-HoaiMyNeural';
+  fillCharacterMuseVoice(c.muse_voice);
   document.getElementById('charAvatarUrl').value = c.avatar || '';
   document.getElementById('charDescription').value = c.description || '';
   updateCharAvatarPreview(c.avatar || '');
@@ -3490,7 +3544,13 @@ async function saveCharacterFromForm() {
   const avatar = document.getElementById('charAvatarUrl').value.trim();
   const description = document.getElementById('charDescription').value.trim();
 
-  const payload = { id, name, aliases, voice, avatar, description };
+  const muse_voice = museVoiceProfile(
+    document.getElementById('charMuseVoiceId').value,
+    document.getElementById('charMuseVoiceLanguage').value,
+    document.getElementById('charMuseVoiceSpeed').value,
+    document.getElementById('charMuseVoiceDelivery').value,
+  );
+  const payload = { id, name, aliases, voice, avatar, description, muse_voice };
 
   try {
     const res = await apiFetch('/api/characters', {
@@ -3851,6 +3911,7 @@ async function executeBeatBreakdown() {
     if (data.beats && data.beats.length > 0) {
       clearAll();
       const globalRatio = document.getElementById('globalAspectRatio')?.value || cfg.aspectRatio || "16:9";
+      const characterVoiceRegistry = {};
       data.beats.forEach((b, idx) => {
         addScene(
           b.prompt,
@@ -3859,7 +3920,9 @@ async function executeBeatBreakdown() {
           globalRatio,
           b.title || `Nhịp ${idx + 1}`,
           '',
-          [],
+          Array.isArray(b.voice_segments)
+            ? b.voice_segments.map(segment => ({...segment, voice: segment.voice || detectCharacterVoice(segment.character || '', b.prompt || '', characterVoiceRegistry)}))
+            : [],
           '',
           '',
           b.chain_from_previous !== undefined ? b.chain_from_previous : (idx > 0),
@@ -4007,7 +4070,14 @@ async function generateQuickVideo() {
   _qvSetStatus('⏳ Đang gửi yêu cầu…');
   _qvSetProgress(5, 'Đang gửi tới Muse…');
 
-  const body = { prompt, size, duration, cast_ids:selectedStudioCast('quick'), visual_style:document.getElementById('qvStyle').value };
+  const body = {
+    prompt, size, duration, cast_ids: selectedStudioCast('quick'),
+    visual_style: document.getElementById('qvStyle').value,
+    dialogue: document.getElementById('qvDialogue').value.trim(),
+    voiceover: document.getElementById('qvNarration').value.trim(),
+  };
+  const narratorId = document.getElementById('qvNarratorId').value.trim();
+  if (narratorId) body.muse_narrator = {voice_id: narratorId};
   if (_qvRefDataUrl) body.reference_image = _qvRefDataUrl;
 
   try {
@@ -4018,7 +4088,7 @@ async function generateQuickVideo() {
     });
     const d = await r.json();
     if (!r.ok || !d.success) {
-      throw new Error(d.error || `HTTP ${r.status}`);
+      throw new Error(formatApiError(d, r));
     }
 
     _qvTaskId = d.task_id || d.id;
@@ -4543,6 +4613,7 @@ async function saveCurrentProject() {
     aspect_ratio: document.getElementById('globalAspectRatio')?.value || '16:9',
     voice: document.getElementById('voiceSelect')?.value || 'vi-VN-HoaiMyNeural',
     voice_mode: document.getElementById('voiceModeSelect')?.value || 'tts',
+    muse_narrator: museNarratorFromInput('movieMuseNarratorId'),
     consistency_mode: document.getElementById('consistencyMax')?.checked ? 'max' : 'standard',
     export_mode: document.getElementById('exportMode')?.value || 'full',
     chain_mode: document.getElementById('chainMode')?.value || 'none',
@@ -4664,6 +4735,7 @@ function applyProjectData(data) {
   else applyGlobalAspectRatio('16:9', false);
   setVal('voiceSelect', data.voice, 'vi-VN-HoaiMyNeural');
   setVal('voiceModeSelect', data.voice_mode, 'tts');
+  setVal('movieMuseNarratorId', data.muse_narrator?.voice_id, '');
   setVal('exportMode', data.export_mode, 'full');
   setVal('chainMode', data.chain_mode, 'none');
   setVal('chainFallbackMode', data.chain_fallback_mode, 'independent');
@@ -4716,6 +4788,9 @@ function applyProjectData(data) {
       sheet_angle: s.sheet_angle || 'front',
       voiceMode: (s.voice_segments && s.voice_segments.length > 0) ? 'multi' : 'single',
       voiceSegments: s.voice_segments || [],
+      dialogue: s.dialogue || '',
+      characters: s.characters || [],
+      offscreen_narration: !!s.offscreen_narration,
     }));
     renderScenes();
   }
@@ -7777,6 +7852,11 @@ function openShotDeskEditModal(shotIndex) {
         </div>
 
         <!-- Cấu hình Giọng đọc & Khớp môi (Voice & Lip-Sync) -->
+        <div class="form-row">
+          <label for="sdEditDialogueInput">Thoại từng nhân vật</label>
+          <textarea id="sdEditDialogueInput" rows="3" maxlength="3000" placeholder="Hải [radio]: Tôi nghe rõ.">${esc(shot.dialogue || '')}</textarea>
+          <small>Mỗi dòng ghi tên nhân vật, nguồn tiếng và câu nói. Nguồn tiếng gồm on_screen, offscreen, radio, phone, speaker và thought.</small>
+        </div>
         <div class="form-row" style="background:var(--bg0);border:1px solid var(--border);border-radius:8px;padding:12px;margin:12px 0;">
           <div class="u-fw700 u-fs12 u-c-accent u-mb10 fx fx-jc-sb fx-ac">
             <span>🎙️ CẤU HÌNH GIỌNG ĐỌC & KHỚP MÔI (VOICE & LIP-SYNC)</span>
@@ -7788,7 +7868,7 @@ function openShotDeskEditModal(shotIndex) {
               <select class="u-w100" id="sdEditVoiceModeInput" onchange="onShotVoiceModeChanged()">
                 <option value="narration" ${voiceMode === 'narration' ? 'selected' : ''}>🎙️ Thuyết minh dẫn chuyện (Lồng tiếng TTS)</option>
                 <option value="dialogue" ${voiceMode === 'dialogue' ? 'selected' : ''}>🗣️ Nhân vật tự nói (Lồng tiếng TTS + Khớp môi)</option>
-                <option value="ai_voice" ${voiceMode === 'ai_voice' ? 'selected' : ''}>🤖 Không lồng tiếng (Dùng giọng & âm thanh gốc của AI)</option>
+                <option value="ai_voice" ${['ai_voice', 'native', 'none', 'no_dub'].includes(voiceMode) ? 'selected' : ''}>🤖 Không lồng tiếng (Dùng giọng & âm thanh gốc của AI)</option>
               </select>
             </div>
             <div>
@@ -7958,6 +8038,7 @@ async function submitShotDeskEditSave(shotIndex, reRender = false) {
         prompt: pInput,
         compliance_prompt: cInput,
         voiceover: vInput,
+        dialogue: document.getElementById('sdEditDialogueInput').value,
         duration: dInput,
         transition_note: tInput,
         reset_status: reRender,
@@ -8016,8 +8097,12 @@ function openShotDeskProjectVoiceModal() {
           <select id="sdProjDefaultMode" onchange="onProjVoiceModeChanged()">
             <option value="narration" ${defaultMode === 'narration' ? 'selected' : ''}>🎙️ Thuyết minh dẫn chuyện (Lồng tiếng TTS)</option>
             <option value="dialogue" ${defaultMode === 'dialogue' ? 'selected' : ''}>🗣️ Nhân vật tự nói (Lồng tiếng TTS + Khớp môi)</option>
-            <option value="ai_voice" ${defaultMode === 'ai_voice' ? 'selected' : ''}>🤖 Không lồng tiếng (Dùng giọng & âm thanh gốc của AI)</option>
+            <option value="ai_voice" ${['ai_voice', 'native', 'none', 'no_dub'].includes(defaultMode) ? 'selected' : ''}>🤖 Không lồng tiếng (Dùng giọng & âm thanh gốc của AI)</option>
           </select>
+        </div>
+        <div class="form-row" id="sdMuseNarratorRow">
+          <label for="sdMuseNarratorId">Voice ID người kể Muse</label>
+          <input id="sdMuseNarratorId" list="museVoiceCatalog" maxlength="160" value="${esc(p.muse_narrator?.voice_id || '')}" placeholder="avocado_v2:…">
         </div>
 
         <div class="form-row" style="background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.25);border-radius:6px;padding:10px 12px;margin-top:10px;">
@@ -8043,6 +8128,8 @@ function openShotDeskProjectVoiceModal() {
 function onProjVoiceModeChanged() {
   const mode = document.getElementById('sdProjDefaultMode')?.value;
   const vSelect = document.getElementById('sdProjDefaultVoice');
+  const narratorRow = document.getElementById('sdMuseNarratorRow');
+  if (narratorRow) narratorRow.hidden = mode !== 'ai_voice';
   if (vSelect) {
     vSelect.disabled = (mode === 'ai_voice');
     vSelect.style.opacity = (mode === 'ai_voice') ? '0.45' : '1';
@@ -8063,6 +8150,7 @@ async function submitShotDeskProjectVoiceSave() {
       body: JSON.stringify({
         default_voice: defaultVoice,
         default_voice_mode: defaultMode,
+        muse_narrator: museNarratorFromInput('sdMuseNarratorId', currentShotDeskProject.muse_narrator),
         apply_to_all_shots: applyAll
       })
     });

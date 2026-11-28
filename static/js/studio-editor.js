@@ -902,6 +902,86 @@ function dialog(title, html, save, label = "Lưu") {
   dlg.showModal();
   return dlg;
 }
+
+function hasMultipleMuseTurns(video, scene) {
+  if (video.clip_audio_mode !== "native") return false;
+  const speakers = new Map();
+  for (const person of video.cast || []) {
+    if (person.kind && person.kind !== "character") continue;
+    for (const alias of [person.name, person.id, ...(person.aliases || [])].filter(Boolean)) {
+      speakers.set(alias.trim().toLowerCase(), person);
+    }
+  }
+  let previous = video.muse_narrator && scene.voiceover?.trim() ? ["", "narrator"] : null;
+  for (const line of (scene.dialogue || "").split("\n")) {
+    if (!line.trim()) continue;
+    const colon = line.indexOf(":");
+    const marker = (colon === -1 ? scene.characters?.[0] || "" : line.slice(0, colon)).trim().toLowerCase();
+    const source = !speakers.has(marker) && marker.match(/^(.+?)\s*\[([a-z_]+)\]$/);
+    const name = source ? source[1] : marker;
+    const person = speakers.get(name);
+    const current = [person?.name || name, source?.[2] || person?.muse_voice?.delivery || "on_screen"];
+    if (previous && (current[0] !== previous[0] || current[1] !== previous[1])) return true;
+    previous = current;
+  }
+  return false;
+}
+
+function castLocksDialog(video) {
+  const cast = (video.cast || []).filter((person) => (person.kind || "character") === "character");
+  const narrator = video.muse_narrator || {};
+  const narratorFields =
+    '<fieldset class="ms-cinema-section"><legend>Người kể ngôi thứ ba · ngoài hình</legend>' +
+    '<p>Chọn Voice ID để Muse đọc nội dung ô Lời kể của mỗi cảnh.</p>' +
+    '<label>Voice ID của người kể<input name="narrator_id" list="museVoiceCatalog" maxlength="160" value="' +
+    esc(narrator.voice_id || "") + '" placeholder="Chọn hoặc dán avocado_v2:…"></label>' +
+    '<div class="form-row cols-2"><label>Ngôn ngữ<input name="narrator_language" maxlength="24" value="' +
+    esc(narrator.language || "vi") + '"></label>' +
+    '<label>Tốc độ<input name="narrator_speed" type="number" min="0.01" step="any" value="' +
+    esc(narrator.speed ?? 1) + '"></label></div>' +
+    '<label>Mô tả giọng kể<textarea name="narrator_description" maxlength="600" rows="2" ' +
+    'placeholder="Ví dụ: Nam trung niên, giọng Bắc, âm vực trầm, nhịp kể đều.">' +
+    esc(narrator.description || "") + "</textarea></label></fieldset>";
+  const fields = cast.map((person, index) => {
+    const voice = person.muse_voice || {};
+    const photo = person.avatar || person.character_sheet?.front || person.character_sheet?.closeup || person.character_sheet?.fullbody;
+    return (
+      '<fieldset class="ms-cinema-section"><legend>' + esc(person.name) + "</legend>" +
+      (photo ? '<img loading="lazy" width="72" src="' + esc(photo) + '" alt="Ảnh đã khóa">' : "<p>Chưa có ảnh tham chiếu.</p>") +
+      '<label>Ảnh tham chiếu<input type="file" name="photo_' + index + '" accept="image/png,image/jpeg,image/webp"></label>' +
+      '<label>Voice ID của Muse<input name="muse_id_' + index + '" list="museVoiceCatalog" maxlength="160" value="' +
+      esc(voice.voice_id || "") + '" placeholder="Chọn hoặc dán avocado_v2:…"></label>' +
+      '<div class="form-row cols-2"><label>Ngôn ngữ<input name="lang_' + index + '" maxlength="24" value="' +
+      esc(voice.language || "vi") + '"></label>' +
+      '<label>Tốc độ<input name="speed_' + index + '" type="number" min="0.01" step="any" value="' +
+      esc(voice.speed ?? 1) + '"></label></div>' +
+      '<label>Nguồn thoại<select name="delivery_' + index + '">' +
+      options(museDialogueSources, voice.delivery || "on_screen") + '</select></label></fieldset>'
+    );
+  }).join("");
+  return dialog("Ảnh & giọng Muse", narratorFields + fields, async (data) => {
+    const entries = [];
+    for (const [index, person] of cast.entries()) {
+      const file = data.get("photo_" + index);
+      const upload = file?.size ? await uploadStudioFile(file) : "";
+      entries.push({
+        name: person.name, upload,
+        muse_voice: museVoiceProfile(
+          data.get("muse_id_" + index), data.get("lang_" + index), data.get("speed_" + index), data.get("delivery_" + index),
+        ),
+      });
+    }
+    const muse_narrator = museVoiceProfile(data.get("narrator_id"), data.get("narrator_language"), data.get("narrator_speed"));
+    if (muse_narrator) muse_narrator.description = String(data.get("narrator_description") || "").trim();
+    await editorApi("/api/muse-studio/" + encodeURIComponent(video.id) + "/cast-locks", "PUT", {
+      version: video.updated_at,
+      entries,
+      muse_narrator,
+    });
+    await refreshMuseBoard();
+  });
+}
+
 function listFilter(s, key) {
   return {
     all: true,
@@ -1061,6 +1141,7 @@ function drawGuidedBoard(board, v) {
     action("Duyệt video đã xong", "clips-ok", clips === approvedClips) +
     action("Ghép clip · giữ tiếng AI", "compose", approvedClips !== total) +
     action("Dựng phim có lời kể", "narrated", !stillMode, "btn-primary") +
+    action("Ảnh & giọng Muse", "cast-locks") +
     action("Thiết lập", "settings") +
     action("Dựng lại", "rebuild", written !== total) +
     "</div>";
@@ -1234,6 +1315,20 @@ function drawGuidedBoard(board, v) {
             : "") +
           "</div>"
         : "") +
+      (s.comic_panel
+        ? '<details><summary>' +
+          esc(s.title || "Khung truyện gốc") +
+          '</summary><p><a target="_blank" rel="noopener" href="' +
+          mediaUrl(v, s, "comic_panel") +
+          '">Mở ảnh khung gốc</a>' +
+          (s.comic_source_color === false ? " · Khung đen trắng, màu được tô theo hồ sơ" : "") +
+          "</p>" +
+          (s.comic_lines || []).map((line) =>
+            "<p><b>" + esc(line.speaker || "Chưa xác định người nói") +
+            "</b> · " + esc(line.text) + "</p>"
+          ).join("") +
+          "</details>"
+        : "") +
       (s.reference_source
         ? "<small>Ảnh đã gửi · " +
           esc(
@@ -1247,17 +1342,18 @@ function drawGuidedBoard(board, v) {
           "</small>"
         : "") +
       (s.previous_take?.clip
-        ? '<details><summary>So sánh với bản trước</summary><video controls src="' +
+        ? '<details><summary>' + (s.previous_take.before_voice_split ? "Xem cảnh trước khi tách thoại" : "So sánh với bản trước") +
+          '</summary><video controls src="' +
           mediaUrl(v, s, "previous_clip") +
           "&take=" +
           encodeURIComponent(s.previous_take.clip) +
           '"></video>' +
-          action("Khôi phục bản trước", "restore") +
+          (s.previous_take.before_voice_split ? "" : action("Khôi phục bản trước", "restore")) +
           action("Bỏ bản trước", "discard_previous") +
           "</details>"
         : "") +
       "<p>" +
-      esc(s.voiceover || "Đang chờ kịch bản") +
+      esc(s.voiceover || (s.comic_panel ? "" : "Đang chờ kịch bản")) +
       "</p>" +
       (s.speech
         ? '<audio controls preload="none" src="' +
@@ -1266,7 +1362,8 @@ function drawGuidedBoard(board, v) {
         : "") +
       '<div class="ms-tools">' +
       action("Sửa", "edit", !s.prompt) +
-      action(s.speech ? "Đọc lại" : "Đọc thử", "speech", !s.voiceover) +
+      (hasMultipleMuseTurns(v, s) ? action("Tách lượt thoại Muse", "split-voice-turns") : "") +
+      action(s.speech ? "Đọc lại" : "Đọc thử", "speech", !(s.voiceover || s.dialogue || s.comic_lines?.length)) +
       action("Thay ảnh", "replace", !s.prompt) +
       action("👁️ Chấm đồng nhất", "vision_qc", !s.frame) +
       (s.frame_approved
@@ -1399,13 +1496,23 @@ async function guidedAction(v, b) {
   if (op === "rebuild") return copyToReview(v);
   if (op === "timeline") return openCurrentBatchInShotDesk(v.id);
   if (op === "settings") return chapterSettings(v);
+  if (op === "cast-locks") return castLocksDialog(v);
+  if (op === "split-voice-turns") {
+    return dialog("Tách lượt thoại Muse",
+      "<p>Studio giữ thứ tự lời, tách góc cận người nói và tạo góc cắt cho giọng ngoài hình. Bạn cần tạo và duyệt ảnh cho góc mới. Tổng thời lượng có thể tăng.</p>",
+      async () => {
+        await editorApi("/api/muse-studio/" + encodeURIComponent(v.id) + "/scenes/" + i + "/split-voice-turns", "POST", {version: v.updated_at});
+        await refreshMuseBoard();
+      }, "Tách cảnh");
+  }
   if (op === "edit") {
-    return dialog(
+    const cast = (v.cast || []).filter((person) => (person.kind || "character") === "character");
+    const dialogNode = dialog(
       "Sửa cảnh " + i,
       '<label>Prompt và góc máy<textarea name="prompt" required maxlength="5000">' +
         esc(s.prompt) +
         "</textarea></label>" +
-        '<label>Lời kể<textarea name="voiceover" required maxlength="3000">' +
+        '<label>Lời kể<textarea name="voiceover" maxlength="3000">' +
         esc(s.voiceover) +
         '</textarea></label><label>Giọng kể<select name="voice">' +
         (v.cast || [])
@@ -1427,6 +1534,14 @@ async function guidedAction(v, b) {
         '<label>Bối cảnh và thời điểm<input name="setting" maxlength="500" value="' +
         esc(s.setting || "") +
         '"></label>' +
+        (cast.length && v.clip_audio_mode === "native" ? '<label>Nguồn cho lượt thoại mới<select data-speaker-source>' +
+          options([["", "Theo hồ sơ nhân vật"], ...museDialogueSources], "") + "</select></label>" : "") +
+        (cast.length ? '<label>Thêm người nói<select data-speaker>' +
+          options([["", "Chọn nhân vật"], ...cast.map((person) => [
+            person.name, person.name + (v.clip_audio_mode === "native"
+              ? (person.muse_voice?.voice_id ? " · " + person.muse_voice.voice_id : " · Chưa khóa giọng Muse")
+              : ""),
+          ])], "") + "</select></label>" : "") +
         '<label>Thoại nhân vật (mỗi dòng ghi tên và lời thoại)<textarea name="dialogue">' +
         esc(s.dialogue || "") +
         "</textarea></label>" +
@@ -1450,6 +1565,17 @@ async function guidedAction(v, b) {
           duration: Number(data.get("duration")),
         }),
     );
+    const speaker = dialogNode.querySelector("[data-speaker]");
+    if (speaker) speaker.onchange = () => {
+      if (!speaker.value) return;
+      const dialogue = dialogNode.querySelector('[name="dialogue"]');
+      const source = dialogNode.querySelector("[data-speaker-source]")?.value;
+      const role = source ? " [" + source + "]" : "";
+      dialogue.value = dialogue.value.trimEnd() + (dialogue.value.trim() ? "\n" : "") + speaker.value + role + ": ";
+      dialogue.focus();
+      speaker.value = "";
+    };
+    return dialogNode;
   }
   if (
     op === "clip-ok" &&
@@ -1525,10 +1651,22 @@ async function guidedAction(v, b) {
     }
     return;
   }
+  const voiceTurnNote = (warnings) => warnings.length
+    ? "<p>Cảnh " + esc(warnings.join(", ")) +
+      " có nhiều lượt thoại. Dùng Tách lượt thoại Muse để dựng riêng từng lượt và giảm lẫn người nói.</p>"
+    : "";
+  if (op === "clip" && s && hasMultipleMuseTurns(v, s)) {
+    return dialog("Làm video AI", voiceTurnNote([i]), () => stage(v, "clip", [i]), "Dựng trong một clip");
+  }
   if (op === "clips") {
     const pending = targets((s) => s.frame_approved && !s.clip);
     if (!pending.length) return;
-    if (pending.length === 1) return stage(v, "clip", pending);
+    const voiceWarnings = scenes.filter((s) => pending.includes(s.index) && hasMultipleMuseTurns(v, s)).map((s) => s.index);
+    if (pending.length === 1) {
+      return voiceWarnings.length
+        ? dialog("Làm video AI", voiceTurnNote(voiceWarnings), () => stage(v, "clip", pending), "Dựng trong một clip")
+        : stage(v, "clip", pending);
+    }
     const defaultMode = v.clip_parallel_mode || "sequential";
     const defaultWorkers = Math.max(
       2,
@@ -1536,7 +1674,8 @@ async function guidedAction(v, b) {
     );
     return dialog(
       "Làm video AI (" + pending.length + " cảnh)",
-      '<label>Chế độ dựng video AI (Tính năng #6)<select name="clip_parallel_mode">' +
+      voiceTurnNote(voiceWarnings) +
+        '<label>Chế độ dựng video AI (Tính năng #6)<select name="clip_parallel_mode">' +
         Object.entries(clipParallelModeLabels)
           .map(
             ([k, t]) =>

@@ -42,6 +42,7 @@ from batch_engine import run_batch, generate_keyframe_image, heal_prompt_with_ai
 from composer import compose_full_movie, audit_movie_scenes, compose_scene_video, run_cancellable_compose
 from consistency import run_consistency_checks
 import muse_connection as muse_config
+from muse_voice import MuseNarratorProfile, MuseVoiceProfile, plan_muse_speech
 from tts_manager import list_all_voices, synthesize_voice, VIENEU_VOICES_CONFIG, OMNIVOICE_VOICES_CONFIG
 from affiliate_engine import (
     AFFILIATE_CATEGORIES,
@@ -503,6 +504,7 @@ class VoiceSegment(BaseModel):
     character: str = Field(default="", max_length=200)  # Tên nhân vật (hiển thị)
     text: str = Field(max_length=5000)                  # Nội dung lời thoại
     voice: str = Field(max_length=200)                  # Giọng edge-tts cho nhân vật này
+    delivery: Optional[Literal["on_screen", "offscreen", "radio", "phone", "speaker", "thought"]] = None
 
 
 class SceneItem(BaseModel):
@@ -544,9 +546,12 @@ class MovieRequest(CaptionSettings):
     def render_scene(self, scene):
         result = scene.model_dump()
         result["world_description"] = self.world_bible.get(scene.setting, "")
+        if self.muse_narrator:
+            result["muse_narrator"] = self.muse_narrator.model_dump()
         return result
 
     title: str = Field(default="my_movie", max_length=200)
+    muse_narrator: MuseNarratorProfile | None = None
     voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=200)  # Giọng mặc định toàn phim
     voice_mode: Optional[str] = "tts"    # "tts" | "ai_voice" (đưa thoại vào prompt để AI tự sinh tiếng)
     font_size: int = Field(default=22, ge=8, le=72)
@@ -1688,7 +1693,7 @@ async def retry_failed_pipeline(job: Dict, auto_fix: bool = True):
         raw_concurrent = req.max_concurrent if (req and req.max_concurrent and req.max_concurrent > 0) else MAX_CONCURRENT
         max_cap = await muse_config.query_muse_capacity_async(_MUSE_MAX_CONCURRENT) if MUSE_PROVIDER == "browser" else _MUSE_MAX_CONCURRENT
         concurrent = min(raw_concurrent, max_cap)
-        with muse_config.muse_affinity_scope(job_id):
+        with muse_config.muse_affinity_scope(job["id"]):
             new_results = await run_batch(
                 scenes=scenes_dicts,
                 base_url=MUSE_API_URL,
@@ -3560,6 +3565,7 @@ class ShotEditRequest(BaseModel):
     prompt: Optional[str] = Field(default=None, max_length=5000)
     compliance_prompt: Optional[str] = Field(default=None, max_length=5000)
     voiceover: Optional[str] = Field(default=None, max_length=5000)
+    dialogue: Optional[str] = Field(default=None, max_length=3000)
     duration: Optional[int] = Field(default=None, ge=1, le=60)
     transition_note: Optional[str] = Field(default=None, max_length=1000)
     reset_status: bool = True
@@ -3572,6 +3578,7 @@ class ShotEditRequest(BaseModel):
 class ProjectSettingsRequest(BaseModel):
     default_voice: Optional[str] = Field(default=None, max_length=200)
     default_voice_mode: Optional[str] = Field(default=None, max_length=200)
+    muse_narrator: MuseNarratorProfile | None = None
     apply_to_all_shots: bool = False
 
 
@@ -3579,7 +3586,10 @@ class ProjectSettingsRequest(BaseModel):
 def api_shot_desk_update_settings(project_id: str, payload: ProjectSettingsRequest):
     """Cập nhật cấu hình giọng đọc và chế độ thoại toàn dự án."""
     try:
-        res = update_shot_desk_project_settings(project_id, payload.model_dump(exclude_none=True))
+        settings = payload.model_dump(exclude_none=True)
+        if "muse_narrator" in payload.model_fields_set and payload.muse_narrator is None:
+            settings["muse_narrator"] = None
+        res = update_shot_desk_project_settings(project_id, settings)
         return res
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -3885,6 +3895,7 @@ class ProjectSaveRequest(BaseModel):
     aspect_ratio: str = Field(default="16:9", max_length=10)
     voice: str = Field(default="vi-VN-HoaiMyNeural", max_length=200)
     voice_mode: str = Field(default="tts", max_length=20)
+    muse_narrator: MuseNarratorProfile | None = None
     consistency_mode: str = Field(default="standard", max_length=20)
     export_mode: str = Field(default="full", max_length=20)
     chain_mode: str = Field(default="none", max_length=20)
@@ -4345,6 +4356,7 @@ class CharacterModel(BaseModel):
     avatar: Optional[str] = ""
     description: Optional[str] = Field(default="", max_length=5000)
     voice: Optional[str] = Field(default="vi-VN-HoaiMyNeural", max_length=200)
+    muse_voice: MuseVoiceProfile | None = None
     character_sheet: Optional[Dict[str, str]] = Field(default_factory=lambda: {
         "front": "", "side": "", "closeup": "", "fullbody": ""
     })
@@ -4361,16 +4373,22 @@ def api_save_character(char: CharacterModel):
     """Tạo mới hoặc cập nhật hồ sơ nhân vật."""
     chars = load_characters()
     c_id = char.id or f"char_{uuid.uuid4().hex[:8]}"
+    previous = next((c for c in chars if c.get("id") == c_id), {})
     aliases = char.aliases or []
     if char.name and char.name not in aliases:
         aliases.insert(0, char.name)
 
-    sheet = char.character_sheet or {"front": "", "side": "", "closeup": "", "fullbody": ""}
+    sheet = dict(
+        (char.character_sheet if "character_sheet" in char.model_fields_set else previous.get("character_sheet")) or {}
+    )
     for k in ["front", "side", "closeup", "fullbody"]:
         if k not in sheet:
             sheet[k] = ""
 
-    avatar_val = char.avatar or ""
+    avatar_val = (char.avatar if "avatar" in char.model_fields_set else previous.get("avatar")) or ""
+    if "character_sheet" not in char.model_fields_set and "avatar" in char.model_fields_set:
+        if avatar_val or sheet["front"] == previous.get("avatar"):
+            sheet["front"] = avatar_val
     if avatar_val and not sheet.get("front"):
         sheet["front"] = avatar_val
     elif sheet.get("front") and not avatar_val:
@@ -4389,11 +4407,15 @@ def api_save_character(char: CharacterModel):
     found = False
     for i, c in enumerate(chars):
         if c.get("id") == c_id:
+            if "muse_voice" not in char.model_fields_set and c.get("muse_voice"):
+                data["muse_voice"] = c["muse_voice"]
             chars[i] = data
             found = True
             break
     if not found:
         chars.insert(0, data)
+    if char.muse_voice is not None:
+        data["muse_voice"] = char.muse_voice.model_dump()
 
     try:
         save_characters(chars)
@@ -4580,6 +4602,10 @@ async def api_breakdown_beats(req: BeatBreakdownRequest):
     prompt = f"""Bạn là Đạo diễn Điện ảnh và Chuyên gia Phân cảnh Hollywood.
 Hãy phân rã kịch bản sau thành các "nhịp" (visual beats) điện ảnh ngắn dài 3-5 giây mỗi nhịp.
 Mỗi nhịp đại diện cho 1 cú máy duy nhất (1 góc máy, 1 hành động cụ thể), chuẩn bị cho kỹ thuật nối tiếp khung hình First/Last Frame Chaining.
+Giữ nguyên lời và thứ tự từng người nói. Voiceover chỉ dùng cho người kể ngoài hình.
+Với thoại nhân vật, dùng voice_segments với nguồn tiếng on_screen, offscreen, radio, phone, speaker hoặc thought.
+Chia lời kể và thoại nhân vật thành các nhịp riêng nếu cả hai xuất hiện cùng một đoạn.
+Chỉ người đang nói trên hình mới mấp máy môi. Với giọng ngoài hình, dùng cảnh phản ứng im lặng hoặc góc cận thiết bị.
 
 Kịch bản:
 {raw}
@@ -4589,7 +4615,8 @@ Trả về JSON mảng các đối tượng:
   {{
     "title": "Tên nhịp (vd: Nhịp 1.1: Ánh mắt cảnh giác)",
     "prompt": "Prompt tiếng Anh điện ảnh chi tiết góc máy, ánh sáng, hành động ngắn duy nhất",
-    "voiceover": "Câu thoại hoặc lời dẫn ngắn gọn cho nhịp này",
+    "voiceover": "Lời kể ngoài hình hoặc chuỗi rỗng",
+    "voice_segments": [{{"character": "Tên người nói", "text": "Lời thoại nguyên văn", "delivery": "on_screen"}}],
     "duration": 4,
     "camera_angle": "closeup | side | front | fullbody",
     "chain_from_previous": true
@@ -5189,8 +5216,11 @@ async def ai_convert_script(req: ScriptConvertRequest):
         "PROMPT:\n"
         "[Prompt tiếng Anh cực kỳ chi tiết: loại cảnh, góc quay, ánh sáng, chuyển động camera, chất lượng ARRI Alexa 35, 4k, no text, no watermark]\n\n"
         "🎙️ Hội thoại tiếng Việt:\n"
-        "[Tên nhân vật]: \"[Lời thoại tiếng Việt]\"\n\n"
-        "2. Không giải thích dông dài, trả về trực tiếp nội dung kịch bản phân cảnh."
+        "[Tên nhân vật] [nguồn tiếng]: \"[Lời thoại tiếng Việt]\"\n\n"
+        "2. Nguồn tiếng là on_screen, offscreen, radio, phone, speaker hoặc thought. "
+        "Dùng 'Người kể chuyện [offscreen]' cho lời kể. Giữ đúng người, lời và thứ tự. "
+        "Chỉ người đang nói trực tiếp mới mấp máy môi. Dùng cảnh phản ứng im lặng khi nghe giọng ngoài hình.\n"
+        "3. Không giải thích dông dài, trả về trực tiếp nội dung kịch bản phân cảnh."
     )
 
     try:
@@ -5249,6 +5279,10 @@ async def auto_enhance_prompt(prompt: str, size: str = "16:9") -> str:
     raw = prompt.strip()
     if not raw:
         return raw
+    if any(mark in raw for mark in ('"', "“", "”", "«", "»")) or re.search(
+        r"\b(?:dialogue|voice[ -]?over|lời thoại|lời kể|độc thoại)\s*:", raw, re.I
+    ):
+        return raw
 
     # Nếu đã là prompt tiếng Anh chi tiết, giữ nguyên
     if not has_vietnamese(raw) and len(raw.split()) >= 12 and any(k in raw.lower() for k in ("cinematic", "masterpiece", "shot", "lighting", "4k")):
@@ -5259,6 +5293,8 @@ async def auto_enhance_prompt(prompt: str, size: str = "16:9") -> str:
         "You are an expert Hollywood AI video prompt director. "
         "Convert the user's input (Vietnamese or short English) into a single, cohesive, vivid cinematic English video generation prompt. "
         "Include camera angle, subject actions, lighting, atmosphere, 4K resolution, photorealistic, masterpiece, no text, no watermark. "
+        "Keep any spoken words verbatim in the original language, with the same speaker and audio source. "
+        "Never turn a narrator, a thought or a voice from a device into somebody speaking in the frame. "
         "Output ONLY the final English prompt as a single paragraph. Do not include markdown or explanations."
     )
     try:
@@ -5301,6 +5337,9 @@ class QuickVideoRequest(BaseModel):
     duration: int = Field(default=5, ge=1, le=60)
     size: str = Field(default="16:9", max_length=10)
     reference_image: Optional[str] = None
+    dialogue: str = Field(default="", max_length=3000)
+    voiceover: str = Field(default="", max_length=3000)
+    muse_narrator: MuseNarratorProfile | None = None
 
 
 class EnhancePromptReq(BaseModel):
@@ -5323,6 +5362,13 @@ _quick_video_providers: Dict[str, str] = {}
 async def api_quick_video(req: QuickVideoRequest):
     """Tạo video ngắn qua kết nối Muse đang hoạt động."""
     require_muse_key()  # 503 rõ ràng nếu chưa cấu hình key
+    from batch_engine import character_block_of
+    try:
+        cast = _selected_cast(req.cast_ids)
+        speech = plan_muse_speech(req.model_dump(), cast, req.muse_narrator, freeform=True)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
     prompt_to_send = req.prompt.strip()
     # Tự động tối ưu hóa prompt nếu nhập tiếng Việt hoặc prompt quá ngắn để đảm bảo Muse AI nhận diện đúng
     if has_vietnamese(prompt_to_send) or len(prompt_to_send.split()) < 5:
@@ -5333,12 +5379,8 @@ async def api_quick_video(req: QuickVideoRequest):
         except Exception:
             pass
 
-    from batch_engine import character_block_of
-    try:
-        cast = _selected_cast(req.cast_ids)
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from error
-    for ch in cast:
+    visible_cast = [ch for ch in cast if ch["name"] not in speech.remote]
+    for ch in visible_cast:
         block = character_block_of(ch)
         if not block:
             raise HTTPException(422, f"Nhân vật {ch['name']} thiếu mô tả nhận dạng.")
@@ -5348,13 +5390,13 @@ async def api_quick_video(req: QuickVideoRequest):
         if req.visual_style not in BATCH_VISUAL_STYLES:
             raise HTTPException(422, "Phong cách không hợp lệ.")
         prompt_to_send += "\n" + BATCH_VISUAL_STYLES[req.visual_style]["prompt_suffix"]
-    if cast and not req.reference_image:
+    if visible_cast and not req.reference_image:
         from batch_video_engine import _cast_reference
-        req.reference_image, order = await asyncio.to_thread(_cast_reference, cast)
+        req.reference_image, order = await asyncio.to_thread(_cast_reference, visible_cast)
         if order:
             prompt_to_send += "\n" + order
     payload: Dict[str, Any] = {
-        "prompt": prompt_to_send,
+        "prompt": speech.append_to(prompt_to_send),
         "duration": req.duration,
         "size": req.size,
     }
@@ -6269,9 +6311,13 @@ async def import_story_url(req: StoryImportUrlRequest):
             raise ValueError(f"Link trả về HTTP {page.status_code}.")
         pages = story_engine.comic_pages(req.url, page.text)
         if pages:
+            from html import unescape
+
             if MUSE_PROVIDER != "browser" or not MUSE_API_KEY:
                 raise ValueError("Chọn Muse Browser trước khi tự động dựng truyện tranh từ ảnh.")
-            title = req.title.strip() or "Chương truyện tranh"
+            heading = re.search(r"<h1\b[^>]*>(.*?)</h1>", page.text, re.I | re.S)
+            source_title = unescape(re.sub(r"<[^>]+>", "", heading[1])).strip() if heading else ""
+            title = req.title.strip() or source_title[:200] or "Chương truyện tranh"
             scenes = [
                 {"index": index, "page_url": url, "prompt": "", "voiceover": "", "duration": 8}
                 for index, url in enumerate(pages, 1)
@@ -6281,11 +6327,12 @@ async def import_story_url(req: StoryImportUrlRequest):
                 aspect_ratio="9:16", scripts=[{"scenes": scenes}], auto_run=True,
                 extra={
                     "guided": True, "studio_source": "muse_studio", "render_mode": "ai_video",
-                    "reference_mode": "approved", "comic": True,
+                    "reference_mode": "approved", "comic": True, "comic_pages": pages,
+                    "comic_pages_done": 0,
                     "operation": {"action": "comic", "allow_stills": False, "include_subtitles": True},
                 },
             )
-            return {"message": f"Đã xếp hàng dựng phim từ {len(scenes)} trang truyện.", "video_id": items[0]["id"]}
+            return {"message": f"Đã xếp hàng tách khung và thoại từ {len(pages)} trang truyện.", "video_id": items[0]["id"]}
         text = await asyncio.to_thread(story_engine.extract_text_from_url, req.url, lambda _: page)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
