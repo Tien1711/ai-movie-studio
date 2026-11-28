@@ -490,3 +490,69 @@ def test_third_person_narration_vs_character_dialogue_separation(tmp_path):
     assert out.is_file() and out.stat().st_size > 1000
     assert composer.get_media_duration(str(out)) >= 3.0
 
+
+def test_strict_clip_timing_mode_and_fit_durations_route(tmp_path, monkeypatch):
+    """Kiểm tra timing_mode='strict_clip' khóa chặt đúng thời lượng clip (tăng tốc đọc nhẹ, không kéo dài phim)
+    và endpoint /fit-durations tự nâng mốc giây cho cảnh chưa dựng clip."""
+    # 1. strict_clip: clip 3.0s + audio 3.9s -> output khóa đúng 3.0s (không bị kéo thành 3.9s)
+    clip = tmp_path / "strict_clip.mp4"
+    audio = tmp_path / "long_voice.mp3"
+    out = tmp_path / "strict_out.mp4"
+    _make_video(clip, duration=3.0)
+    _make_audio(audio, duration=3.9)
+
+    composer.compose_scene_video(
+        str(clip),
+        str(audio),
+        str(out),
+        target_duration=3.0,
+        aspect_ratio="9:16",
+        quality="720p",
+        timing_mode="strict_clip",
+    )
+    assert out.is_file() and out.stat().st_size > 1000
+    strict_dur = composer.get_media_duration(str(out))
+    assert 2.85 <= strict_dur <= 3.15
+
+    # 2. Word timings scale đúng theo speed_factors khi tăng tốc đọc
+    fake_speech = tmp_path / "sp.mp3"
+    fake_speech.write_bytes(b"mp3")
+    Path(f"{fake_speech}.words.json").write_text(
+        json.dumps([{"word": "Chào", "start": 0.0, "end": 2.0}]), encoding="utf-8"
+    )
+    scaled = composer.collect_timeline_word_timings([str(fake_speech)], [5.0], speed_factors=[1.25])
+    assert scaled[0]["start"] == pytest.approx(5.0, abs=1e-3)
+    assert scaled[0]["end"] == pytest.approx(6.6, abs=1e-3)
+
+    # 3. POST /api/muse-studio/{vid}/fit-durations nâng cảnh 5s có thoại 7.4s -> 8s (bỏ qua cảnh đã có clip)
+    monkeypatch.setattr(batch, "BATCH_DIR", tmp_path / "batch_fit")
+    monkeypatch.setattr(batch, "QUEUE_FILE", tmp_path / "batch_fit" / "queue.json")
+    monkeypatch.setattr(batch, "QUEUE_BAK_FILE", tmp_path / "batch_fit" / "queue.bak.json")
+    batch.BATCH_DIR.mkdir(parents=True, exist_ok=True)
+    mgr = batch.BatchVideoManager()
+    monkeypatch.setattr(batch, "BATCH_MANAGER", mgr)
+    item = mgr.add_batch(
+        ["Test Fit Durations"],
+        aspect_ratio="9:16",
+        visual_style="3d_pixar",
+        voice="vi-VN-NamMinhNeural",
+        scenes_count=2,
+        scripts=[{
+            "scenes": [
+                {"index": 1, "title": "Cảnh 1", "prompt": "p1", "voiceover": "v1", "duration": 5, "speech_duration": 7.4},
+                {"index": 2, "title": "Cảnh 2", "prompt": "p2", "voiceover": "v2", "duration": 5, "speech_duration": 7.4, "clip": "already.mp4"},
+            ]
+        }],
+        auto_run=False,
+        extra={"guided": True, "render_mode": "ai_video", "studio_source": "test"},
+    )[0]
+    vid = item["id"]
+    client = TestClient(app_module.app)
+    res = client.post(f"/api/muse-studio/{vid}/fit-durations", json={"version": item["updated_at"]})
+    assert res.status_code == 200, res.text
+    assert res.json()["updated"] == 1
+    updated = mgr.get_video(vid)
+    assert updated["scenes"][0]["duration"] == 8
+    assert updated["scenes"][1]["duration"] == 5  # untouched because clip already rendered
+
+

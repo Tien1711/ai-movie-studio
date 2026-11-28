@@ -908,6 +908,8 @@ def compose_scene_video(
     smart_trim: bool = False,
     color_grade: str = "none",
     watermark_text: str = "",
+    timing_mode: str = "match_speech",
+    max_speech_speed: float = 1.35,
 ):
     """
     Ghép 1 cảnh: Kéo dài mượt (Smart Pacing slow-mo nhẹ 0.74x–1.0x khi chênh <= 35%, chỉ loop khi lệch lớn)
@@ -950,9 +952,16 @@ def compose_scene_video(
     elif audio_duration and float(audio_duration) > 0:
         aud_dur = float(audio_duration)
 
+    strict_clip = (timing_mode or "match_speech").strip().lower() == "strict_clip"
+    speech_speed = 1.0
     if target_duration and float(target_duration) > 0:
         t_dur = float(target_duration)
-        dur = max(t_dur, aud_dur) if aud_dur > 0 else t_dur
+        if strict_clip:
+            dur = t_dur
+            if has_audio and aud_dur > dur * 1.01:
+                speech_speed = min(max(1.0, float(max_speech_speed)), aud_dur / dur)
+        else:
+            dur = max(t_dur, aud_dur) if aud_dur > 0 else t_dur
     else:
         dur = max(vid_dur, aud_dur) if (vid_dur > 0 or aud_dur > 0) else 5.0
 
@@ -1045,7 +1054,16 @@ def compose_scene_video(
     loop_args = ["-stream_loop", "-1"] if use_stream_loop else []
 
     if has_audio:
-        speech_filter = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad"
+        speed_prefix = f"atempo={speech_speed:.4f}," if speech_speed > 1.005 else ""
+        fade_suffix = (
+            f",afade=t=out:st={max(0.0, dur - 0.08):.3f}:d=0.08"
+            if (strict_clip and aud_dur / max(1.0, speech_speed) > dur + 0.05)
+            else ""
+        )
+        speech_filter = (
+            f"{speed_prefix}loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100:async=1,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,apad{fade_suffix}"
+        )
         audio_mapping = ["-map", "1:a:0", "-af", speech_filter]
         if ambience_volume > 0 and check_video_has_audio(input_video):
             amb_tempo = f"atempo={1.0 / stretch_factor:.4f}," if stretch_factor > 1.005 else ""
@@ -1749,12 +1767,14 @@ def _write_karaoke_ass(srt_path: str, ass_path: str, font_size: int, alignment: 
 def collect_timeline_word_timings(
     speech_paths: List[Optional[str]],
     timeline_offsets: List[float],
+    speed_factors: Optional[List[float]] = None,
 ) -> List[Dict[str, Any]]:
     """Gom các file <speech>.words.json của từng cảnh về đúng mốc thời gian trên timeline ghép."""
     import json as _json
 
     merged: List[Dict[str, Any]] = []
-    for speech, offset in zip(speech_paths, timeline_offsets):
+    speeds = speed_factors if speed_factors and len(speed_factors) == len(speech_paths) else [1.0] * len(speech_paths)
+    for speech, offset, spd in zip(speech_paths, timeline_offsets, speeds):
         if not speech:
             continue
         sidecar = Path(f"{speech}.words.json")
@@ -1766,11 +1786,12 @@ def collect_timeline_word_timings(
             continue
         if not isinstance(rows, list):
             continue
+        inv_spd = 1.0 / max(0.5, float(spd or 1.0))
         for item in rows:
             if isinstance(item, dict) and item.get("word"):
                 merged.append({
-                    "start": round(float(offset) + float(item.get("start", 0)), 3),
-                    "end": round(float(offset) + float(item.get("end", 0)), 3),
+                    "start": round(float(offset) + float(item.get("start", 0)) * inv_spd, 3),
+                    "end": round(float(offset) + float(item.get("end", 0)) * inv_spd, 3),
                     "word": str(item["word"]),
                 })
     return merged

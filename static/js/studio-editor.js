@@ -226,6 +226,14 @@ const clipParallelModeLabels = {
   segment_parallel:
     "⚡ Song song theo phân đoạn (nhanh gấp 2–5x trên nhiều Chrome / tài khoản)",
 };
+const timingModeLabels = {
+  match_speech:
+    "Tự khớp theo lời đọc (giữ tốc độ đọc 1.0x, video kéo theo lời thoại)",
+  strict_clip:
+    "⏱️ Khóa chặt theo thời lượng clip (tăng nhẹ tốc độ đọc tối đa 1.35x, không lặp clip, đúng tổng giây)",
+  auto_expand_clip:
+    "Tự nâng thời lượng clip AI (5s → 8s/10s) cho vừa lời đọc trước khi gọi Muse",
+};
 const clipParallelNoteHtml =
   '<div class="ms-note-box">' +
   "<strong>📌 Lưu ý về chế độ dựng video song song theo phân đoạn:</strong>" +
@@ -306,6 +314,12 @@ async function chapterSettings(v) {
       '<label>Bảng màu điện ảnh (Color LUT)<select name="color_grade">' +
       options(Object.entries(colorGradeLabels), v.color_grade || "none") +
       "</select></label>" +
+      '<label>Khớp thời lượng clip & lời đọc<select name="timing_mode">' +
+      options(
+        Object.entries(timingModeLabels),
+        v.timing_mode || "match_speech",
+      ) +
+      "</select></label>" +
       '<label>Chế độ dựng video AI (Tính năng #6)<select name="clip_parallel_mode">' +
       options(
         Object.entries(clipParallelModeLabels),
@@ -350,6 +364,7 @@ async function chapterSettings(v) {
         reference_mode: data.get("reference_mode") || "chain",
         chain_fallback_mode: data.get("chain_fallback_mode") || "fallback_image",
         color_grade: data.get("color_grade") || "none",
+        timing_mode: data.get("timing_mode") || "match_speech",
         clip_parallel_mode: data.get("clip_parallel_mode") || "sequential",
         smart_pacing: data.has("smart_pacing"),
         smart_trim: data.has("smart_trim"),
@@ -995,10 +1010,29 @@ function drawGuidedBoard(board, v) {
         )
         .join("") +
       "</div>";
+  const estSpeechSec = (s) => {
+    if (Number.isFinite(Number(s.speech_duration)) && Number(s.speech_duration) > 0)
+      return { sec: Number(s.speech_duration), exact: true };
+    const vo = String(s.voiceover || "").trim();
+    const dlg = String(s.dialogue || "")
+      .split(/\r?\n/)
+      .map((l) => (l.includes(":") ? l.slice(l.indexOf(":") + 1) : l).trim())
+      .filter(Boolean)
+      .join(" ");
+    const combined = dlg && !vo.toLowerCase().includes(dlg.toLowerCase()) ? (vo + " " + dlg).trim() : vo;
+    const words = combined ? combined.split(/\s+/).length : 0;
+    return words ? { sec: Math.round((words / 2.6 + 0.4) * 10) / 10, exact: false } : null;
+  };
+  const needsDurationFit = scenes.some((s) => {
+    if (s.clip) return false;
+    const info = estSpeechSec(s);
+    return info && info.sec > Number(s.duration) + 0.35 && Number(s.duration) < 12;
+  });
   html +=
     '<div class="studio-actions">' +
     (v.comic && !done ? action("Tiếp tục dựng truyện tranh", "comic") : "") +
     (needsPortrait ? action("Vẽ ảnh nhân vật", "portraits") : "") +
+    (needsDurationFit ? action("⏱️ Khớp giây theo thoại", "fit-durations") : "") +
     (v.status === "draft" && v.studio_source && !v.workshop
       ? action("Sửa bản nháp", "draft")
       : "") +
@@ -1111,7 +1145,20 @@ function drawGuidedBoard(board, v) {
       esc(s.title || "Cảnh " + index) +
       "</strong><small>" +
       Number(s.duration) +
-      ' giây</small></div><span class="ms-badge">' +
+      " giây" +
+      (() => {
+        const sp = estSpeechSec(s);
+        if (!sp) return "";
+        const over = sp.sec - Number(s.duration);
+        const tag = " · 🎙️ " + (sp.exact ? "" : "~") + sp.sec.toFixed(1) + "s";
+        return over > 0.35
+          ? tag +
+              '<span class="ms-dur-warn" title="Lời đọc dài hơn clip; chọn Khóa chặt theo clip trong Thiết lập hoặc bấm Khớp giây theo thoại">⚠️ +' +
+              over.toFixed(1) +
+              "s</span>"
+          : tag;
+      })() +
+      '</small></div><span class="ms-badge">' +
       st +
       "</span></header>" +
       '<div class="ms-pair"><div><div class="ms-media">' +
@@ -1414,6 +1461,28 @@ async function guidedAction(v, b) {
           upload: await uploadStudioFile(data.get("file")),
         }),
     );
+  if (op === "fit-durations") {
+    b.disabled = true;
+    try {
+      const res = await editorApi(
+        "/api/muse-studio/" + encodeURIComponent(v.id) + "/fit-durations",
+        "POST",
+        { version: v.updated_at },
+      );
+      await refreshMuseBoard();
+      if (res.updated > 0)
+        showToast(
+          "Đã tự nâng thời lượng cho " +
+            res.updated +
+            " cảnh chưa dựng clip để khớp lời đọc.",
+          "success",
+        );
+      else showToast("Tất cả cảnh chưa dựng clip đã khớp thời lượng lời đọc.", "info");
+    } finally {
+      b.disabled = false;
+    }
+    return;
+  }
   if (op === "bridge") {
     b.disabled = true;
     try {

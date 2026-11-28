@@ -472,6 +472,17 @@
   border: 1px solid var(--warn-border);
   color: var(--warn-ink);
 }
+.ms-dur-warn {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-ink);
+  font-size: 10.5px;
+  font-weight: 700;
+}
 .ms-note-box {
   margin: 6px 0 10px;
   padding: 10px 12px;

@@ -458,6 +458,7 @@ class ChapterSettings(BaseModel):
     transition_sfx: bool = False
     vision_qc: bool = False
     clip_parallel_mode: Literal["sequential", "segment_parallel"] = "sequential"
+    timing_mode: Literal["match_speech", "strict_clip", "auto_expand_clip"] = "match_speech"
     watermark_text: str = Field(default="", max_length=40)
 
 
@@ -469,6 +470,14 @@ class BridgeRequest(BaseModel):
 def bridge_shots(vid: str, req: BridgeRequest):
     try:
         return wf.insert_bridge_shots(vid, req.version)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@router.post("/api/muse-studio/{vid}/fit-durations")
+def fit_durations(vid: str, req: BridgeRequest):
+    try:
+        return wf.fit_scene_durations(vid, req.version)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
 
@@ -587,6 +596,7 @@ def rebuild(vid: str):
             "transition_sfx",
             "vision_qc",
             "clip_parallel_mode",
+            "timing_mode",
             "watermark_text",
         )
         if k in v

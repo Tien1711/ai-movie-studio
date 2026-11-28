@@ -361,6 +361,7 @@ def command(vid, req):
                         "voice"
                     ):
                         s["speech"] = None
+                        s["speech_duration"] = None
                     s.update(
                         **metadata,
                         prompt=req.prompt.strip(),
@@ -1013,20 +1014,26 @@ async def produce(v, s, action, work, progress):
             if failed:
                 raise ValueError(why or "Không tạo được lời kể và thoại nhân vật.")
             # Giữ nguyên s["voiceover"] (không ghi đè lời kể ngôi thứ 3 bằng thoại nhân vật)
-            s.update(speech=speech.name, voiceover=text or dlg_joined)
+            sp_dur = round(float(await asyncio.to_thread(media.get_media_duration, str(speech)) or 0.0), 2)
+            s.update(speech=speech.name, speech_duration=sp_dur or None, voiceover=text or dlg_joined)
         else:
             _, failed, why = await media.generate_tts_with_status(
                 text, narrator_voice, str(speech)
             )
             if failed:
                 raise ValueError(why or "Không tạo được lời kể.")
-            s.update(speech=speech.name, voiceover=text)
+            sp_dur = round(float(await asyncio.to_thread(media.get_media_duration, str(speech)) or 0.0), 2)
+            s.update(speech=speech.name, speech_duration=sp_dur or None, voiceover=text)
     elif action == "clip":
         if not can_act(s, "clip"):
             raise ValueError("Ảnh chưa duyệt.")
         ref = asset_path(vid, s["frame"])
         if not ref.is_file():
             raise ValueError("Ảnh đã duyệt không còn trên đĩa.")
+        if v.get("timing_mode") == "auto_expand_clip":
+            rec_dur = recommended_clip_duration(s)
+            if rec_dur > int(s.get("duration") or 5):
+                s["duration"] = rec_dur
         clip = new_asset(vid, "mp4")
         token, source = studio_opening(v, s)
         first = str(asset_path(vid, token)) if token else None
@@ -1104,8 +1111,10 @@ def inspect_final(path):
 
 async def export(v, op, work, progress):
     vid = v["id"]
-    clips, durations, speech_sources = [], [], []
+    clips, durations, speech_sources, speed_factors = [], [], [], []
     narrated = op["action"] == "narrated"
+    timing_mode = v.get("timing_mode") or "match_speech"
+    strict_clip = timing_mode == "strict_clip"
     for s in v["scenes"]:
         if batch._BatchCancellation(vid).is_set():
             raise asyncio.CancelledError()
@@ -1113,10 +1122,14 @@ async def export(v, op, work, progress):
         progress(idx, "Chuẩn hóa cảnh để ghép phim")
         out = work / f"clip_{idx}.mp4"
         speech = None
+        speech_dur = 0.0
         if narrated:
             if not s.get("speech"):
                 await produce(v, s, "speech", work, progress)
             speech = asset_path(vid, s["speech"])
+            speech_dur = float(await asyncio.to_thread(media.get_media_duration, str(speech)) or 0.0)
+            if speech_dur > 0:
+                s["speech_duration"] = round(speech_dur, 2)
         if (
             s.get("approved")
             and s.get("clip_frame") == s.get("frame")
@@ -1129,7 +1142,7 @@ async def export(v, op, work, progress):
             and s.get("frame_approved")
             and not s.get("clip")
         ):
-            dur = max(s["duration"], media.get_media_duration(str(speech)))
+            dur = float(s["duration"]) if strict_clip else max(s["duration"], speech_dur)
             source = work / f"still_{idx}.mp4"
             if not batch._convert_image_and_audio_to_clip(
                 asset_path(vid, s["frame"]), None, dur, v["aspect_ratio"], source
@@ -1137,6 +1150,10 @@ async def export(v, op, work, progress):
                 raise ValueError(f"Lỗi dựng ảnh cảnh {idx}.")
         else:
             raise ValueError(f"Cảnh {idx} chưa được duyệt.")
+        spd = 1.0
+        if strict_clip and speech_dur > float(s["duration"]) * 1.01:
+            spd = min(1.35, speech_dur / float(s["duration"]))
+        speed_factors.append(spd)
         await asyncio.to_thread(
             composer.compose_scene_video,
             str(source),
@@ -1163,11 +1180,14 @@ async def export(v, op, work, progress):
             smart_trim=v.get("smart_trim", False),
             color_grade=v.get("color_grade", "none"),
             watermark_text=v.get("watermark_text", ""),
+            timing_mode=timing_mode,
         )
         speech_sources.append(str(speech or out))
         width, height = qc.expected_resolution_for_size(v["aspect_ratio"], "1080p")
-        target_duration = max(
-            s["duration"], media.get_media_duration(str(speech)) if speech else 0
+        target_duration = (
+            float(s["duration"])
+            if strict_clip
+            else max(s["duration"], speech_dur if speech else 0)
         )
         result = await asyncio.to_thread(
             qc.qc_clip, str(out), target_duration, width, height, composer.TARGET_FPS
@@ -1224,7 +1244,7 @@ async def export(v, op, work, progress):
             srt_scenes,
             str(srt),
             clip_durations=durations,
-            media_paths=speech_sources,
+            media_paths=None if strict_clip else speech_sources,
             timeline_offsets=offsets,
         )
     final = merged
@@ -1241,7 +1261,9 @@ async def export(v, op, work, progress):
             )
             final = with_sfx
     if narrated and include_subtitles:
-        word_timings = composer.collect_timeline_word_timings(speech_sources, offsets)
+        word_timings = composer.collect_timeline_word_timings(
+            speech_sources, offsets, speed_factors=speed_factors if strict_clip else None
+        )
         final_cap = work / "captioned.mp4"
         await asyncio.to_thread(
             composer.burn_subtitles,
@@ -1422,6 +1444,57 @@ async def produce_clip_segments(video, segments, workers, progress):
 
     await asyncio.gather(*(_run_segment(seg) for seg in segments))
     return errors
+
+
+def recommended_clip_duration(scene: dict) -> int:
+    """Tính thời lượng clip AI (5/6/8/10/12s) vừa đủ cho lời kể + thoại của cảnh để không lặp clip."""
+    measured = float(scene.get("speech_duration") or 0.0)
+    if measured > 0.3:
+        needed = measured
+    else:
+        vo = (scene.get("voiceover") or "").strip()
+        dlg = (scene.get("dialogue") or "").strip()
+        spoken_parts = [vo] if vo else []
+        if dlg:
+            dlg_words = " ".join(
+                (ln.partition(":")[2] if ":" in ln else ln).strip()
+                for ln in dlg.splitlines()
+                if ln.strip()
+            ).strip()
+            if dlg_words and dlg_words.casefold() not in vo.casefold():
+                spoken_parts.append(dlg_words)
+        words = len(" ".join(spoken_parts).split())
+        needed = (words / 2.6 + 0.4) if words else float(scene.get("duration") or 5)
+    for bucket in (5, 6, 8, 10, 12):
+        if bucket >= needed - 0.15:
+            return bucket
+    return 12
+
+
+def fit_scene_durations(vid: str, version: float) -> dict:
+    """Tự nâng duration các cảnh chưa dựng clip lên mốc 5/6/8/10/12s phù hợp với thời lượng lời đọc."""
+    with batch._QUEUE_LOCK:
+        video = batch.BATCH_MANAGER.get_video(vid)
+        if not video or not video.get("guided"):
+            raise ValueError("Không tìm thấy bản dựng.")
+        if video["status"] in BUSY or video.get("operation"):
+            raise ValueError("Bản dựng đang xử lý. Hãy chờ xong trước khi điều chỉnh thời lượng.")
+        if version != video.get("updated_at"):
+            raise ValueError("Bản dựng đã thay đổi. Hãy tải lại trước khi điều chỉnh.")
+        updated = 0
+        for s in video["scenes"]:
+            if s.get("clip"):
+                continue
+            cur = int(s.get("duration") or 5)
+            rec = recommended_clip_duration(s)
+            if rec > cur:
+                s["duration"] = rec
+                updated += 1
+        if updated:
+            batch.BATCH_MANAGER.update_video(
+                vid, {**INVALID_FINAL, "scenes": video["scenes"]}
+            )
+        return {"updated": updated, "scenes": len(video["scenes"])}
 
 
 def insert_bridge_shots(vid: str, version: float) -> dict:
