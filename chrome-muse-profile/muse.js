@@ -349,6 +349,19 @@
       const notice = all(ERR).find(node => visible(node) && !previousNotices.has(node)
         && (!node.closest(MESSAGE) || inCurrentTurn(node)));
       if (notice) return { error: notice.innerText.trim() || 'Muse báo lỗi trong tab.' };
+      if (!answers.length && activeSent) {
+        const turnBox = activeSent.closest(MESSAGE)?.parentElement || activeSent.parentElement;
+        const turnText = (turnBox?.innerText || '').toLowerCase();
+        if (
+          turnText.includes('không xác nhận là đã gửi')
+          || turnText.includes('not confirmed')
+          || turnText.includes('failed to send')
+          || turnText.includes("couldn't send")
+        ) {
+          setTimeout(() => { try { location.reload(); } catch {} }, 600);
+          return { error: 'Tab Muse bị mất kết nối ("Không xác nhận là đã gửi") — đã tự tải lại tab.' };
+        }
+      }
       const isGenerating = visible(document.querySelector(STOP));
       liveStage = (isGenerating ? 'Muse đang tạo ' : 'Đang kiểm tra kết quả ') + (kind || 'chat')
         + ' (vis=' + document.visibilityState + ', att=' + (hasAttachmentSlot ? 1 : 0) + ', src=' + (playerSource ? 1 : 0) + ')';
