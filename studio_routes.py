@@ -65,7 +65,7 @@ class Command(BaseModel):
     allow_stills: bool = False
     include_subtitles: bool = True
     max_concurrent: int = Field(default=12, ge=1, le=12)
-    clip_parallel_mode: Literal["sequential", "segment_parallel"] | None = None
+    clip_parallel_mode: Literal["sequential", "segment_parallel", "full_parallel"] | None = None
     accept_qc: bool = False
     characters: list[str] = Field(default_factory=list, max_length=30)
     dialogue: str = Field(default="", max_length=3000)
@@ -457,7 +457,7 @@ class ChapterSettings(BaseModel):
     auto_ducking: bool = True
     transition_sfx: bool = False
     vision_qc: bool = False
-    clip_parallel_mode: Literal["sequential", "segment_parallel"] = "sequential"
+    clip_parallel_mode: Literal["sequential", "segment_parallel", "full_parallel"] = "sequential"
     timing_mode: Literal["match_speech", "strict_clip", "auto_expand_clip"] = "match_speech"
     watermark_text: str = Field(default="", max_length=40)
 

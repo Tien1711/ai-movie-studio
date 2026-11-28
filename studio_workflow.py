@@ -824,6 +824,11 @@ async def draw_cast(v, progress):
 
 
 def studio_opening(video, scene):
+    clip_mode = (video.get("operation") or {}).get("clip_parallel_mode") or video.get(
+        "clip_parallel_mode", "sequential"
+    )
+    if clip_mode == "full_parallel" and scene.get("frame"):
+        return scene["frame"], "anchor"
     previous = next(
         (s for s in video["scenes"] if s["index"] == scene["index"] - 1), None
     )
@@ -1585,25 +1590,30 @@ def run(video):
             op["active"] = ["portraits"]
             manager.update_video(vid, {"operation": op})
             asyncio.run(draw_cast(video, progress))
+        clip_mode = op.get("clip_parallel_mode", video.get("clip_parallel_mode", "sequential"))
         if (
             op["action"] == "clip"
             and op["pending"]
-            and op.get("clip_parallel_mode", video.get("clip_parallel_mode", "sequential"))
-            == "segment_parallel"
+            and clip_mode in ("segment_parallel", "full_parallel")
         ):
             clip_workers = asyncio.run(image_workers(op.get("max_concurrent", 12)))
-            segments = partition_clip_segments(
-                video["scenes"],
-                op["pending"],
-                reference_mode=video.get("reference_mode", "chain"),
-            )
+            if clip_mode == "full_parallel":
+                segments = [[idx] for idx in op["pending"]]
+                step_label = f"Đang dựng song song toàn bộ {len(segments)} cảnh ({clip_workers} luồng · bỏ nối đuôi)"
+            else:
+                segments = partition_clip_segments(
+                    video["scenes"],
+                    op["pending"],
+                    reference_mode=video.get("reference_mode", "chain"),
+                )
+                step_label = f"Đang dựng song song {len(segments)} phân đoạn ({clip_workers} luồng)"
             if clip_workers > 1 and len(segments) > 1:
                 op["active"] = list(op["pending"])
                 if not manager.update_video(
                     vid,
                     {
                         "operation": op,
-                        "current_step": f"Đang dựng song song {len(segments)} phân đoạn ({clip_workers} luồng)",
+                        "current_step": step_label,
                     },
                 ):
                     return

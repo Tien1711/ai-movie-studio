@@ -556,3 +556,32 @@ def test_strict_clip_timing_mode_and_fit_durations_route(tmp_path, monkeypatch):
     assert updated["scenes"][1]["duration"] == 5  # untouched because clip already rendered
 
 
+def test_full_parallel_clip_mode_skips_tail_chaining():
+    import studio_routes
+
+    cmd = studio_routes.Command(action="clip", version=1.0, clip_parallel_mode="full_parallel")
+    assert cmd.clip_parallel_mode == "full_parallel"
+    cfg = studio_routes.ChapterSettings(
+        version=1.0,
+        voice="vi-VN-HoaiMyNeural",
+        subtitle_style="cinema",
+        subtitle_position="bottom",
+        clip_parallel_mode="full_parallel",
+    )
+    assert cfg.clip_parallel_mode == "full_parallel"
+
+    video = {
+        "id": "bv_12345678",
+        "clip_parallel_mode": "full_parallel",
+        "reference_mode": "chain",
+        "scenes": [
+            {"index": 1, "setting": "Same Room", "frame": "f1.webp", "frame_approved": True, "last_frame": "l1.jpg"},
+            {"index": 2, "setting": "Same Room", "frame": "f2.webp", "frame_approved": True},
+        ],
+    }
+    token, source = wf.studio_opening(video, video["scenes"][1])
+    assert token == "f2.webp"
+    assert source == "anchor"
+
+
+

@@ -225,6 +225,8 @@ const clipParallelModeLabels = {
   sequential: "Tuần tự toàn bộ (1 mạch nối khung cuối liên tục — an toàn nhất)",
   segment_parallel:
     "⚡ Song song theo phân đoạn (nhanh gấp 2–5x trên nhiều Chrome / tài khoản)",
+  full_parallel:
+    "🚀 Song song toàn bộ · Bỏ nối đuôi (tốc độ tối đa — mỗi cảnh dùng thẳng ảnh keyframe)",
 };
 const timingModeLabels = {
   match_speech:
@@ -236,9 +238,10 @@ const timingModeLabels = {
 };
 const clipParallelNoteHtml =
   '<div class="ms-note-box">' +
-  "<strong>📌 Lưu ý về chế độ dựng video song song theo phân đoạn:</strong>" +
+  "<strong>📌 Lưu ý về chế độ dựng video song song:</strong>" +
   "<p>• <b>Tuần tự toàn bộ (mặc định):</b> Dựng từng cảnh 1 → 2 → 3… nối khung cuối liên tiếp toàn phim, mượt tuyệt đối ngay cả khi chỉ có 1 trình duyệt.</p>" +
-  "<p>• <b>Song song theo phân đoạn:</b> Tự chia phim thành các phân đoạn độc lập tại điểm <i>Bắt đầu phân đoạn mới</i>, khi <i>đổi bối cảnh</i>, hoặc mốc neo lại mỗi 8 cảnh. Các phân đoạn chạy <b>song song trên Chrome Pool / nhiều tài khoản</b> (trong từng phân đoạn vẫn nối khung cuối tuần tự) — rút ngắn 2–5 lần thời gian mà vẫn giữ đồng nhất.</p>" +
+  "<p>• <b>Song song theo phân đoạn:</b> Tự chia phim thành các phân đoạn độc lập (khi đổi bối cảnh / mốc 8 cảnh) và chạy song song trên Chrome Pool, trong từng phân đoạn vẫn nối khung cuối tuần tự.</p>" +
+  "<p>• <b>🚀 Song song toàn bộ (Bỏ nối đuôi):</b> Không đợi khung cuối của cảnh trước — mỗi cảnh lấy thẳng ảnh keyframe đã duyệt để dựng video <b>song song tối đa tất cả trình duyệt cùng lúc</b> (nhanh gấp 3–5×, rất hợp phim dài nhiều cảnh).</p>" +
   "</div>";
 
 async function chapterSettings(v) {
