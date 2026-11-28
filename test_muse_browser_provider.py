@@ -256,3 +256,29 @@ def test_quick_video_proxy_authenticates_private_browser_video_and_forwards_rang
     assert response.content == b"ftyp"
     assert response.headers["content-range"] == "bytes 4-7/1200"
     assert muse_config.browser_media_headers("https://muse.ai" + video_path, studio.MUSE_API_URL, studio.MUSE_API_KEY) == {}
+
+
+def test_launch_muse_chrome_workers_invokes_explorer_on_bat(monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append(args)
+        return object()
+
+    monkeypatch.setattr(studio.os, "name", "nt")
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    client = TestClient(studio.app, base_url="http://127.0.0.1:8000")
+    response = client.post(
+        "/api/settings/muse/chrome-profiles/launch-workers",
+        headers={"Origin": "http://127.0.0.1:8000"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["script"] == "start_muse_browsers_silent.bat"
+    assert len(calls) == 1
+    assert calls[0][0] == "explorer.exe"
+    assert calls[0][1].endswith("start_muse_browsers_silent.bat")

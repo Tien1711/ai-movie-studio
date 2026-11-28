@@ -489,6 +489,51 @@ async function checkSelectedMuseProvider() {
   }
 }
 
+async function launchMuseChromeWorkers(btn) {
+  const buttons = [
+    document.getElementById('btnLaunchMuseWorkersTop'),
+    document.getElementById('btnLaunchMuseWorkers'),
+  ].filter(Boolean);
+  const origLabels = new Map(buttons.map(b => [b, b.textContent]));
+  buttons.forEach(b => {
+    b.disabled = true;
+    b.textContent = '⏳ Đang mở 5 Chrome...';
+  });
+  const statusEl = document.getElementById('museChromeProfileStatus');
+  if (statusEl) statusEl.textContent = 'Đang chạy start_muse_browsers_silent.bat...';
+  try {
+    const response = await apiFetch('/api/settings/muse/chrome-profiles/launch-workers', {
+      method: 'POST',
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(typeof data.detail === 'string' ? data.detail : 'Không thể mở 5 Chrome chạy nền.');
+    }
+    const msg = data.message || 'Đang mở 5 trình duyệt Muse chạy nền...';
+    if (statusEl) statusEl.textContent = msg;
+    if (typeof window.showToast === 'function') window.showToast(msg, 'info');
+    setTimeout(() => {
+      void checkApiHealth();
+      if (typeof loadMuseChromeProfiles === 'function') void loadMuseChromeProfiles();
+    }, 6000);
+    setTimeout(() => {
+      void checkApiHealth();
+      if (typeof loadMuseChromeProfiles === 'function') void loadMuseChromeProfiles();
+    }, 15000);
+  } catch (err) {
+    const errMsg = err?.message || 'Không thể chạy start_muse_browsers_silent.bat.';
+    if (statusEl) statusEl.textContent = errMsg;
+    if (typeof window.showToast === 'function') window.showToast(errMsg, 'error');
+  } finally {
+    setTimeout(() => {
+      buttons.forEach(b => {
+        b.disabled = false;
+        b.textContent = origLabels.get(b) || '⚡ Mở Chrome chạy nền';
+      });
+    }, 5000);
+  }
+}
+
 // ── Navigation ──────────────────────────────────────────────────────────
 function showPanel(name) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -528,7 +573,9 @@ async function checkApiHealth() {
     if (providerText) providerText.textContent = label;
     document.getElementById('qvProviderText').textContent = label;
 
+    const launchBtnTop = document.getElementById('btnLaunchMuseWorkersTop');
     if (data.muse2api) {
+      if (launchBtnTop) launchBtnTop.style.display = 'none';
       window.currentAccountsCount = data.accounts || 1;
       const isBrowserPool = isBrowser && data.muse_pool === true;
       bar.className = 'muse-status-bar ok';
@@ -567,6 +614,7 @@ async function checkApiHealth() {
       bar.className = 'muse-status-bar fail';
       txt.textContent = label + ': Chưa sẵn sàng';
       badge.style.display = 'none';
+      if (launchBtnTop) launchBtnTop.style.display = isBrowser ? '' : 'none';
       // Hiển thị hướng dẫn khởi động
       const settingsNote = document.getElementById('museNotRunningNote');
       if (settingsNote) settingsNote.style.display = 'block';

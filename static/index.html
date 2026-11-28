@@ -921,6 +921,7 @@
         <span class="u-fw600" id="museStatusText">Muse2API: Đang kiểm tra...</span>
         <span id="museAccountsBadge" class="muse-accounts-badge"></span>
       </div>
+      <button id="btnLaunchMuseWorkersTop" class="btn btn-ghost btn-sm" type="button" onclick="launchMuseChromeWorkers(this)" style="display:none;" title="Chạy start_muse_browsers_silent.bat để mở 5 Chrome Muse chạy nền full tốc độ">⚡ Mở Chrome chạy nền</button>
       <button id="topbarCreateBtn" class="btn btn-primary btn-sm" type="button" onclick="startMovieCreation()" title="Bắt đầu sản xuất phim (Ctrl+Enter)">🚀 Sản xuất ngay</button>
       <button class="btn btn-ghost btn-sm" onclick="showPanel('muse-studio')" title="Bàn dựng phim đạo diễn MuseStudio">🎞️ MuseStudio</button>
       <button class="btn btn-ghost btn-sm" onclick="showPanel('shot-desk')" title="Chuẩn Shot Desk Project & Review Desk">🎬 Shot Desk</button>
@@ -3350,7 +3351,8 @@
             </label>
           </div>
           <div id="museChromeProfileList" class="fx fx-g8 u-mb12" style="flex-wrap:wrap;"></div>
-          <div class="fx fx-g10 u-mb12">
+          <div class="fx fx-g10 u-mb12" style="flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="btnLaunchMuseWorkers" type="button" onclick="launchMuseChromeWorkers(this)" title="Chạy start_muse_browsers_silent.bat để mở 5 profile Chrome chạy nền">⚡ Chạy nền 5 Chrome (.bat)</button>
             <button class="btn btn-ghost btn-sm" onclick="createMuseProfilePairing()">Tạo mã ghép nối</button>
             <button class="btn btn-ghost btn-sm" onclick="loadMuseChromeProfiles()">Tải lại profile</button>
             <button class="btn btn-ghost btn-sm" id="removeMuseChromeProfileBtn" onclick="removeMuseChromeProfile()" disabled>Bỏ ghép nối</button>
@@ -3425,7 +3427,7 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════ SCRIPT ═══════ -->
-<script src="static/js/app.js?v=20261128_pool" defer></script>
+<script src="static/js/app.js?v=20261128_launch_bat" defer></script>
 <script src="static/js/muse-studio.js?v=20261126_perf" defer></script>
 <script src="static/js/studio-editor.js?v=20261128_timing_sync" defer></script>
 <script src="static/js/ui.js?v=20261126_perf" defer></script>

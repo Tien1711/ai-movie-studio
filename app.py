@@ -4912,6 +4912,26 @@ async def remove_muse_chrome_profile(profile_id: uuid.UUID, request: Request):
     return await _browser_profiles_request("DELETE", f"/{profile_id}")
 
 
+@app.post("/api/settings/muse/chrome-profiles/launch-workers")
+async def launch_muse_chrome_workers(request: Request):
+    _check_local_form_origin(request)
+    if os.name != "nt":
+        raise HTTPException(status_code=400, detail="Tính năng chạy file .bat chỉ hỗ trợ trên Windows.")
+    bat_path = (Path(__file__).resolve().parent / "start_muse_browsers_silent.bat").resolve()
+    if not bat_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Không tìm thấy {bat_path.name} trong thư mục ứng dụng.")
+    import subprocess
+    try:
+        subprocess.Popen(["explorer.exe", str(bat_path)])
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Không thể khởi chạy {bat_path.name}: {exc}")
+    return {
+        "ok": True,
+        "script": bat_path.name,
+        "message": "Đang chạy start_muse_browsers_silent.bat để mở 5 Chrome chạy nền (Studio sẽ tự mở lại sau vài giây)...",
+    }
+
+
 async def _check_muse_gateway(provider: str, url: str, key: Optional[str]):
     accounts = 0
     ready = False
