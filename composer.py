@@ -738,6 +738,7 @@ def create_srt(
     clip_durations: Optional[List[float]] = None,
     media_paths: Optional[List[str]] = None,
     timeline_offsets: Optional[List[float]] = None,
+    speed_factors: Optional[List[float]] = None,
 ) -> str:
     """
     Tạo file .srt đồng bộ chính xác 100% với âm thanh và timeline ghép video.
@@ -781,8 +782,9 @@ def create_srt(
             if media_p and os.path.exists(media_p):
                 sp_start, sp_end, total_d = detect_audio_speech_bounds(media_p)
                 if sp_end > sp_start:
-                    onset = sp_start
-                    offset = sp_end
+                    speed = speed_factors[i] if speed_factors else 1.0
+                    onset = sp_start / speed
+                    offset = sp_end / speed
 
             # Điểm bắt đầu phụ đề: Khớp chính xác thời điểm âm thanh bắt đầu xuất hiện
             sub_start = round(shot_start + onset, 3)
@@ -910,6 +912,8 @@ def compose_scene_video(
     watermark_text: str = "",
     timing_mode: str = "match_speech",
     max_speech_speed: float = 1.35,
+    normalize_dialogue: bool = False,
+    threads: int = 4,
 ):
     """
     Ghép 1 cảnh: Kéo dài mượt (Smart Pacing slow-mo nhẹ 0.74x–1.0x khi chênh <= 35%, chỉ loop khi lệch lớn)
@@ -987,7 +991,7 @@ def compose_scene_video(
 
     # Chuẩn hóa về CFR 30fps TRƯỚC scale/pad (fix lag/đứng hình)
     vf_filters.append(f"fps={TARGET_FPS}")
-    vf_filters.append(f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+    vf_filters.append(f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease:flags=bilinear,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
 
     # Đồng bộ màu & độ nét điện ảnh (Color Grade / LUT preset)
     grade_vf = (COLOR_GRADE_PRESETS.get((color_grade or "none").strip().lower()) or {}).get("vf") or ""
@@ -1011,26 +1015,10 @@ def compose_scene_video(
     if vid_dur > dur * 1.15 and (vid_dur - dur) > 0.4:
         offset = max(lead_trim, (vid_dur + lead_trim) - dur)
         tail_dur = max(0.1, (vid_dur + lead_trim) - offset)
-        print(f"[compose_scene_video] Canh bao: Video goc ({vid_dur:.2f}s) dai hon thoi luong ({dur:.2f}s). Lay {tail_dur:.2f}s doan duoi moi sinh (offset={offset:.2f}s)...")
-        _fd, trimmed_video = tempfile.mkstemp(prefix="composer_tail_", suffix=".mp4")
-        os.close(_fd)
-        try:
-            _run([
-                FFMPEG, "-y",
-                "-ss", f"{offset:.3f}", "-i", scene_video,
-                "-t", f"{tail_dur:.3f}",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                trimmed_video,
-            ], "Cắt đuôi video tích lũy")
-        except Exception:
-            try: os.remove(trimmed_video)
-            except Exception: pass
-            trimmed_video = None
-            raise
-        input_video = trimmed_video
-        seek_args = []
+        print(f"[compose_scene_video] Video gốc ({vid_dur:.2f}s) dài hơn ({dur:.2f}s) -> seek thẳng -ss {offset:.2f}s lấy {tail_dur:.2f}s đuôi (không encode 2 lần).")
+        # Input is already longer than dur, so no stream_loop needed; direct -ss avoids a full extra H.264 encode!
+        use_stream_loop = False
+        seek_args = ["-ss", f"{offset:.3f}"]
     elif lead_trim > 0 and use_stream_loop:
         _fd, trimmed_video = tempfile.mkstemp(prefix="composer_lead_", suffix=".mp4")
         os.close(_fd)
@@ -1093,7 +1081,7 @@ def compose_scene_video(
             "-vf", vf_str,
             "-c:v", "libx264", "-preset", preset, "-crf", crf,
             "-pix_fmt", "yuv420p",
-            "-threads", "4",
+            "-threads", str(max(1, int(threads))),
             "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-t", f"{dur:.3f}",
             output,
@@ -1101,6 +1089,7 @@ def compose_scene_video(
     else:
         # Chế độ không lồng tiếng (Dùng giọng & âm thanh gốc của AI):
         if check_video_has_audio(scene_video):
+            native_level = "loudnorm=I=-18:TP=-1.5:LRA=11," if normalize_dialogue else ""
             nat_tempo = f"atempo={1.0 / stretch_factor:.4f}," if stretch_factor > 1.005 else ""
             cmd = [
                 FFMPEG, "-y",
@@ -1108,11 +1097,11 @@ def compose_scene_video(
                 *loop_args, "-i", input_video,
                 "-map", "0:v:0",
                 "-map", "0:a:0",
-                "-af", f"{nat_tempo}aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
+                "-af", f"{nat_tempo}{native_level}aresample=44100:async=1,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
                 "-vf", vf_str,
                 "-c:v", "libx264", "-preset", preset, "-crf", crf,
                 "-pix_fmt", "yuv420p",
-                "-threads", "4",
+                "-threads", str(max(1, int(threads))),
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                 "-t", f"{dur:.3f}",
                 output,
@@ -1128,7 +1117,7 @@ def compose_scene_video(
                 "-vf", vf_str,
                 "-c:v", "libx264", "-preset", preset, "-crf", crf,
                 "-pix_fmt", "yuv420p",
-                "-threads", "4",
+                "-threads", str(max(1, int(threads))),
                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                 "-t", f"{dur:.3f}",
                 output,

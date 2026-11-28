@@ -216,6 +216,10 @@ def command(vid, req):
                 for s in scenes
             ):
                 raise ValueError("Hãy duyệt đủ các cảnh dùng để xuất phim.")
+            if action == "narrated" and video.get("timing_mode") == "strict_clip":
+                for s in scenes:
+                    if s.get("speech") and (s.get("speech_duration") or 0) > float(s["duration"]) * 1.35 + 0.02:
+                        raise ValueError(f"Cảnh {s['index']}: lời đọc dài {s['speech_duration']:.2f}s. Hãy tăng thời lượng hoặc chọn khớp theo lời đọc.")
         elif action == "comic":
             if not video.get("comic") or batch.active_muse_provider() != "browser":
                 raise ValueError("Chọn Muse Browser để tiếp tục dựng chương truyện tranh.")
@@ -346,6 +350,7 @@ def command(vid, req):
                         "dialogue"
                     ):
                         s["speech"] = None
+                        s["speech_duration"] = None
                     changed = any(
                         s.get(k) != val
                         for k, val in metadata.items()
@@ -1014,7 +1019,7 @@ async def produce(v, s, action, work, progress):
                 })
             combined_segments.extend(segments)
             _, failed, why = await media.generate_multi_voice_tts_with_status(
-                combined_segments, str(speech), str(work / "voices")
+                combined_segments, str(speech), str(work / f"voices_{idx}")
             )
             if failed:
                 raise ValueError(why or "Không tạo được lời kể và thoại nhân vật.")
@@ -1035,7 +1040,19 @@ async def produce(v, s, action, work, progress):
         ref = asset_path(vid, s["frame"])
         if not ref.is_file():
             raise ValueError("Ảnh đã duyệt không còn trên đĩa.")
-        if v.get("timing_mode") == "auto_expand_clip":
+        audio_mode = v.get("clip_audio_mode", "auto")
+        if audio_mode == "narrated" and (s.get("voiceover") or s.get("dialogue")):
+            if not s.get("speech") or not asset_path(vid, s["speech"]).is_file():
+                await produce(v, s, "speech", work, progress)
+            measured = await asyncio.to_thread(media.get_media_duration, str(asset_path(vid, s["speech"])))
+            if not measured:
+                raise ValueError(f"Cảnh {idx}: chưa đo được thời lượng lời đọc.")
+            s["speech_duration"] = measured
+            limit = float(s["duration"]) if v.get("timing_mode") == "strict_clip" else 12
+            if measured > limit + 0.02:
+                raise ValueError(f"Cảnh {idx}: lời đọc dài {measured:.2f}s, vượt {limit:g}s. Hãy tăng thời lượng, rút lời hoặc tách cảnh.")
+        if audio_mode != "native" and (v.get("timing_mode") == "auto_expand_clip" or
+                                       (audio_mode == "narrated" and v.get("timing_mode") != "strict_clip")):
             rec_dur = recommended_clip_duration(s)
             if rec_dur > int(s.get("duration") or 5):
                 s["duration"] = rec_dur
@@ -1064,6 +1081,9 @@ async def produce(v, s, action, work, progress):
         report = await asyncio.to_thread(
             qc.qc_clip, str(clip), expected_duration=s["duration"]
         )
+        if audio_mode == "native" and not report.get("has_audio"):
+            report["passed"] = False
+            report["issues"].append("Clip Muse thiếu track âm thanh gốc.")
         if s.get("clip"):
             s["previous_take"] = take(s)
         s.update(
@@ -1135,7 +1155,7 @@ async def export(v, op, work, progress):
             out = work / f"clip_{idx}.mp4"
             speech = None
             speech_dur = 0.0
-            if narrated:
+            if narrated and (s.get("speech") or s.get("voiceover") or s.get("dialogue")):
                 if not s.get("speech"):
                     await produce(v, s, "speech", work, progress)
                 speech = asset_path(vid, s["speech"])
@@ -1163,6 +1183,13 @@ async def export(v, op, work, progress):
                     raise ValueError(f"Lỗi dựng ảnh cảnh {idx}.")
             else:
                 raise ValueError(f"Cảnh {idx} chưa được duyệt.")
+            target_seconds = float(s["duration"])
+            if not narrated:
+                target_seconds = await asyncio.to_thread(media.get_media_duration, str(source))
+                if not target_seconds or (v.get("clip_audio_mode") == "native" and not await asyncio.to_thread(composer.check_video_has_audio, str(source))):
+                    raise ValueError(f"Cảnh {idx}: clip Muse thiếu thời lượng hoặc track âm thanh gốc. Hãy kiểm tra clip trước khi ghép.")
+            if strict_clip and speech_dur > target_seconds * 1.35 + 0.02:
+                raise ValueError(f"Cảnh {idx}: lời đọc {speech_dur:.2f}s vượt khả năng của clip {target_seconds:g}s. Hãy chọn khớp theo lời đọc hoặc rút lời trước khi xuất.")
             spd = 1.0
             if strict_clip and speech_dur > float(s["duration"]) * 1.01:
                 spd = min(1.35, speech_dur / float(s["duration"]))
@@ -1171,7 +1198,8 @@ async def export(v, op, work, progress):
                 str(source),
                 str(speech) if speech else None,
                 str(out),
-                target_duration=s["duration"],
+                target_duration=target_seconds,
+                normalize_dialogue=not narrated and bool((s.get("dialogue") or "").strip()),
                 aspect_ratio=v["aspect_ratio"],
                 quality="1080p",
                 ambience_volume=(
@@ -1193,24 +1221,27 @@ async def export(v, op, work, progress):
                 color_grade=v.get("color_grade", "none"),
                 watermark_text=v.get("watermark_text", ""),
                 timing_mode=timing_mode,
+                threads=max(1, (os.cpu_count() or 4) // max(1, prep_workers)),
             )
             target_duration = (
-                float(s["duration"])
-                if strict_clip
+                target_seconds
+                if strict_clip or not narrated
                 else max(s["duration"], speech_dur if speech else 0)
             )
-            result = await asyncio.to_thread(
-                qc.qc_clip, str(out), target_duration, width, height, composer.TARGET_FPS
-            )
-            if not result["passed"] and not s.get("qc_accepted"):
-                s.update(qc=result, approved=False)
-                batch.BATCH_MANAGER.update_video(
-                    vid, {"scenes": v["scenes"], **INVALID_FINAL}
+            already_qcd = bool((s.get("qc") or {}).get("passed") or s.get("qc_accepted"))
+            if not already_qcd:
+                result = await asyncio.to_thread(
+                    qc.qc_clip, str(out), target_duration, width, height, composer.TARGET_FPS
                 )
-                raise ValueError(
-                    f"Cảnh {idx} không đạt QC trước khi ghép: "
-                    + ", ".join(result["issues"])
-                )
+                if not result["passed"]:
+                    s.update(qc=result, approved=False)
+                    batch.BATCH_MANAGER.update_video(
+                        vid, {"scenes": v["scenes"], **INVALID_FINAL}
+                    )
+                    raise ValueError(
+                        f"Cảnh {idx} không đạt QC trước khi ghép: "
+                        + ", ".join(result["issues"])
+                    )
             out_dur = await asyncio.to_thread(media.get_media_duration, str(out))
             done_count += 1
             progress(idx, f"Đã chuẩn hóa xong {done_count}/{len(scenes)} cảnh")
@@ -1227,6 +1258,9 @@ async def export(v, op, work, progress):
         for s in v["scenes"][:-1]
     ]
     bridge_duration = 0.75 if narrated else 0.0
+    for i, scene in enumerate(scenes[:-1]):
+        if narrated and durations[i] - (scene.get("speech_duration") or 0) / speed_factors[i] < bridge_duration:
+            transitions[i] = "cut"
     offsets = composer.compute_timeline_offsets(clips, transitions, bridge_duration)
     await asyncio.to_thread(
         composer.merge_clips_advanced,
@@ -1262,7 +1296,8 @@ async def export(v, op, work, progress):
             srt_scenes,
             str(srt),
             clip_durations=durations,
-            media_paths=None if strict_clip else speech_sources,
+            media_paths=speech_sources,
+            speed_factors=speed_factors,
             timeline_offsets=offsets,
         )
     final = merged
@@ -1484,7 +1519,7 @@ def recommended_clip_duration(scene: dict) -> int:
         words = len(" ".join(spoken_parts).split())
         needed = (words / 2.6 + 0.4) if words else float(scene.get("duration") or 5)
     for bucket in (5, 6, 8, 10, 12):
-        if bucket >= needed - 0.15:
+        if bucket >= needed - 0.01:
             return bucket
     return 12
 
