@@ -128,7 +128,7 @@ async function requireBrowser(driver) {
 
 async function generate(driver, prompt, files, kind, mediaFiles, { chatTimeoutMs = 35000, chatMode = 'side' } = {}) {
   await requireBrowser(driver);
-  const timeoutMs = kind === 'video' ? 525000 : kind ? 120000 : chatTimeoutMs;
+  const timeoutMs = kind === 'video' ? 525000 : kind ? 240000 : chatTimeoutMs;
   let before = null;
   let result;
   const started = Date.now();
